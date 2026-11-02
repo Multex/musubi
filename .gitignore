@@ -1,0 +1,3 @@
+__pycache__/
+android/build/
+android/debug.keystore
