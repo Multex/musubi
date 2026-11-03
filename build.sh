@@ -6,7 +6,8 @@ cd "$(dirname "$0")/android"
 SDK=${ANDROID_HOME:-$HOME/Android/Sdk}
 TOOLS=$SDK/build-tools/34.0.0
 JAR=$SDK/platforms/android-28/android.jar
-export JAVA_HOME=/usr/lib/jvm/java-17-temurin
+# d8 crashes on newer JDKs (seen on 27), so this must point at Java 17.
+export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-17-temurin}
 export PATH="$JAVA_HOME/bin:$PATH"
 
 rm -rf build
