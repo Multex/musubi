@@ -20,6 +20,7 @@ import android.graphics.drawable.RippleDrawable;
 import android.hardware.input.InputManager;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -101,6 +102,8 @@ public class MainActivity extends Activity {
         "D-pad up", "D-pad down", "D-pad left", "D-pad right",
     };
 
+    // Added in Android 10, so the android-28 jar doesn't have the constant.
+    private static final int WIFI_MODE_FULL_LOW_LATENCY = 4;
     private static final int PORT = 9999;
     private static final int HEARTBEAT_MS = 50;
     private static final int PING_INTERVAL_MS = 1000;
@@ -203,7 +206,8 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         // Without this, Wi-Fi power saving batches packets and adds tens of milliseconds.
-        wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "padbridge");
+        wifiLock = wifi.createWifiLock(
+            Build.VERSION.SDK_INT >= 29 ? WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF, "padbridge");
         inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
         prefs = getPreferences(MODE_PRIVATE);
         orientation = getResources().getConfiguration().orientation;
