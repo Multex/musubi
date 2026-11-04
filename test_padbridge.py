@@ -2,7 +2,7 @@
 import unittest
 
 import padbridge
-from padbridge import PACKET, decode
+from padbridge import HELLO, HELLO_MAGIC, PACKET, Bridge, decode, decode_hello
 
 
 class DecodeTest(unittest.TestCase):
@@ -25,6 +25,28 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(axes, [0] * 8)
 
 
+def hello(phone=b'LM-X430', controller=b'Xbox Wireless Controller', connected=True, rtt=9):
+    return HELLO.pack(HELLO_MAGIC, connected, rtt) + phone + b'\0' + controller
+
+
+class HelloTest(unittest.TestCase):
+    def test_reads_every_field(self):
+        self.assertEqual(decode_hello(hello()), {
+            'name': 'LM-X430', 'controller': 'Xbox Wireless Controller',
+            'controller_connected': True, 'rtt': 9,
+        })
+
+    def test_rejects_other_packets(self):
+        self.assertIsNone(decode_hello(padbridge.NEUTRAL))
+        self.assertIsNone(decode_hello(bytes(padbridge.PING_SIZE)))
+        self.assertIsNone(decode_hello(HELLO_MAGIC))
+
+    def test_names_cant_carry_control_characters_or_run_on(self):
+        parsed = decode_hello(hello(phone=b'bad\x1b[31m\n\xff', controller=b'x' * 500))
+        self.assertEqual(parsed['name'], 'bad[31m�')
+        self.assertEqual(len(parsed['controller']), padbridge.MAX_NAME)
+
+
 class FakeSock:
     def __init__(self):
         self.sent = []
@@ -36,6 +58,7 @@ class FakeSock:
 class FakeUi:
     def __init__(self):
         self.syncs = 0
+        self.closed = False
 
     def write(self, *_):
         pass
@@ -43,39 +66,132 @@ class FakeUi:
     def syn(self):
         self.syncs += 1
 
+    def close(self):
+        self.closed = True
 
-class HandleTest(unittest.TestCase):
+
+class BridgeTest(unittest.TestCase):
     PHONE = ('192.168.1.10', 5000)
+    OTHER = ('192.168.1.99', 5000)
+    PRESSED = PACKET.pack(1, *[0] * 8)
 
     def setUp(self):
-        self.sock, self.ui = FakeSock(), FakeUi()
+        self.sock = FakeSock()
+        self.now = 100.0
+        self.pads = []
+        self.status_calls = 0
+        self.bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status,
+                             make_pad=self.make_pad, clock=lambda: self.now)
 
-    def run_handle(self, data, addr=PHONE, last=padbridge.NEUTRAL):
-        return padbridge.handle(self.sock, self.ui, data, addr, self.PHONE[0], last)
+    def on_status(self):
+        self.status_calls += 1
 
-    def test_echoes_pings_without_touching_the_pad(self):
+    def make_pad(self):
+        self.pads.append(FakeUi())
+        return self.pads[-1]
+
+    def test_echoes_pings_from_allowed_phones(self):
         ping = bytes(range(padbridge.PING_SIZE))
-        self.assertEqual(self.run_handle(ping), padbridge.NEUTRAL)
+        self.bridge.on_datagram(ping, self.PHONE)
         self.assertEqual(self.sock.sent, [(ping, self.PHONE)])
-        self.assertEqual(self.ui.syncs, 0)
+        self.assertEqual(self.pads, [])
 
-    def test_ignores_other_hosts(self):
-        ping = bytes(padbridge.PING_SIZE)
-        state = PACKET.pack(1, *[0] * 8)
-        self.assertEqual(self.run_handle(ping, ('192.168.1.99', 5000)), padbridge.NEUTRAL)
-        self.assertEqual(self.run_handle(state, ('192.168.1.99', 5000)), padbridge.NEUTRAL)
+    def test_unknown_phones_get_no_echo_and_no_pad_but_ask_for_approval(self):
+        self.bridge.on_datagram(hello(phone=b'SM-A125M'), self.OTHER)
+        self.bridge.on_datagram(bytes(padbridge.PING_SIZE), self.OTHER)
+        self.bridge.on_datagram(self.PRESSED, self.OTHER)
         self.assertEqual(self.sock.sent, [])
-        self.assertEqual(self.ui.syncs, 0)
+        self.assertEqual(self.pads, [])
+        self.assertEqual(self.bridge.status()['pending'], [{'ip': self.OTHER[0], 'name': 'SM-A125M'}])
+
+    def test_junk_from_strangers_isnt_a_phone(self):
+        self.bridge.on_datagram(b'junk!', self.OTHER)
+        self.assertEqual(self.bridge.status()['pending'], [])
+
+    def test_strangers_cant_grow_the_pending_list_forever(self):
+        for i in range(padbridge.MAX_PENDING + 5):
+            self.bridge.on_datagram(bytes(padbridge.PING_SIZE), (f'10.0.0.{i}', 1))
+        self.assertEqual(len(self.bridge.status()['pending']), padbridge.MAX_PENDING)
+
+    def test_a_phone_that_left_stops_asking(self):
+        self.bridge.on_datagram(hello(), self.OTHER)
+        self.now += padbridge.PHONE_TIMEOUT + 1
+        self.bridge.on_tick()
+        self.assertEqual(self.bridge.status()['pending'], [])
+
+    def test_allowing_a_pending_phone_lets_it_in(self):
+        self.bridge.on_datagram(hello(), self.OTHER)
+        self.bridge.set_allowed([self.OTHER[0]])
+        self.assertEqual(self.bridge.status()['pending'], [])
+        self.bridge.on_datagram(hello(), self.OTHER)
+        self.assertEqual(self.bridge.status()['phone']['ip'], self.OTHER[0])
+        self.assertEqual(len(self.pads), 1)
+
+    def test_removing_the_active_phone_closes_its_pad(self):
+        self.bridge.on_datagram(hello(), self.PHONE)
+        self.bridge.set_allowed([])
+        self.assertIsNone(self.bridge.status()['phone'])
+        self.assertTrue(self.pads[0].closed)
+
+    def test_pad_exists_only_while_a_controller_is_connected(self):
+        self.bridge.on_datagram(hello(connected=False), self.PHONE)
+        self.assertEqual(self.pads, [])
+        self.bridge.on_datagram(hello(), self.PHONE)
+        self.assertEqual(len(self.pads), 1)
+        self.bridge.on_datagram(hello(connected=False), self.PHONE)
+        self.assertTrue(self.pads[0].closed)
+        self.assertFalse(self.bridge.status()['pad'])
+
+    def test_new_app_never_flashes_a_pad_before_its_hello(self):
+        self.bridge.on_datagram(padbridge.NEUTRAL, self.PHONE)
+        self.bridge.on_datagram(hello(connected=False), self.PHONE)
+        self.now += padbridge.HELLO_WAIT + 1
+        self.bridge.on_tick()
+        self.assertEqual(self.pads, [])
+
+    def test_old_app_without_hello_still_gets_a_pad(self):
+        self.bridge.on_datagram(padbridge.NEUTRAL, self.PHONE)
+        self.assertEqual(self.pads, [])
+        self.now += padbridge.HELLO_WAIT
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        self.assertEqual(self.pads[0].syncs, 1)
 
     def test_applies_a_new_state_once(self):
-        state = PACKET.pack(1, *[0] * 8)
-        self.assertEqual(self.run_handle(state), state)
-        self.assertEqual(self.run_handle(state, last=state), state)
-        self.assertEqual(self.ui.syncs, 1)
+        self.bridge.on_datagram(hello(), self.PHONE)
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        self.assertEqual(self.pads[0].syncs, 1)
 
-    def test_keeps_the_last_state_after_a_malformed_packet(self):
-        self.assertEqual(self.run_handle(b'junk!'), padbridge.NEUTRAL)
-        self.assertEqual(self.ui.syncs, 0)
+    def test_malformed_state_changes_nothing(self):
+        self.bridge.on_datagram(hello(), self.PHONE)
+        self.bridge.on_datagram(b'junk!', self.PHONE)
+        self.assertEqual(self.pads[0].syncs, 0)
+
+    def test_silence_releases_buttons_then_drops_the_phone(self):
+        self.bridge.on_datagram(hello(), self.PHONE)
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        self.now += padbridge.TIMEOUT + 0.1
+        self.bridge.on_tick()
+        self.assertEqual(self.pads[0].syncs, 2)
+        self.assertFalse(self.pads[0].closed)
+        self.now += padbridge.PHONE_TIMEOUT
+        self.bridge.on_tick()
+        self.assertTrue(self.pads[0].closed)
+        self.assertIsNone(self.bridge.status()['phone'])
+
+    def test_a_second_allowed_phone_waits_its_turn(self):
+        self.bridge.set_allowed([self.PHONE[0], self.OTHER[0]])
+        self.bridge.on_datagram(hello(), self.PHONE)
+        self.bridge.on_datagram(self.PRESSED, self.OTHER)
+        self.assertEqual(self.bridge.status()['phone']['ip'], self.PHONE[0])
+        self.assertEqual(self.pads[0].syncs, 0)
+
+    def test_a_pad_error_is_reported_instead_of_crashing(self):
+        def denied():
+            raise PermissionError('no access to /dev/uinput')
+        bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status, make_pad=denied, clock=lambda: self.now)
+        bridge.on_datagram(hello(), self.PHONE)
+        self.assertIn('uinput', bridge.status()['pad_error'])
 
 
 if __name__ == '__main__':

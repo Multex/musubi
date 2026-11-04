@@ -56,6 +56,7 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -108,6 +109,8 @@ public class MainActivity extends Activity {
     private static final int HEARTBEAT_MS = 50;
     private static final int PING_INTERVAL_MS = 1000;
     private static final int PING_SIZE = 8;
+    private static final byte[] HELLO_MAGIC = {'P', 'B', 'H', 'I'};
+    private static final int MAX_NAME_LENGTH = 64;
     // Long enough that one lost ping doesn't flash an error at someone mid-game.
     private static final int PC_TIMEOUT_MS = 3000;
     private static final int STICK_MAX = 32767;
@@ -159,7 +162,7 @@ public class MainActivity extends Activity {
     private boolean autoGameMode;
 
     private int deviceId = -1;
-    private String deviceName;
+    private volatile String deviceName;
     private String descriptor;
     private int stickXAxis = MotionEvent.AXIS_Z, stickYAxis = MotionEvent.AXIS_RZ;
     private ButtonMap map = defaultMap();
@@ -300,14 +303,17 @@ public class MainActivity extends Activity {
                 }
                 packet.setAddress(address);
                 try {
-                    socket.send(packet);
                     long now = SystemClock.uptimeMillis();
                     if (now >= nextPing) {
                         nextPing = now + PING_INTERVAL_MS;
+                        // Before the state, so the PC knows about the controller before any input.
+                        byte[] hello = helloPacket();
+                        socket.send(new DatagramPacket(hello, hello.length, address, PORT));
                         ByteBuffer.wrap(ping).putLong(System.nanoTime());
                         pingPacket.setAddress(address);
                         socket.send(pingPacket);
                     }
+                    socket.send(packet);
                     networkError = null;
                 } catch (IOException ex) {
                     networkError = ex.getMessage();
@@ -318,6 +324,23 @@ public class MainActivity extends Activity {
             networkError = ex.getMessage();
         } catch (InterruptedException ignored) {
         }
+    }
+
+    /** Tells the PC who this phone is, matching HELLO in padbridge.py. */
+    private byte[] helloPacket() {
+        String controller = deviceName;
+        byte[] names = (shorten(Build.MODEL) + "\0" + shorten(controller != null ? controller : ""))
+            .getBytes(StandardCharsets.UTF_8);
+        ByteBuffer out = ByteBuffer.allocate(HELLO_MAGIC.length + 3 + names.length);
+        out.put(HELLO_MAGIC);
+        out.put((byte) (controller != null ? 1 : 0));
+        out.putShort((short) Math.min(rttMs, 65535));
+        out.put(names);
+        return out.array();
+    }
+
+    private static String shorten(String name) {
+        return name.length() > MAX_NAME_LENGTH ? name.substring(0, MAX_NAME_LENGTH) : name;
     }
 
     private void pongLoop(DatagramSocket socket) {
@@ -776,7 +799,7 @@ public class MainActivity extends Activity {
         String error = networkError;
         return error != null
             ? "The phone can't send on this network: " + error
-            : "Check that padbridge.py is running on " + pc.ip + " and that the firewall lets the phone through.";
+            : "Check that padbridge is running on " + pc.ip + ", that you allowed this phone there, and that the firewall lets it through.";
     }
 
     private View controllerBlock() {
