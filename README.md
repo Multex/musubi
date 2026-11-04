@@ -8,6 +8,10 @@ Pair a Bluetooth gamepad with an Android phone, and your Linux PC gets a virtual
 gamepad  --Bluetooth-->  Android app  --UDP over Wi-Fi-->  padbridge.py  --uinput-->  game
 ```
 
+<p align="center">
+  <img src="docs/assets/main.png" alt="padbridge on a phone: a drawn controller with the right stick lit in amber, the connected controller and PC, and an 11 ms ping." width="700">
+</p>
+
 **Early stage.** Tested on one setup: an LG K40S, a BSP G6 pad and a CachyOS PC, playing Persona 5. Nobody has followed these steps on another machine yet, so please open an issue if something fails.
 
 ## What you need
@@ -68,6 +72,10 @@ Keep the app open and in front while you play. **Game mode** dims the screen and
 If you update from 0.1.0, restart `padbridge.py` with the new version too. Otherwise the app shows **PC not responding**, because the old receiver doesn't answer its pings.
 
 ## Remap
+
+<p align="center">
+  <img src="docs/assets/remap.png" alt="The remap setup on step 1 of 16: the A button is highlighted on the drawing, with Back, Skip and Cancel buttons beside it." width="700">
+</p>
 
 Tap **Remap** and press each button as the app asks, or tap **Skip** for the ones your pad doesn't have. You can try the layout before saving it. Each controller keeps its own layout, and **Reset** goes back to the default. Sticks can't be remapped.
 
