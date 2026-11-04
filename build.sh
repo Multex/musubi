@@ -11,11 +11,14 @@ export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-17-temurin}
 export PATH="$JAVA_HOME/bin:$PATH"
 
 rm -rf build
-mkdir -p build/classes
-javac -source 8 -target 8 -Xlint:-options -cp "$JAR" -d build/classes MainActivity.java
+mkdir -p build/classes build/test
+javac -d build/test ButtonMap.java test/ButtonMapTest.java
+java -ea -cp build/test padbridge.app.ButtonMapTest
+javac -source 8 -target 8 -Xlint:-options -cp "$JAR" -d build/classes ./*.java
 "$TOOLS/d8" --lib "$JAR" --min-api 21 --output build build/classes/padbridge/app/*.class
+"$TOOLS/aapt2" compile --dir res -o build/res.zip
 "$TOOLS/aapt2" link -I "$JAR" --manifest AndroidManifest.xml \
-    --min-sdk-version 21 --target-sdk-version 28 -o build/unsigned.apk
+    --min-sdk-version 21 --target-sdk-version 28 -o build/unsigned.apk build/res.zip
 (cd build && "$TOOLS/aapt" add unsigned.apk classes.dex >/dev/null)
 "$TOOLS/zipalign" -f 4 build/unsigned.apk build/aligned.apk
 

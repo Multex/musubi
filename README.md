@@ -60,17 +60,23 @@ Use your phone's IP here too. Packets from any other address are ignored. To fin
 1. Download `padbridge.apk` from [Releases](https://github.com/Multex/padbridge/releases/latest) on the phone and install it. Android will ask you to allow installs from that source, and you can turn that off again afterwards.
 2. Disconnect the pad from the PC if it is plugged in, because some pads stay in USB mode.
 3. Put the pad in pairing mode and pair it in the phone's Bluetooth settings. The button combination depends on the pad, so check its manual.
-4. Open padbridge and type your PC's IP in the **IP de la PC** field. The app is in Spanish for now. It should show `Enviando a <IP>:9999`.
-5. Press a button. Its name appears on the phone, and the virtual pad reacts on the PC.
+4. Open padbridge, type your PC's IP in **PC IP address** and tap **Save PC**. After a moment, the app should show the PC with its ping in milliseconds.
+5. Press a button. It lights up on the drawing, and the virtual pad reacts on the PC.
 
-Keep the app open and in front while you play.
+Keep the app open and in front while you play. **Game mode** dims the screen and stops drawing the controller, and it turns on by itself after 1 minute without touching the screen. You can turn that off in **Settings**.
+
+If you update from 0.1.0, restart `padbridge.py` with the new version too. Otherwise the app shows **PC not responding**, because the old receiver doesn't answer its pings.
+
+## Remap
+
+Tap **Remap** and press each button as the app asks, or tap **Skip** for the ones your pad doesn't have. You can try the layout before saving it. Each controller keeps its own layout, and **Reset** goes back to the default. Sticks can't be remapped.
 
 ## Limits
 
 - **The app must stay in the foreground.** If you leave it, the phone stops sending and the PC releases every button after half a second. The app keeps the screen on while it is open.
 - **One pad at a time.** Two pads paired with the phone would be merged into one.
-- **No rumble.** Data only travels from the phone to the PC.
-- **The guide button may not arrive,** because Android can keep it for itself.
+- **No rumble.** The PC only answers the app's pings, and nothing travels back to the pad.
+- **The guide button can't be remapped,** and it may not arrive at all, because Android can keep it for itself.
 - **Use it only on a network you trust.** Packets are not encrypted or authenticated. Someone on your network who fakes the phone's address could press buttons in your game.
 
 ## Latency
@@ -87,8 +93,8 @@ Persona 5 plays fine, but it is turn-based. I can't vouch for rhythm or fighting
 | --- | --- |
 | The game doesn't see the pad | Start `padbridge.py` first, then restart the game. |
 | The game sees two pads | Your real pad is still connected to the PC. Disconnect it. |
-| The app says it is sending, but the PC gets nothing | Check the firewall rule and the phone's IP. Some routers also block Wi-Fi devices from reaching wired ones. |
-| A button shows `(sin asignar)` in the app | Your pad sends a key padbridge doesn't map yet. Add it to `BUTTON_KEYS` in `android/MainActivity.java`, or open an issue with the name the app shows. |
+| The app says **PC not responding** | Check that `padbridge.py` is running, then check the firewall rule and the phone's IP. Some routers also block Wi-Fi devices from reaching wired ones. |
+| A button shows `(not mapped)` in the app | Your pad sends a key padbridge doesn't know yet. Use **Remap** to assign it. |
 | The receiver prints `link lost` | The phone stopped sending. Check that the app is still in front and that the phone is on Wi-Fi. |
 
 ### uinput permissions
@@ -115,6 +121,8 @@ Any program you run can then create virtual input devices, so remove the rule if
 
 Each packet is 20 bytes and holds the whole pad state: 11 button bits, then 8 axes (`!I8h` in `padbridge.py`). The app sends one on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases everything.
 
+Once a second the app also sends an 8-byte ping, and the receiver echoes it back. That is how the app knows the PC is answering and what the round trip takes.
+
 The virtual pad uses the same IDs and layout as the kernel's `xpad` driver, so games map it as an Xbox 360 pad.
 
 ## Build the app
@@ -127,7 +135,7 @@ The virtual pad uses the same IDs and layout as the kernel's `xpad` driver, so g
 
 The result is `android/build/padbridge.apk`. The first build creates `android/debug.keystore`, which stays out of git. Keep that file: Android refuses updates signed with a different key.
 
-Run the tests with:
+`build.sh` also runs the button map test. Run the receiver tests with:
 
 ```sh
 python3 test_padbridge.py

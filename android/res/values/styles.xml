@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="background">#0D0C0A</color>
+    <style name="Theme.Padbridge" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#E6DEC8</item>
+        <item name="android:colorPrimary">#0D0C0A</item>
+        <item name="android:colorPrimaryDark">#0D0C0A</item>
+        <item name="android:colorBackground">#0D0C0A</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:statusBarColor">#0D0C0A</item>
+        <item name="android:navigationBarColor">#0D0C0A</item>
+        <item name="android:alertDialogTheme">@style/Theme.Padbridge.Dialog</item>
+    </style>
+    <style name="Theme.Padbridge.Dialog" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#E6DEC8</item>
+        <item name="android:colorBackground">#171512</item>
+    </style>
+</resources>

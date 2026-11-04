@@ -15,6 +15,8 @@ TIMEOUT = 0.5
 # shortcut: no sequence number, a reordered packet glitches until the next one, add it if jitter shows up.
 PACKET = struct.Struct('!I8h')
 NEUTRAL = PACKET.pack(0, *[0] * 8)
+# The app times the echo of these to tell whether the PC is answering.
+PING_SIZE = 8
 
 # Bit order matches BUTTON_KEYS in MainActivity.java.
 BUTTONS = [
@@ -48,6 +50,25 @@ def apply(ui, state):
     ui.syn()
 
 
+def handle(sock, ui, data, addr, phone_ip, last):
+    """Process one datagram and return the packet now applied to the pad."""
+    if addr[0] != phone_ip:
+        return last
+    if len(data) == PING_SIZE:
+        try:
+            sock.sendto(data, addr)
+        except OSError:
+            pass  # A failed echo must never take the pad down mid-game.
+        return last
+    if data == last:
+        return last
+    state = decode(data)
+    if state is None:
+        return last
+    apply(ui, state)
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('phone_ip', help='only packets from this address are accepted')
@@ -67,13 +88,8 @@ def main():
                     apply(ui, decode(NEUTRAL))
                     last = NEUTRAL
                 continue
-            data, (host, _) = sock.recvfrom(64)
-            if host != args.phone_ip or data == last:
-                continue
-            state = decode(data)
-            if state:
-                apply(ui, state)
-                last = data
+            data, addr = sock.recvfrom(64)
+            last = handle(sock, ui, data, addr, args.phone_ip, last)
 
 
 if __name__ == '__main__':

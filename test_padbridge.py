@@ -25,5 +25,58 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(axes, [0] * 8)
 
 
+class FakeSock:
+    def __init__(self):
+        self.sent = []
+
+    def sendto(self, data, addr):
+        self.sent.append((data, addr))
+
+
+class FakeUi:
+    def __init__(self):
+        self.syncs = 0
+
+    def write(self, *_):
+        pass
+
+    def syn(self):
+        self.syncs += 1
+
+
+class HandleTest(unittest.TestCase):
+    PHONE = ('192.168.1.10', 5000)
+
+    def setUp(self):
+        self.sock, self.ui = FakeSock(), FakeUi()
+
+    def run_handle(self, data, addr=PHONE, last=padbridge.NEUTRAL):
+        return padbridge.handle(self.sock, self.ui, data, addr, self.PHONE[0], last)
+
+    def test_echoes_pings_without_touching_the_pad(self):
+        ping = bytes(range(padbridge.PING_SIZE))
+        self.assertEqual(self.run_handle(ping), padbridge.NEUTRAL)
+        self.assertEqual(self.sock.sent, [(ping, self.PHONE)])
+        self.assertEqual(self.ui.syncs, 0)
+
+    def test_ignores_other_hosts(self):
+        ping = bytes(padbridge.PING_SIZE)
+        state = PACKET.pack(1, *[0] * 8)
+        self.assertEqual(self.run_handle(ping, ('192.168.1.99', 5000)), padbridge.NEUTRAL)
+        self.assertEqual(self.run_handle(state, ('192.168.1.99', 5000)), padbridge.NEUTRAL)
+        self.assertEqual(self.sock.sent, [])
+        self.assertEqual(self.ui.syncs, 0)
+
+    def test_applies_a_new_state_once(self):
+        state = PACKET.pack(1, *[0] * 8)
+        self.assertEqual(self.run_handle(state), state)
+        self.assertEqual(self.run_handle(state, last=state), state)
+        self.assertEqual(self.ui.syncs, 1)
+
+    def test_keeps_the_last_state_after_a_malformed_packet(self):
+        self.assertEqual(self.run_handle(b'junk!'), padbridge.NEUTRAL)
+        self.assertEqual(self.ui.syncs, 0)
+
+
 if __name__ == '__main__':
     unittest.main()
