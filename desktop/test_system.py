@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from padbridge_system import (blocked_sources, covers, default_network, load_config, save_config,
-                              ufw_allowed_sources, ufw_enabled)
+from system import (blocked_sources, covers, default_network, load_config, save_config,
+                    ufw_allowed_sources, ufw_enabled)
 
 RULES = """
 ### tuple ### allow udp 9999 0.0.0.0/0 any 192.168.1.10 in

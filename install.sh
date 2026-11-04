@@ -9,7 +9,7 @@ cat > "$apps/padbridge.desktop" <<EOF
 Type=Application
 Name=padbridge
 Comment=Use a Bluetooth gamepad paired with your phone on this PC
-Exec=python3 "$dir/padbridge_gui.py"
+Exec=python3 "$dir/desktop/gui.py"
 Icon=input-gaming
 Categories=Game;Utility;
 StartupWMClass=io.github.multex.padbridge

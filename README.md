@@ -73,7 +73,7 @@ sudo ufw allow from 192.168.1.10 to any port 9999 proto udp
 ```
 
 ```sh
-python3 padbridge.py 192.168.1.10
+python3 desktop/padbridge.py 192.168.1.10
 ```
 
 ## Desktop app
@@ -141,7 +141,7 @@ Any program you run can then create virtual input devices, so remove the rule if
 
 ## How it works
 
-Each packet is 20 bytes and holds the whole pad state: 11 button bits, then 8 axes (`!I8h` in `padbridge.py`). The app sends one on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases everything.
+Each packet is 20 bytes and holds the whole pad state: 11 button bits, then 8 axes (`!I8h` in `desktop/padbridge.py`). The app sends one on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases everything.
 
 Once a second the app also sends an 8-byte ping, and the receiver echoes it back to allowed phones. That is how the app knows the PC is answering and what the round trip takes. It also sends a hello packet with the phone's model, the controller's name and that ping time, which the desktop app shows.
 
@@ -162,11 +162,11 @@ The result is `android/build/padbridge.apk`. The first build creates `android/de
 `build.sh` also runs the button map test. Run the PC tests with:
 
 ```sh
-python3 test_padbridge.py
+python3 desktop/test_padbridge.py
 ```
 
 ```sh
-python3 test_padbridge_system.py
+python3 desktop/test_system.py
 ```
 
 ## License

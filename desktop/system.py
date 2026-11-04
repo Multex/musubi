@@ -12,7 +12,7 @@ CONFIG_DIR = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
 CONFIG_FILE = CONFIG_DIR / 'padbridge' / 'config.json'
 UNIT_NAME = 'padbridge-desktop.service'
 UNIT_FILE = CONFIG_DIR / 'systemd' / 'user' / UNIT_NAME
-GUI_SCRIPT = Path(__file__).resolve().parent / 'padbridge_gui.py'
+GUI_SCRIPT = Path(__file__).resolve().parent / 'gui.py'
 UFW_RULES = Path('/etc/ufw/user.rules')
 UFW_CONF = Path('/etc/ufw/ufw.conf')
 

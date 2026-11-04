@@ -291,7 +291,7 @@ def write_event(fd, event):
 
 
 def run_service():
-    """Backend for padbridge_gui.py: commands on stdin, one JSON event per line on stdout."""
+    """Backend for gui.py: commands on stdin, one JSON event per line on stdout."""
     out = sys.stdout.fileno()
     os.set_blocking(out, False)
     try:
@@ -362,7 +362,7 @@ def main():
     elif args.phone_ip:
         run_console(args.phone_ip)
     else:
-        parser.error('give the phone IP, or use padbridge_gui.py')
+        parser.error('give the phone IP, or use gui.py')
 
 
 if __name__ == '__main__':
