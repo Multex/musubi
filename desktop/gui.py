@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Desktop window for padbridge. The receiver runs in its own process so drawing can't delay the pad."""
+"""Desktop window for Musubi. The receiver runs in its own process so drawing can't delay the pad."""
 import json
 import math
 import os
@@ -22,8 +22,8 @@ import system  # noqa: E402
 from tray import Tray, tray_available  # noqa: E402
 
 VERSION = '0.3.0'
-REPO = 'https://github.com/Multex/padbridge'
-RECEIVER = Path(__file__).resolve().parent / 'padbridge.py'
+REPO = 'https://github.com/Multex/musubi'
+RECEIVER = Path(__file__).resolve().parent / 'musubi.py'
 BUTTON_NAMES = ['A', 'B', 'X', 'Y', 'L1', 'R1', 'Select', 'Start', 'Guide', 'L3', 'R3']
 A, B, X, Y, L1, R1, SELECT, START, _, L3, R3 = range(11)
 STICK_MAX = 32767
@@ -296,7 +296,7 @@ def block(caption, value, detail=None, detail_css='detail', divided=False):
 
 class App(Gtk.Application):
     def __init__(self, hidden):
-        super().__init__(application_id='io.github.multex.padbridge')
+        super().__init__(application_id='io.github.multex.musubi')
         self.start_hidden = hidden
         self.window = None
         self.process = None
@@ -351,7 +351,7 @@ class App(Gtk.Application):
 
     def build_window(self):
         # A fixed size also makes tiling window managers float it, instead of stretching it across the screen.
-        self.window = Gtk.ApplicationWindow(application=self, title='padbridge', default_width=WINDOW_WIDTH,
+        self.window = Gtk.ApplicationWindow(application=self, title='Musubi', default_width=WINDOW_WIDTH,
                                             default_height=WINDOW_HEIGHT, resizable=False)
         self.window.connect('close-request', self.on_close)
         self.window.add_css_class('root')
@@ -488,12 +488,12 @@ class App(Gtk.Application):
     def tray_text(self):
         phone = self.status['phone']
         if self.error:
-            return 'padbridge: error'
+            return 'Musubi: error'
         if self.stopped:
-            return 'padbridge: stopped'
+            return 'Musubi: stopped'
         if self.pending_phones():
-            return 'padbridge: a new phone is asking'
-        return f'padbridge: {self.phone_name(phone)}' if phone else 'padbridge: waiting for a phone'
+            return 'Musubi: a new phone is asking'
+        return f'Musubi: {self.phone_name(phone)}' if phone else 'Musubi: waiting for a phone'
 
     @staticmethod
     def phone_line(phone):
@@ -527,19 +527,19 @@ class App(Gtk.Application):
         self.panel.append(pair(button('Settings', self.open_settings), button('Stop', self.on_stop)))
 
     def panel_error(self):
-        heading = text("padbridge can't run", 'title', wrap=True)
+        heading = text("Musubi can't run", 'title', wrap=True)
         heading.add_css_class('alert')
         self.panel.append(heading)
         message = self.error
         if 'in use' in message:
-            message = 'Another program is using UDP port 9999. It may be padbridge.py running in a terminal.'
+            message = 'Another program is using UDP port 9999. It may be musubi.py running in a terminal.'
         self.panel.append(text(message, 'body', wrap=True))
         self.panel.append(spacer())
         self.panel.append(button('Try again', self.on_start, 'primary'))
 
     def panel_stopped(self):
         self.panel.append(spacer())
-        for line in (text('padbridge is stopped', 'title', wrap=True),
+        for line in (text('Musubi is stopped', 'title', wrap=True),
                      text("Phones can't connect until you start it again.", 'body', wrap=True)):
             line.set_xalign(0.5)
             line.set_justify(Gtk.Justification.CENTER)
@@ -552,7 +552,7 @@ class App(Gtk.Application):
     def panel_waiting(self):
         self.panel.append(text('Waiting for a phone', 'title', wrap=True))
         if self.local_ip:
-            self.panel.append(text("Open padbridge on your phone and enter this PC's address:", 'body', wrap=True))
+            self.panel.append(text("Open Musubi on your phone and enter this PC's address:", 'body', wrap=True))
             self.panel.append(text(self.local_ip, 'address'))
         else:
             self.panel.append(text('This PC has no local network right now. Connect it to the same network as your phone.',
@@ -611,12 +611,12 @@ class App(Gtk.Application):
         self.panel.append(heading)
         self.panel.set_spacing(8)
         if self.network:
-            self.panel.append(text(f'padbridge can open UDP port {system.PORT} for devices on your network. '
+            self.panel.append(text(f'Musubi can open UDP port {system.PORT} for devices on your network. '
                                    'Your PC will ask for your password once.', 'body', wrap=True))
             self.panel.append(text(self.network, 'mono'))
             self.panel.append(text('New phones still need your approval here.', 'detail', wrap=True))
         else:
-            self.panel.append(text("padbridge can't tell which network to open. Check your connection.", 'body', wrap=True))
+            self.panel.append(text("Musubi can't tell which network to open. Check your connection.", 'body', wrap=True))
         self.append_firewall_message(self.panel)
         self.panel.append(spacer())
         if self.network:
@@ -773,7 +773,7 @@ class App(Gtk.Application):
             message.add_css_class('alert')
             left.append(message)
         if self.has_tray:
-            left.append(self.setting_switch('Keep running in the tray', 'Closing the window keeps padbridge on',
+            left.append(self.setting_switch('Keep running in the tray', 'Closing the window keeps Musubi on',
                                             self.config['tray'], self.on_tray_setting))
         divider = text('Firewall', 'caption')
         divider.add_css_class('divider')
@@ -803,7 +803,7 @@ class App(Gtk.Application):
         right.append(self.link('Setup guide', f'{REPO}#setup'))
         right.append(self.link('Source code', REPO))
         right.append(spacer())
-        right.append(text(f'padbridge {VERSION} · MIT license', 'mono'))
+        right.append(text(f'Musubi {VERSION} · MIT license', 'mono'))
 
         body = Gtk.Box(homogeneous=True)
         body.append(left)
@@ -814,7 +814,7 @@ class App(Gtk.Application):
         kind, sources = system.firewall_status()
         if kind == 'none':
             parent.append(text("ufw isn't on", 'row-title'))
-            parent.append(text(f'padbridge has nothing to open. If you use another firewall, allow UDP port {system.PORT}.',
+            parent.append(text(f'Musubi has nothing to open. If you use another firewall, allow UDP port {system.PORT}.',
                                'caption', wrap=True))
             return
         if kind == 'unknown':
@@ -873,7 +873,7 @@ class App(Gtk.Application):
         body = column(0, 'column')
         if not self.config['phones']:
             body.append(text('No phones allowed yet', 'row-title'))
-            body.append(text('When a phone connects, padbridge asks you here first.', 'caption', wrap=True))
+            body.append(text('When a phone connects, Musubi asks you here first.', 'caption', wrap=True))
         active = self.status['phone'] and self.status['phone']['ip']
         for ip, name in self.config['phones'].items():
             row = Gtk.Box(spacing=12)

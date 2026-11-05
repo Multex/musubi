@@ -86,7 +86,7 @@ def apply(ui, state):
 
 
 def make_pad():
-    return UInput({e.EV_KEY: BUTTONS, e.EV_ABS: AXES}, name='padbridge', vendor=0x045e,
+    return UInput({e.EV_KEY: BUTTONS, e.EV_ABS: AXES}, name='Musubi', vendor=0x045e,
                   product=0x028e, version=0x110, bustype=e.BUS_USB)
 
 

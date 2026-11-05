@@ -42,7 +42,7 @@ STATUS, OPEN, QUIT = 1, 2, 3
 
 
 def tray_available():
-    """Without a tray host, hiding the window would leave padbridge running with no way back to it."""
+    """Without a tray host, hiding the window would leave Musubi running with no way back to it."""
     try:
         bus = Gio.bus_get_sync(Gio.BusType.SESSION)
         reply = bus.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus',
@@ -57,7 +57,7 @@ class Tray:
     def __init__(self, on_open, on_quit):
         self.on_open = on_open
         self.on_quit = on_quit
-        self.status = 'padbridge'
+        self.status = 'Musubi'
         self.revision = 1
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
         self.bus_name = f'org.kde.StatusNotifierItem-{os.getpid()}-1'
@@ -85,13 +85,13 @@ class Tray:
     def _item_get(self, _bus, _sender, _path, _iface, name):
         values = {
             'Category': GLib.Variant('s', 'Hardware'),
-            'Id': GLib.Variant('s', 'padbridge'),
+            'Id': GLib.Variant('s', 'musubi'),
             'Title': GLib.Variant('s', self.status),
             'Status': GLib.Variant('s', 'Active'),
             'IconName': GLib.Variant('s', 'input-gaming'),
             'ItemIsMenu': GLib.Variant('b', False),
             'Menu': GLib.Variant('o', MENU_PATH),
-            'ToolTip': GLib.Variant('(sa(iiay)ss)', ('input-gaming', [], 'padbridge', self.status)),
+            'ToolTip': GLib.Variant('(sa(iiay)ss)', ('input-gaming', [], 'Musubi', self.status)),
         }
         return values.get(name)
 

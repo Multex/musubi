@@ -1,4 +1,4 @@
-package padbridge.app;
+package io.github.multex.musubi;
 
 import android.app.Activity;
 import android.app.AlertDialog;
@@ -68,7 +68,7 @@ public class MainActivity extends Activity {
     static final int BACKGROUND = 0xFF0D0C0A, SURFACE = 0xFF171512, BORDER = 0xFF332E28, IDLE = 0xFF6B6256;
     static final int TEXT = 0xFFE6DEC8, MUTED = 0xFF8F8573, ACTIVE = 0xFFFF9E1B, ALERT = 0xFFE04F3E;
 
-    // The first 11 bits match BUTTONS in padbridge.py; the rest become trigger and hat axes.
+    // The first 11 bits match BUTTONS in musubi.py; the rest become trigger and hat axes.
     static final int A_BIT = 0, B_BIT = 1, X_BIT = 2, Y_BIT = 3, L1_BIT = 4, R1_BIT = 5, SELECT_BIT = 6, START_BIT = 7;
     static final int L3_BIT = 9, R3_BIT = 10, L2_BIT = 11, R2_BIT = 12;
     static final int LEFT_BIT = 13, RIGHT_BIT = 14, UP_BIT = 15, DOWN_BIT = 16;
@@ -123,7 +123,7 @@ public class MainActivity extends Activity {
     private static final int STEP_COOLDOWN_MS = 350;
     // Sticks rarely rest at exactly zero, and this only affects what the drawing shows.
     private static final float DISPLAY_DEAD_ZONE = 0.05f;
-    private static final String REPO = "https://github.com/Multex/padbridge";
+    private static final String REPO = "https://github.com/Multex/musubi";
 
     private static final int MAIN = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5;
     private static final int CONNECTING = 0, RESPONDING = 1, LOST = 2;
@@ -210,7 +210,7 @@ public class MainActivity extends Activity {
         WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         // Without this, Wi-Fi power saving batches packets and adds tens of milliseconds.
         wifiLock = wifi.createWifiLock(
-            Build.VERSION.SDK_INT >= 29 ? WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF, "padbridge");
+            Build.VERSION.SDK_INT >= 29 ? WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF, "musubi");
         inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
         prefs = getPreferences(MODE_PRIVATE);
         orientation = getResources().getConfiguration().orientation;
@@ -226,7 +226,7 @@ public class MainActivity extends Activity {
         super.onResume();
         wifiLock.acquire();
         running = true;
-        sender = new Thread(this::sendLoop, "padbridge-sender");
+        sender = new Thread(this::sendLoop, "musubi-sender");
         sender.start();
         lastTouch = SystemClock.uptimeMillis();
         targetSince = lastTouch;
@@ -287,7 +287,7 @@ public class MainActivity extends Activity {
         pingPacket.setPort(PORT);
         long nextPing = 0;
         try (DatagramSocket socket = new DatagramSocket()) {
-            new Thread(() -> pongLoop(socket), "padbridge-pong").start();
+            new Thread(() -> pongLoop(socket), "musubi-pong").start();
             while (running) {
                 InetAddress address;
                 synchronized (lock) {
@@ -326,7 +326,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Tells the PC who this phone is, matching HELLO in padbridge.py. */
+    /** Tells the PC who this phone is, matching HELLO in musubi.py. */
     private byte[] helloPacket() {
         String controller = deviceName;
         byte[] names = (shorten(Build.MODEL) + "\0" + shorten(controller != null ? controller : ""))
@@ -799,7 +799,7 @@ public class MainActivity extends Activity {
         String error = networkError;
         return error != null
             ? "The phone can't send on this network: " + error
-            : "Check that padbridge is running on " + pc.ip + ", that you allowed this phone there, and that the firewall lets it through.";
+            : "Check that Musubi is running on " + pc.ip + ", that you allowed this phone there, and that the firewall lets it through.";
     }
 
     private View controllerBlock() {
@@ -1095,7 +1095,7 @@ public class MainActivity extends Activity {
         otherSection.addView(sectionTitle("About", true));
         otherSection.addView(link("PC setup guide", REPO + "#setup"));
         otherSection.addView(link("Source code", REPO));
-        TextView version = text("padbridge " + versionName() + " · MIT license", 12, MUTED);
+        TextView version = text("Musubi " + versionName() + " · MIT license", 12, MUTED);
         version.setTypeface(Typeface.MONOSPACE);
         version.setPadding(0, dp(8), 0, 0);
         otherSection.addView(version);

@@ -1,4 +1,4 @@
-package padbridge.app;
+package io.github.multex.musubi;
 
 import android.content.Context;
 import android.graphics.Canvas;

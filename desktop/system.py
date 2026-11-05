@@ -6,11 +6,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from padbridge import PORT
+from musubi import PORT
 
 CONFIG_DIR = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
-CONFIG_FILE = CONFIG_DIR / 'padbridge' / 'config.json'
-UNIT_NAME = 'padbridge-desktop.service'
+CONFIG_FILE = CONFIG_DIR / 'musubi' / 'config.json'
+UNIT_NAME = 'musubi-desktop.service'
 UNIT_FILE = CONFIG_DIR / 'systemd' / 'user' / UNIT_NAME
 GUI_SCRIPT = Path(__file__).resolve().parent / 'gui.py'
 UFW_RULES = Path('/etc/ufw/user.rules')
@@ -129,7 +129,7 @@ def startup_command():
 
 def autostart_unit():
     return f"""[Unit]
-Description=padbridge desktop app
+Description=Musubi desktop app
 After=graphical-session.target
 PartOf=graphical-session.target
 

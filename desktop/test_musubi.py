@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import unittest
 
-import padbridge
-from padbridge import HELLO, HELLO_MAGIC, PACKET, Bridge, decode, decode_hello
+import musubi
+from musubi import HELLO, HELLO_MAGIC, PACKET, Bridge, decode, decode_hello
 
 
 class DecodeTest(unittest.TestCase):
@@ -20,7 +20,7 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(axes, [-32767, 0, 0, 0, 255, 0, 1, -1])
 
     def test_neutral_releases_everything(self):
-        buttons, axes = decode(padbridge.NEUTRAL)
+        buttons, axes = decode(musubi.NEUTRAL)
         self.assertEqual(buttons, 0)
         self.assertEqual(axes, [0] * 8)
 
@@ -37,14 +37,14 @@ class HelloTest(unittest.TestCase):
         })
 
     def test_rejects_other_packets(self):
-        self.assertIsNone(decode_hello(padbridge.NEUTRAL))
-        self.assertIsNone(decode_hello(bytes(padbridge.PING_SIZE)))
+        self.assertIsNone(decode_hello(musubi.NEUTRAL))
+        self.assertIsNone(decode_hello(bytes(musubi.PING_SIZE)))
         self.assertIsNone(decode_hello(HELLO_MAGIC))
 
     def test_names_cant_carry_control_characters_or_run_on(self):
         parsed = decode_hello(hello(phone=b'bad\x1b[31m\n\xff', controller=b'x' * 500))
         self.assertEqual(parsed['name'], 'bad[31m�')
-        self.assertEqual(len(parsed['controller']), padbridge.MAX_NAME)
+        self.assertEqual(len(parsed['controller']), musubi.MAX_NAME)
 
 
 class FakeSock:
@@ -91,14 +91,14 @@ class BridgeTest(unittest.TestCase):
         return self.pads[-1]
 
     def test_echoes_pings_from_allowed_phones(self):
-        ping = bytes(range(padbridge.PING_SIZE))
+        ping = bytes(range(musubi.PING_SIZE))
         self.bridge.on_datagram(ping, self.PHONE)
         self.assertEqual(self.sock.sent, [(ping, self.PHONE)])
         self.assertEqual(self.pads, [])
 
     def test_unknown_phones_get_no_echo_and_no_pad_but_ask_for_approval(self):
         self.bridge.on_datagram(hello(phone=b'SM-A125M'), self.OTHER)
-        self.bridge.on_datagram(bytes(padbridge.PING_SIZE), self.OTHER)
+        self.bridge.on_datagram(bytes(musubi.PING_SIZE), self.OTHER)
         self.bridge.on_datagram(self.PRESSED, self.OTHER)
         self.assertEqual(self.sock.sent, [])
         self.assertEqual(self.pads, [])
@@ -109,13 +109,13 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.bridge.status()['pending'], [])
 
     def test_strangers_cant_grow_the_pending_list_forever(self):
-        for i in range(padbridge.MAX_PENDING + 5):
-            self.bridge.on_datagram(bytes(padbridge.PING_SIZE), (f'10.0.0.{i}', 1))
-        self.assertEqual(len(self.bridge.status()['pending']), padbridge.MAX_PENDING)
+        for i in range(musubi.MAX_PENDING + 5):
+            self.bridge.on_datagram(bytes(musubi.PING_SIZE), (f'10.0.0.{i}', 1))
+        self.assertEqual(len(self.bridge.status()['pending']), musubi.MAX_PENDING)
 
     def test_a_phone_that_left_stops_asking(self):
         self.bridge.on_datagram(hello(), self.OTHER)
-        self.now += padbridge.PHONE_TIMEOUT + 1
+        self.now += musubi.PHONE_TIMEOUT + 1
         self.bridge.on_tick()
         self.assertEqual(self.bridge.status()['pending'], [])
 
@@ -143,16 +143,16 @@ class BridgeTest(unittest.TestCase):
         self.assertFalse(self.bridge.status()['pad'])
 
     def test_new_app_never_flashes_a_pad_before_its_hello(self):
-        self.bridge.on_datagram(padbridge.NEUTRAL, self.PHONE)
+        self.bridge.on_datagram(musubi.NEUTRAL, self.PHONE)
         self.bridge.on_datagram(hello(connected=False), self.PHONE)
-        self.now += padbridge.HELLO_WAIT + 1
+        self.now += musubi.HELLO_WAIT + 1
         self.bridge.on_tick()
         self.assertEqual(self.pads, [])
 
     def test_old_app_without_hello_still_gets_a_pad(self):
-        self.bridge.on_datagram(padbridge.NEUTRAL, self.PHONE)
+        self.bridge.on_datagram(musubi.NEUTRAL, self.PHONE)
         self.assertEqual(self.pads, [])
-        self.now += padbridge.HELLO_WAIT
+        self.now += musubi.HELLO_WAIT
         self.bridge.on_datagram(self.PRESSED, self.PHONE)
         self.assertEqual(self.pads[0].syncs, 1)
 
@@ -170,11 +170,11 @@ class BridgeTest(unittest.TestCase):
     def test_silence_releases_buttons_then_drops_the_phone(self):
         self.bridge.on_datagram(hello(), self.PHONE)
         self.bridge.on_datagram(self.PRESSED, self.PHONE)
-        self.now += padbridge.TIMEOUT + 0.1
+        self.now += musubi.TIMEOUT + 0.1
         self.bridge.on_tick()
         self.assertEqual(self.pads[0].syncs, 2)
         self.assertFalse(self.pads[0].closed)
-        self.now += padbridge.PHONE_TIMEOUT
+        self.now += musubi.PHONE_TIMEOUT
         self.bridge.on_tick()
         self.assertTrue(self.pads[0].closed)
         self.assertIsNone(self.bridge.status()['phone'])

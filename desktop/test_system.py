@@ -66,7 +66,7 @@ class ConfigTest(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
-        self.path = Path(self.folder.name) / 'padbridge' / 'config.json'
+        self.path = Path(self.folder.name) / 'musubi' / 'config.json'
 
     def test_defaults_without_a_file(self):
         self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True})
