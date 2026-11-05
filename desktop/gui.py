@@ -10,8 +10,10 @@ from pathlib import Path
 
 import gi
 
-# This window draws little and may sit in the tray all day, so Vulkan's extra memory isn't worth it.
+# This window draws little and may sit in the tray all day, so GPU renderers' extra memory isn't worth it.
 os.environ.setdefault('GSK_RENDERER', 'cairo')
+# Cairo's partial redraws leave stray pixels near text that changes, like the ping.
+os.environ.setdefault('GSK_DEBUG', 'full-redraw')
 gi.require_version('Gdk', '4.0')
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
@@ -78,8 +80,9 @@ button.row:hover, button.row:active { background: none; }
 button.row:hover .link-text, button.row:hover .row-title { color: #FFFFFF; }
 button.row:active .link-text, button.row:active .row-title { color: #FF9E1B; }
 entry { min-height: 44px; background: #171512; color: #E6DEC8; border: 1px solid #6B6256; border-radius: 6px; }
-switch { background: none; border: 1px solid #6B6256; border-radius: 12px; }
-switch slider { background: #8F8573; border: none; border-radius: 9px; box-shadow: none; }
+switch { min-width: 44px; min-height: 22px; background: none; border: 1px solid #6B6256; border-radius: 12px; }
+/* Sized here because some themes, like Breeze, draw the knob bigger than the track. */
+switch slider { min-width: 18px; min-height: 18px; margin: 2px; background: #8F8573; border: none; border-radius: 9px; box-shadow: none; }
 switch:checked { background: #E6DEC8; border-color: #E6DEC8; }
 switch:checked slider { background: #0D0C0A; }
 switch image { color: transparent; }
@@ -339,6 +342,9 @@ class App(Gtk.Application):
         Gtk.Application.do_startup(self)
         provider = Gtk.CssProvider()
         provider.load_from_string(CSS)
+        # GTK's automatic mode spaces small text unevenly on non-HiDPI screens. Older GTK has no setting for it.
+        if hasattr(Gtk, 'FontRendering'):
+            Gtk.Settings.get_default().set_property('gtk-font-rendering', Gtk.FontRendering.MANUAL)
         # Above the user's gtk.css: its button and switch rules would otherwise break this palette.
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_USER + 1)
@@ -459,13 +465,16 @@ class App(Gtk.Application):
     def pending_phones(self):
         return [phone for phone in self.status['pending'] if phone['ip'] not in self.ignored]
 
+    def ignored_phones(self):
+        return [phone for phone in self.status['pending'] if phone['ip'] in self.ignored]
+
     def refresh(self):
         phone = self.status['phone']
         if not self.status['pad']:
             self.pad.set_state(0, [0] * 8)
         pending = self.pending_phones()
         firewall = bool(self.blocked) and not self.firewall_dismissed and phone is None
-        key = (self.error, self.stopped, json.dumps(pending), firewall, self.firewall_message,
+        key = (self.error, self.stopped, json.dumps(pending), json.dumps(self.ignored_phones()), firewall, self.firewall_message,
                self.status['pad'], self.status['pad_error'], self.local_ip,
                phone and (phone['ip'], self.phone_name(phone), phone['controller'], phone['controller_known']))
         if key != self.panel_key:
@@ -549,6 +558,11 @@ class App(Gtk.Application):
             self.panel.append(text('This PC has no local network right now. Connect it to the same network as your phone.',
                                    'body', wrap=True))
         self.panel.append(block('Virtual controller', 'Off', 'Turns on when a controller connects', divided=True))
+        ignored = self.ignored_phones()
+        if ignored:
+            phone = ignored[0]
+            self.panel.append(block('Ignored phone', phone['name'] or 'Unknown model', f"Wi-Fi · {phone['ip']}", 'mono', divided=True))
+            self.panel.append(button('Allow', lambda: self.allow(phone)))
         self.footer()
 
     def panel_connected(self, phone):
@@ -617,6 +631,7 @@ class App(Gtk.Application):
             parent.append(button('Copy the command', self.copy_port_command))
 
     def allow(self, phone):
+        self.ignored.discard(phone['ip'])
         self.config['phones'][phone['ip']] = phone['name'] or f"Phone at {phone['ip']}"
         self.save_config()
         self.send_allowed()
@@ -798,8 +813,9 @@ class App(Gtk.Application):
     def append_firewall_status(self, parent):
         kind, sources = system.firewall_status()
         if kind == 'none':
-            parent.append(text('No ufw firewall is on', 'row-title'))
-            parent.append(text('If you use another firewall, allow UDP port 9999.', 'caption', wrap=True))
+            parent.append(text("ufw isn't on", 'row-title'))
+            parent.append(text(f'padbridge has nothing to open. If you use another firewall, allow UDP port {system.PORT}.',
+                               'caption', wrap=True))
             return
         if kind == 'unknown':
             parent.append(text("Can't read the firewall rules", 'row-title'))

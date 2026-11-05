@@ -12,12 +12,12 @@ gamepad  --Bluetooth-->  Android app  --UDP over Wi-Fi-->  padbridge on the PC  
   <img src="docs/assets/main.png" alt="padbridge on a phone: a drawn controller with the right stick lit in amber, the connected controller and PC, and an 11 ms ping." width="700">
 </p>
 
-**Early stage.** Tested on one setup: an LG K40S, a BSP G6 pad and a CachyOS PC, playing Persona 5. Nobody has followed these steps on another machine yet, so please open an issue if something fails.
+**Early stage.** It has run on two Arch-based PCs and three Android phones, including an LG K40S and a Samsung A12. I've played Persona 5 with it on one PC using a BSP G6 pad. On the second PC I only checked the controller on a gamepad tester page. Please open an issue if something fails on your setup.
 
 ## What you need
 
 - A Linux PC with Python 3, `python-evdev` and access to `/dev/uinput`. Windows and macOS won't work, because the virtual pad depends on `uinput`. The desktop app also needs GTK 4 and PyGObject.
-- An Android phone with the app open while you play. The app declares Android 5.0 or newer, but it has only run on the K40S.
+- An Android phone with the app open while you play. The app declares Android 5.0 or newer, but it has only run on those three phones.
 - A Bluetooth gamepad that Android recognizes as a gamepad.
 - The phone and the PC on the same network.
 
@@ -78,7 +78,7 @@ python3 desktop/padbridge.py 192.168.1.10
 
 ## Desktop app
 
-- **Allowed phones:** a new phone asks for your approval once. Manage them in **Settings > Manage phones**. Phones are recognized by IP, so reserve the address in your router if you can, or the phone will ask again when it changes.
+- **Allowed phones:** a new phone asks for your approval once. Manage them in **Settings > Manage phones**. Phones are recognized by IP, so reserve the address in your router if you can, or the phone will ask again when it changes. If you ignore or remove a phone, the waiting screen offers **Allow** for as long as that phone keeps trying to connect.
 - **Virtual controller:** it only exists while a controller is connected to the phone, so games don't see a pad you can't use.
 - **Start with my PC:** this adds a systemd user service in **Settings**. It needs a desktop session that starts `graphical-session.target`. If yours doesn't, the app shows the command to add to your desktop's startup instead.
 - **Tray:** if your desktop has a tray, closing the window keeps padbridge running there. Without one, closing the window quits.
