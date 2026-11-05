@@ -66,7 +66,12 @@ class Tray:
         self.bus.register_object(MENU_PATH, Gio.DBusNodeInfo.new_for_xml(MENU_XML).interfaces[0],
                                  self._menu_call, self._menu_get, None)
         self.owner = Gio.bus_own_name_on_connection(self.bus, self.bus_name, Gio.BusNameOwnerFlags.NONE,
-                                                    self._register, None)
+                                                    self._watch, None)
+
+    def _watch(self, *_):
+        # The tray host can restart, like when the shell reloads, so register again each time its watcher appears.
+        self.watcher = Gio.bus_watch_name_on_connection(self.bus, WATCHER, Gio.BusNameWatcherFlags.NONE,
+                                                        self._register, None)
 
     def _register(self, *_):
         self.bus.call(WATCHER, '/StatusNotifierWatcher', WATCHER, 'RegisterStatusNotifierItem',
