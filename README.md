@@ -19,7 +19,7 @@ gamepad  --Bluetooth-->  Android app  --UDP over Wi-Fi-->  Musubi on the PC  --u
 - A Linux PC with Python 3, `python-evdev` and access to `/dev/uinput`. Windows and macOS won't work, because the virtual pad depends on `uinput`. The desktop app also needs GTK 4 and PyGObject.
 - An Android phone with the app open while you play. The app declares Android 5.0 or newer, but it has only run on those three phones.
 - A Bluetooth gamepad that Android recognizes as a gamepad.
-- The phone and the PC on the same network.
+- The phone and the PC on the same network, or a USB cable between them.
 
 ## Setup
 
@@ -28,7 +28,7 @@ gamepad  --Bluetooth-->  Android app  --UDP over Wi-Fi-->  Musubi on the PC  --u
 On Arch-based systems:
 
 ```sh
-sudo pacman -S --needed git python python-evdev gtk4 python-gobject python-cairo
+sudo pacman -S --needed git python python-evdev python-pyusb gtk4 python-gobject python-cairo
 ```
 
 Use the equivalent packages on other distributions. Then get the code and check that you can use `uinput`:
@@ -63,6 +63,14 @@ Open **Musubi** from your launcher. It shows the address to type on your phone. 
 Keep the app open and in front while you play. **Game mode** dims the screen and stops drawing the controller, and it turns on by itself after 1 minute without touching the screen. You can turn that off in **Settings**.
 
 Update the PC and the phone together. The desktop app still works with phone app 0.2.0, but it can't show that phone's name or controller.
+
+### Over a USB cable
+
+The cable is still being tested, and so far it has worked on one phone. Wi-Fi stays the main way to connect.
+
+Plug the phone into the PC while the desktop app is running, and set its USB mode to **File transfer** from the USB notification. Musubi then switches the phone into accessory mode, and Android asks whether to open Musubi when this accessory connects. Tick **Always** and tap **OK**. From then on, plugging in opens the app and the pad works over the cable, with no IP to type and no firewall to open. The phone charges while you play.
+
+This needs `python-pyusb` and the USB rule that `./install.sh` adds. The cable only works with the desktop app, not with `musubi.py` in a terminal.
 
 ### Without the desktop app
 
@@ -114,6 +122,7 @@ Persona 5 plays fine, but it is turn-based. I can't vouch for rhythm or fighting
 | --- | --- |
 | The game doesn't see the pad | Connect the controller to the phone first, then restart the game. |
 | The game sees two pads | Your real pad is still connected to the PC. Disconnect it. |
+| The desktop app says it **can't use** the USB cable | Install `python-pyusb`, or run `./install.sh` again so the USB rule is added, then plug the phone back in. |
 | The phone says **PC not responding** | Check that Musubi is running on the PC and that you allowed the phone, then check the firewall and the phone's IP. Some routers also block Wi-Fi devices from reaching wired ones. |
 | A button shows `(not mapped)` on the phone | Your pad sends a key Musubi doesn't know yet. Use **Remap** to assign it. |
 | The desktop app says it **can't run** | Another program is using UDP port 9999. Check that `musubi.py` isn't still running in a terminal. |
@@ -144,6 +153,8 @@ Any program you run can then create virtual input devices, so remove the rule if
 Each packet is 20 bytes and holds the whole pad state: 11 button bits, then 8 axes (`!I8h` in `desktop/musubi.py`). The app sends one on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases everything.
 
 Once a second the app also sends an 8-byte ping, and the receiver echoes it back to allowed phones. That is how the app knows the PC is answering and what the round trip takes. It also sends a hello packet with the phone's model, the controller's name and that ping time, which the desktop app shows.
+
+Over a USB cable the phone uses Android Open Accessory instead of Wi-Fi. The PC asks the phone to switch modes (`desktop/cable.py`), and then the same packets travel over USB, each one starting with its length in 2 bytes.
 
 The desktop app runs the receiver as a separate process, so drawing the window can't delay the pad.
 

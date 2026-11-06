@@ -11,6 +11,11 @@ import time
 
 from evdev import AbsInfo, UInput, ecodes as e
 
+try:
+    import cable
+except ImportError:
+    cable = None
+
 PORT = 9999
 # The app resends the state 20 times per second, so this means the link is gone.
 TIMEOUT = 0.5
@@ -32,6 +37,8 @@ HELLO_MAGIC = b'PBHI'
 MAX_DATAGRAM = 512
 MAX_NAME = 64
 MAX_PENDING = 8
+# Stands in for the IP of a phone on the USB cable.
+USB = 'usb'
 
 # Bit order matches BUTTON_KEYS in MainActivity.java.
 BUTTONS = [
@@ -135,7 +142,7 @@ class Bridge:
         for ip in self.allowed:
             self.pending.pop(ip, None)
             self.pending_seen.pop(ip, None)
-        if self.active and self.active not in self.allowed:
+        if self.active not in (None, USB) and self.active not in self.allowed:
             self._drop_phone()
         self.on_status()
 
@@ -187,16 +194,19 @@ class Bridge:
 
     def on_datagram(self, data, addr):
         ip = addr[0]
-        if ip not in self.allowed:
+        # Plugging in a cable is consent enough.
+        if ip != USB and ip not in self.allowed:
             self._note_unknown(ip, data)
             return
         now = self.clock()
-        if self.active not in (None, ip):
-            return
-        if self.active is None:
+        if self.active != ip:
+            # The cable takes over from Wi-Fi, and keeps the hello so the pad doesn't drop out meanwhile.
+            if self.active is not None and ip != USB:
+                return
+            if self.active is None:
+                self.hello = None
             self.active = ip
             self.active_since = now
-            self.hello = None
             self.on_status()
         self.last_seen = now
 
@@ -293,6 +303,7 @@ def write_event(fd, event):
 def run_service():
     """Backend for gui.py: commands on stdin, one JSON event per line on stdout."""
     out = sys.stdout.fileno()
+    stdin = sys.stdin.fileno()
     os.set_blocking(out, False)
     try:
         sock = bind_socket()
@@ -300,11 +311,14 @@ def run_service():
         write_event(out, {'event': 'error', 'message': str(ex)})
         return
 
+    link = cable.Cable() if cable else None
+    sources = [sock, stdin] + ([link.reader] if link else [])
     watching = [False]
     last_input = [0.0, None]
 
     def send_status():
-        write_event(out, {'event': 'status', **bridge.status()})
+        cable_error = link.error if link else 'Install python-pyusb to connect phones with a cable.'
+        write_event(out, {'event': 'status', **bridge.status(), 'cable_error': cable_error})
 
     def on_input(state):
         last_input[1] = state
@@ -319,14 +333,15 @@ def run_service():
         last_input[1] = None
 
     bridge = Bridge(sock, [], send_status, on_input)
-    stdin = sys.stdin.fileno()
     buffered = b''
     next_status = 0
     try:
         while True:
-            readable = select.select([sock, stdin], [], [], TICK)[0]
+            readable = select.select(sources, [], [], TICK)[0]
             if sock in readable:
                 bridge.on_datagram(*sock.recvfrom(MAX_DATAGRAM))
+            if link and link.reader in readable:
+                bridge.on_datagram(link.reader.recv(MAX_DATAGRAM), (USB, 0))
             if stdin in readable:
                 chunk = os.read(stdin, 4096)
                 if not chunk:

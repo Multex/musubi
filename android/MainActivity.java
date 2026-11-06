@@ -18,12 +18,15 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.hardware.input.InputManager;
+import android.hardware.usb.UsbAccessory;
+import android.hardware.usb.UsbManager;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
@@ -51,6 +54,8 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -111,6 +116,8 @@ public class MainActivity extends Activity {
     private static final int PING_SIZE = 8;
     private static final byte[] HELLO_MAGIC = {'P', 'B', 'H', 'I'};
     private static final int MAX_NAME_LENGTH = 64;
+    // The accessory driver drops data when a read asks for less than this.
+    private static final int USB_READ_SIZE = 16384;
     // Long enough that one lost ping doesn't flash an error at someone mid-game.
     private static final int PC_TIMEOUT_MS = 3000;
     private static final int STICK_MAX = 32767;
@@ -151,7 +158,13 @@ public class MainActivity extends Activity {
     private volatile long lastPongAt;
     private volatile long rttMs;
     private volatile String networkError;
-    private Thread sender;
+    private volatile long nextPing;
+    private volatile Thread sender;
+    private UsbManager usbManager;
+    private ParcelFileDescriptor usbFile;
+    private volatile FileOutputStream usbOut;
+    private final byte[] usbFrame = new byte[2 + 1024];
+    private final Pc usbPc = new Pc("PC on USB", "Cable");
     private WifiManager.WifiLock wifiLock;
     private InputManager inputManager;
     private SharedPreferences prefs;
@@ -212,6 +225,7 @@ public class MainActivity extends Activity {
         wifiLock = wifi.createWifiLock(
             Build.VERSION.SDK_INT >= 29 ? WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF, "musubi");
         inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         prefs = getPreferences(MODE_PRIVATE);
         orientation = getResources().getConfiguration().orientation;
         autoGameMode = prefs.getBoolean("autoGameMode", true);
@@ -230,6 +244,7 @@ public class MainActivity extends Activity {
         sender.start();
         lastTouch = SystemClock.uptimeMillis();
         targetSince = lastTouch;
+        openAccessory();
         inputManager.registerInputDeviceListener(deviceListener, handler);
         updateController();
         handler.post(tick);
@@ -248,6 +263,61 @@ public class MainActivity extends Activity {
         // The app gets no key-up events while in the background.
         axisButtons = 0;
         clearInput();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        closeAccessory();
+    }
+
+    /** Android only lists the accessory once Musubi on the PC has switched the phone over. */
+    private void openAccessory() {
+        UsbAccessory[] accessories = usbManager.getAccessoryList();
+        if (usbFile != null || accessories == null) return;
+        UsbAccessory accessory = accessories[0];
+        if (!"Musubi".equals(accessory.getManufacturer()) || !usbManager.hasPermission(accessory)) return;
+        ParcelFileDescriptor file = usbManager.openAccessory(accessory);
+        if (file == null) return;
+        usbFile = file;
+        usbOut = new FileOutputStream(file.getFileDescriptor());
+        FileInputStream in = new FileInputStream(file.getFileDescriptor());
+        new Thread(() -> usbReadLoop(file, in), "musubi-usb").start();
+        transportChanged();
+    }
+
+    private void closeAccessory() {
+        if (usbFile == null) return;
+        usbOut = null;
+        try {
+            usbFile.close();
+        } catch (IOException ignored) {
+        }
+        usbFile = null;
+        transportChanged();
+    }
+
+    private void transportChanged() {
+        nextPing = 0;
+        lastPongAt = 0;
+        targetSince = SystemClock.uptimeMillis();
+        if (screen == MAIN || screen == GAME) render();
+    }
+
+    /** The PC only sends ping echoes, one per transfer. */
+    private void usbReadLoop(ParcelFileDescriptor file, FileInputStream in) {
+        byte[] data = new byte[USB_READ_SIZE];
+        try {
+            for (int length; (length = in.read(data)) >= 0; ) {
+                if (length != PING_SIZE) continue;
+                rttMs = (System.nanoTime() - ByteBuffer.wrap(data).getLong()) / 1000000;
+                lastPongAt = SystemClock.uptimeMillis();
+            }
+        } catch (IOException unplugged) {
+        }
+        handler.post(() -> {
+            if (usbFile == file) closeAccessory();
+        });
     }
 
     @Override
@@ -285,10 +355,11 @@ public class MainActivity extends Activity {
         packet.setPort(PORT);
         DatagramPacket pingPacket = new DatagramPacket(ping, ping.length);
         pingPacket.setPort(PORT);
-        long nextPing = 0;
+        nextPing = 0;
         try (DatagramSocket socket = new DatagramSocket()) {
             new Thread(() -> pongLoop(socket), "musubi-pong").start();
-            while (running) {
+            // A USB write blocks while the PC isn't reading, so an old sender can outlive onPause.
+            while (running && sender == Thread.currentThread()) {
                 InetAddress address;
                 synchronized (lock) {
                     if (!dirty) {
@@ -298,22 +369,32 @@ public class MainActivity extends Activity {
                     fill(ByteBuffer.wrap(data));
                     address = target;
                 }
-                if (address == null) {
+                FileOutputStream usb = usbOut;
+                if (address == null && usb == null) {
                     continue;
                 }
-                packet.setAddress(address);
                 try {
                     long now = SystemClock.uptimeMillis();
                     if (now >= nextPing) {
                         nextPing = now + PING_INTERVAL_MS;
                         // Before the state, so the PC knows about the controller before any input.
                         byte[] hello = helloPacket();
-                        socket.send(new DatagramPacket(hello, hello.length, address, PORT));
                         ByteBuffer.wrap(ping).putLong(System.nanoTime());
-                        pingPacket.setAddress(address);
-                        socket.send(pingPacket);
+                        if (usb != null) {
+                            sendUsb(usb, hello);
+                            sendUsb(usb, ping);
+                        } else {
+                            socket.send(new DatagramPacket(hello, hello.length, address, PORT));
+                            pingPacket.setAddress(address);
+                            socket.send(pingPacket);
+                        }
                     }
-                    socket.send(packet);
+                    if (usb != null) {
+                        sendUsb(usb, data);
+                    } else {
+                        packet.setAddress(address);
+                        socket.send(packet);
+                    }
                     networkError = null;
                 } catch (IOException ex) {
                     networkError = ex.getMessage();
@@ -324,6 +405,14 @@ public class MainActivity extends Activity {
             networkError = ex.getMessage();
         } catch (InterruptedException ignored) {
         }
+    }
+
+    /** USB doesn't keep message boundaries, so each message starts with its length, matching cable.py. */
+    private void sendUsb(FileOutputStream usb, byte[] message) throws IOException {
+        usbFrame[0] = (byte) (message.length >> 8);
+        usbFrame[1] = (byte) message.length;
+        System.arraycopy(message, 0, usbFrame, 2, message.length);
+        usb.write(usbFrame, 0, 2 + message.length);
     }
 
     /** Tells the PC who this phone is, matching HELLO in musubi.py. */
@@ -639,13 +728,18 @@ public class MainActivity extends Activity {
         prefs.edit().putString("pcs", list.toString()).putInt("selectedPc", selectedPc).apply();
     }
 
-    private Pc currentPc() {
+    private Pc savedPc() {
         return pcs.isEmpty() ? null : pcs.get(selectedPc);
+    }
+
+    /** The cable wins over Wi-Fi while it's plugged in. */
+    private Pc currentPc() {
+        return usbOut != null ? usbPc : savedPc();
     }
 
     private void applySelectedPc() {
         InetAddress address = null;
-        Pc pc = currentPc();
+        Pc pc = savedPc();
         // The pattern guarantees a literal, so getByName never does a DNS lookup here.
         if (pc != null && Patterns.IP_ADDRESS.matcher(pc.ip).matches()) {
             try {
@@ -797,6 +891,7 @@ public class MainActivity extends Activity {
 
     private String lostMessage(Pc pc) {
         String error = networkError;
+        if (pc == usbPc) return "Check that Musubi is running on the PC this phone is plugged into.";
         return error != null
             ? "The phone can't send on this network: " + error
             : "Check that Musubi is running on " + pc.ip + ", that you allowed this phone there, and that the firewall lets it through.";

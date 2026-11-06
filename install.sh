@@ -15,3 +15,14 @@ Icon=input-gaming
 Categories=Game;Utility;
 EOF
 echo "Added Musubi to your app launcher."
+
+# MTP, PTP and ADB are how Android phones show up; 18d1:2d00/2d01 is a phone already in accessory mode.
+rules=/etc/udev/rules.d/70-musubi.rules
+rule='SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_USB_INTERFACES}=="*:ffff00:*|*:060101:*|*:ff4201:*", TAG+="uaccess"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d0[01]", TAG+="uaccess"'
+if [ "$(cat "$rules" 2>/dev/null)" != "$rule" ]; then
+    echo "To use phones over a USB cable, Musubi needs a udev rule. sudo will ask for your password."
+    echo "$rule" | sudo tee "$rules" >/dev/null
+    sudo udevadm control --reload
+    echo "Added the USB rule. If your phone is plugged in, unplug it and plug it back in."
+fi

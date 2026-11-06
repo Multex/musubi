@@ -456,7 +456,7 @@ class App(Gtk.Application):
             self.error = event['message']
             self.refresh()
         elif kind == 'status':
-            self.status = {key: event.get(key) for key in ('phone', 'pad', 'pad_error', 'pending')}
+            self.status = {key: event.get(key) for key in ('phone', 'pad', 'pad_error', 'pending', 'cable_error')}
             self.refresh()
 
     def phone_name(self, phone):
@@ -475,7 +475,7 @@ class App(Gtk.Application):
         pending = self.pending_phones()
         firewall = bool(self.blocked) and not self.firewall_dismissed and phone is None
         key = (self.error, self.stopped, json.dumps(pending), json.dumps(self.ignored_phones()), firewall, self.firewall_message,
-               self.status['pad'], self.status['pad_error'], self.local_ip,
+               self.status['pad'], self.status['pad_error'], self.status.get('cable_error'), self.local_ip,
                phone and (phone['ip'], self.phone_name(phone), phone['controller'], phone['controller_known']))
         if key != self.panel_key:
             self.panel_key = key
@@ -498,7 +498,7 @@ class App(Gtk.Application):
     @staticmethod
     def phone_line(phone):
         rtt = f" · {phone['rtt']} ms" if phone['rtt'] is not None else ''
-        return f"Wi-Fi · {phone['ip']}{rtt}"
+        return f"USB cable{rtt}" if phone['ip'] == 'usb' else f"Wi-Fi · {phone['ip']}{rtt}"
 
     def clear_panel(self):
         self.phone_detail = None
@@ -557,6 +557,12 @@ class App(Gtk.Application):
         else:
             self.panel.append(text('This PC has no local network right now. Connect it to the same network as your phone.',
                                    'body', wrap=True))
+        if self.status.get('cable_error'):
+            usb = block('USB cable', "Can't use it", self.status['cable_error'], divided=True)
+            usb.get_last_child().add_css_class('alert')
+            self.panel.append(usb)
+        else:
+            self.panel.append(block('USB cable', 'Plug in your phone', 'Set its USB mode to File transfer', divided=True))
         self.panel.append(block('Virtual controller', 'Off', 'Turns on when a controller connects', divided=True))
         ignored = self.ignored_phones()
         if ignored:
