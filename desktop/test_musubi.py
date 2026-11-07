@@ -25,16 +25,29 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(axes, [0] * 8)
 
 
-def hello(phone=b'LM-X430', controller=b'Xbox Wireless Controller', connected=True, rtt=9):
-    return HELLO.pack(HELLO_MAGIC, connected, rtt) + phone + b'\0' + controller
+def hello(phone=b'LM-X430', controller=b'Xbox Wireless Controller', connected=True, rtt=9, features=None):
+    """Without features, this is the hello of a 0.5.x app."""
+    packet = HELLO.pack(HELLO_MAGIC, connected, rtt) + phone + b'\0' + controller
+    return packet if features is None else packet + b'\0' + bytes([features])
 
 
 class HelloTest(unittest.TestCase):
     def test_reads_every_field(self):
         self.assertEqual(decode_hello(hello()), {
             'name': 'LM-X430', 'controller': 'Xbox Wireless Controller',
-            'controller_connected': True, 'rtt': 9,
+            'controller_connected': True, 'rtt': 9, 'audio': False,
         })
+
+    def test_reads_the_features_after_the_names(self):
+        parsed = decode_hello(hello(features=musubi.FEATURE_AUDIO))
+        self.assertEqual(parsed['controller'], 'Xbox Wireless Controller')
+        self.assertTrue(parsed['audio'])
+        self.assertFalse(decode_hello(hello(controller=b'', features=0))['audio'])
+
+    def test_older_desktops_dont_show_the_features_in_the_controller_name(self):
+        # 0.5.x took everything after the first \0 as the controller name.
+        rest = hello(features=musubi.FEATURE_AUDIO)[HELLO.size:].partition(b'\0')[2]
+        self.assertEqual(musubi.clean_name(rest), 'Xbox Wireless Controller')
 
     def test_rejects_other_packets(self):
         self.assertIsNone(decode_hello(musubi.NEUTRAL))
@@ -53,6 +66,11 @@ class FakeSock:
 
     def sendto(self, data, addr):
         self.sent.append((data, addr))
+
+
+class FailingSock:
+    def sendto(self, data, addr):
+        raise OSError('network is unreachable')
 
 
 class FakeUi:
@@ -80,8 +98,9 @@ class BridgeTest(unittest.TestCase):
         self.now = 100.0
         self.pads = []
         self.status_calls = 0
+        self.usb_sent = []
         self.bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status,
-                             make_pad=self.make_pad, clock=lambda: self.now)
+                             make_pad=self.make_pad, clock=lambda: self.now, send_usb=self.usb_sent.append)
 
     def on_status(self):
         self.status_calls += 1
@@ -212,6 +231,46 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(len(self.pads), 1)
         self.assertFalse(self.pads[0].closed)
         self.assertEqual(self.pads[0].syncs, 1)
+
+    AUDIO = musubi.audio_message(70000, b'pcm')
+
+    def test_audio_message_layout(self):
+        self.assertEqual(self.AUDIO, b'PBAU\x11\x70pcm')
+
+    def test_sends_audio_to_the_latest_port_of_a_phone_that_can_play_it(self):
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
+        moved = (self.PHONE[0], 6000)
+        self.bridge.on_datagram(self.PRESSED, moved)
+        self.bridge.send_to_phone(self.AUDIO)
+        self.assertEqual(self.sock.sent, [(self.AUDIO, moved)])
+        self.assertTrue(self.bridge.status()['phone']['audio'])
+
+    def test_no_audio_for_a_phone_that_didnt_ask_for_it(self):
+        self.bridge.on_datagram(hello(), self.PHONE)
+        self.bridge.send_to_phone(self.AUDIO)
+        self.bridge.on_datagram(self.PRESSED, (musubi.USB, 0))
+        self.bridge.send_to_phone(self.AUDIO)
+        self.assertEqual((self.sock.sent, self.usb_sent), ([], []))
+        self.assertFalse(self.bridge.status()['phone']['audio'])
+
+    def test_nothing_is_sent_to_unapproved_or_gone_phones(self):
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.OTHER)
+        self.bridge.send_to_phone(self.AUDIO)
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
+        self.now += musubi.PHONE_TIMEOUT + 1
+        self.bridge.on_tick()
+        self.bridge.send_to_phone(self.AUDIO)
+        self.assertEqual(self.sock.sent, [])
+
+    def test_sends_audio_over_the_cable_when_the_phone_is_on_it(self):
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), (musubi.USB, 0))
+        self.bridge.send_to_phone(self.AUDIO)
+        self.assertEqual((self.sock.sent, self.usb_sent), ([], [self.AUDIO]))
+
+    def test_a_failed_send_doesnt_crash(self):
+        bridge = Bridge(FailingSock(), [self.PHONE[0]], self.on_status, make_pad=self.make_pad, clock=lambda: self.now)
+        bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
+        bridge.send_to_phone(self.AUDIO)
 
     def test_a_pad_error_is_reported_instead_of_crashing(self):
         def denied():

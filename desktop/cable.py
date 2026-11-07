@@ -1,4 +1,5 @@
 """Phones over USB: switch an Android phone into accessory mode (AOA) and pass its packets on."""
+import collections
 import errno
 import glob
 import socket
@@ -21,9 +22,11 @@ PHONE_INTERFACES = {(0xff, 0xff, 0x00), (0x06, 0x01, 0x01), (0xff, 0x42, 0x01)}
 # The accessory driver on the phone drops data when a read asks for less than this.
 READ_SIZE = 16384
 SCAN_INTERVAL = 1
-# Every message from the phone starts with its length, since USB doesn't keep message boundaries.
+# Every message, both ways, starts with its length, since USB doesn't keep message boundaries.
 LENGTH = struct.Struct('!H')
 PING_SIZE = 8
+# About 40 ms of audio. Older messages are dropped instead, since late audio is useless.
+QUEUE_SIZE = 8
 NO_ACCESS = "Musubi can't open USB phones. Run ./install.sh again, then plug the phone back in."
 
 
@@ -62,6 +65,10 @@ def split_frames(buffered):
     return messages, buffered
 
 
+def frame(message):
+    return LENGTH.pack(len(message)) + message
+
+
 class Cable:
     """Background thread. Messages arrive on `self.reader` as datagrams, and `self.error` says what's blocking USB."""
 
@@ -70,7 +77,31 @@ class Cable:
         self.error = None
         # Devices that aren't phones or refused to switch, so they're asked only once.
         self.skipped = set()
+        self.outbox = collections.deque(maxlen=QUEUE_SIZE)
+        self.wake = threading.Condition()
         threading.Thread(target=self._run, name='musubi-cable', daemon=True).start()
+
+    def send(self, message):
+        """Queue a message for the phone. Safe from any thread, and never blocks."""
+        with self.wake:
+            self.outbox.append(frame(message))
+            self.wake.notify()
+
+    def _write(self, endpoint, done):
+        """Its own thread, so a phone that stops reading can't stall the reads."""
+        while True:
+            with self.wake:
+                while not self.outbox and not done.is_set():
+                    self.wake.wait()
+                if done.is_set():
+                    return
+                data = self.outbox.popleft()
+            try:
+                endpoint.write(data, timeout=1000)
+            except usb.core.USBTimeoutError:
+                pass  # Lost, like a dropped datagram.
+            except usb.core.USBError:
+                return  # Unplugged.
 
     def _run(self):
         seen = None
@@ -120,6 +151,11 @@ class Cable:
             self.error = NO_ACCESS if ex.errno == errno.EACCES else str(ex)
             return
         self.error = None
+        with self.wake:
+            self.outbox.clear()
+        done = threading.Event()
+        writer_thread = threading.Thread(target=self._write, args=(endpoint_out, done), name='musubi-cable-writer', daemon=True)
+        writer_thread.start()
         buffered = b''
         try:
             while True:
@@ -130,13 +166,14 @@ class Cable:
                 messages, buffered = split_frames(buffered)
                 for message in messages:
                     if len(message) == PING_SIZE:
-                        try:
-                            endpoint_out.write(message, timeout=1000)
-                        except usb.core.USBTimeoutError:
-                            pass  # A lost echo only makes the phone's ping late.
+                        self.send(message)
                     else:
                         self.writer.send(message)
         except usb.core.USBError:
             pass  # Unplugged.
         finally:
+            with self.wake:
+                done.set()
+                self.wake.notify()
+            writer_thread.join()  # At most one write timeout, and the device must not be released under it.
             usb.util.dispose_resources(dev)

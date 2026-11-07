@@ -31,9 +31,14 @@ PACKET = struct.Struct('!I8h')
 NEUTRAL = PACKET.pack(0, *[0] * 8)
 # The app times the echo of these to tell whether the PC is answering.
 PING_SIZE = 8
-# Magic, controller connected, ping in ms, then "phone name\0controller name". Sent once a second.
+# Magic, controller connected, ping in ms, then "phone name\0controller name\0" and a features byte. Sent once a second.
 HELLO = struct.Struct('!4sBH')
 HELLO_MAGIC = b'PBHI'
+# Feature bits stay below 0x20: 0.5.x desktops read the byte as part of the controller name and drop it as a control character.
+FEATURE_AUDIO = 1
+# PC to phone: magic, sequence number, then PCM.
+AUDIO = struct.Struct('!4sH')
+AUDIO_MAGIC = b'PBAU'
 MAX_DATAGRAM = 512
 MAX_NAME = 64
 MAX_PENDING = 8
@@ -74,13 +79,20 @@ def decode_hello(data):
     if len(data) < HELLO.size or data[:4] != HELLO_MAGIC:
         return None
     _, connected, rtt = HELLO.unpack_from(data)
-    phone, _, controller = data[HELLO.size:].partition(b'\0')
+    phone, _, rest = data[HELLO.size:].partition(b'\0')
+    controller, _, features = rest.partition(b'\0')
+    flags = features[0] if features else 0
     return {
         'name': clean_name(phone),
         'controller': clean_name(controller),
         'controller_connected': bool(connected),
         'rtt': rtt,
+        'audio': bool(flags & FEATURE_AUDIO),
     }
+
+
+def audio_message(seq, pcm):
+    return AUDIO.pack(AUDIO_MAGIC, seq & 0xffff) + pcm
 
 
 def apply(ui, state):
@@ -100,8 +112,10 @@ def make_pad():
 class Bridge:
     """Drives one virtual pad from the first allowed phone that talks to it."""
 
-    def __init__(self, sock, allowed, on_status, on_input=None, make_pad=make_pad, clock=time.monotonic):
+    def __init__(self, sock, allowed, on_status, on_input=None, make_pad=make_pad, clock=time.monotonic,
+                 send_usb=None):
         self.sock = sock
+        self.send_usb = send_usb
         self.allowed = set(allowed)
         self.on_status = on_status
         self.on_input = on_input
@@ -110,6 +124,7 @@ class Bridge:
         self.pad = None
         self.pad_error = None
         self.active = None
+        self.addr = None
         self.hello = None
         self.last = NEUTRAL
         self.last_state_at = 0
@@ -129,6 +144,7 @@ class Bridge:
                 'controller': hello.get('controller') if hello.get('controller_connected') else None,
                 'controller_known': self.hello is not None,
                 'rtt': hello.get('rtt'),
+                'audio': hello.get('audio', False),
             }
         return {
             'phone': phone,
@@ -173,6 +189,7 @@ class Bridge:
 
     def _drop_phone(self):
         self.active = None
+        self.addr = None
         self.hello = None
         self.pad_error = None
         if self.pad is not None:
@@ -210,6 +227,8 @@ class Bridge:
             self.active_since = now
             self.on_status()
         self.last_seen = now
+        # The app opens a new socket, so a new port, each time it resumes.
+        self.addr = addr
 
         hello = decode_hello(data)
         if hello is not None:
@@ -237,6 +256,21 @@ class Bridge:
             self.last = data
             if self.on_input:
                 self.on_input(state)
+
+    def send_to_phone(self, message):
+        """Send to the active phone over its link. Audio goes only to a phone that said it can play it."""
+        if self.active is None or (self.active != USB and self.active not in self.allowed):
+            return
+        if message[:4] == AUDIO_MAGIC and not (self.hello or {}).get('audio'):
+            return
+        if self.active == USB:
+            if self.send_usb:
+                self.send_usb(message)
+            return
+        try:
+            self.sock.sendto(message, self.addr)
+        except OSError:
+            pass  # Like the ping echo, a failed send must never take the pad down.
 
     def on_tick(self):
         now = self.clock()
@@ -333,7 +367,7 @@ def run_service():
         write_event(out, {'event': 'input', 'buttons': buttons, 'axes': axes})
         last_input[1] = None
 
-    bridge = Bridge(sock, [], send_status, on_input)
+    bridge = Bridge(sock, [], send_status, on_input, send_usb=link.send if link else None)
     buffered = b''
     next_status = 0
     try:

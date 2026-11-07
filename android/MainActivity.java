@@ -115,6 +115,13 @@ public class MainActivity extends Activity {
     private static final int PING_INTERVAL_MS = 1000;
     private static final int PING_SIZE = 8;
     private static final byte[] HELLO_MAGIC = {'P', 'B', 'H', 'I'};
+    // Below 0x20, so 0.5.x desktops drop it from the controller name as a control character.
+    private static final byte FEATURE_AUDIO = 1;
+    // Magic, sequence number, then PCM, matching AUDIO in musubi.py.
+    private static final byte[] AUDIO_MAGIC = {'P', 'B', 'A', 'U'};
+    private static final int AUDIO_HEADER = AUDIO_MAGIC.length + 2;
+    // 5 ms of 48 kHz stereo PCM is under 1 KB.
+    private static final int UDP_RECEIVE_SIZE = 2048;
     private static final int MAX_NAME_LENGTH = 64;
     // The accessory driver drops data when a read asks for less than this.
     private static final int USB_READ_SIZE = 16384;
@@ -303,14 +310,23 @@ public class MainActivity extends Activity {
         if (screen == MAIN || screen == GAME) render();
     }
 
-    /** The PC only sends ping echoes, one per transfer. */
+    /** Messages from the PC are length-prefixed like ours, and one read can hold several or part of one. */
     private void usbReadLoop(ParcelFileDescriptor file, FileInputStream in) {
         byte[] data = new byte[USB_READ_SIZE];
+        // Room for the longest unfinished message plus one more read.
+        ByteBuffer pending = ByteBuffer.allocate(2 + 65535 + USB_READ_SIZE);
         try {
             for (int length; (length = in.read(data)) >= 0; ) {
-                if (length != PING_SIZE) continue;
-                rttMs = (System.nanoTime() - ByteBuffer.wrap(data).getLong()) / 1000000;
-                lastPongAt = SystemClock.uptimeMillis();
+                pending.put(data, 0, length);
+                pending.flip();
+                while (pending.remaining() >= 2) {
+                    int size = pending.getShort(pending.position()) & 0xffff;
+                    if (pending.remaining() < 2 + size) break;
+                    int start = pending.position() + 2;
+                    onPcMessage(pending.array(), start, size);
+                    pending.position(start + size);
+                }
+                pending.compact();
             }
         } catch (IOException unplugged) {
         }
@@ -356,7 +372,7 @@ public class MainActivity extends Activity {
         pingPacket.setPort(PORT);
         nextPing = 0;
         try (DatagramSocket socket = new DatagramSocket()) {
-            new Thread(() -> pongLoop(socket), "musubi-pong").start();
+            new Thread(() -> receiveLoop(socket), "musubi-receive").start();
             // A USB write blocks while the PC isn't reading, so an old sender can outlive onPause.
             while (running && sender == Thread.currentThread()) {
                 InetAddress address;
@@ -420,11 +436,13 @@ public class MainActivity extends Activity {
         String controller = deviceName;
         byte[] names = (shorten(Build.MODEL) + "\0" + shorten(controller != null ? controller : ""))
             .getBytes(StandardCharsets.UTF_8);
-        ByteBuffer out = ByteBuffer.allocate(HELLO_MAGIC.length + 3 + names.length);
+        ByteBuffer out = ByteBuffer.allocate(HELLO_MAGIC.length + 3 + names.length + 2);
         out.put(HELLO_MAGIC);
         out.put((byte) (controller != null ? 1 : 0));
         out.putShort((short) Math.min(rttMs, 65535));
         out.put(names);
+        out.put((byte) 0);
+        out.put(FEATURE_AUDIO);
         return out.array();
     }
 
@@ -432,8 +450,8 @@ public class MainActivity extends Activity {
         return name.length() > MAX_NAME_LENGTH ? name.substring(0, MAX_NAME_LENGTH) : name;
     }
 
-    private void pongLoop(DatagramSocket socket) {
-        byte[] data = new byte[PING_SIZE];
+    private void receiveLoop(DatagramSocket socket) {
+        byte[] data = new byte[UDP_RECEIVE_SIZE];
         DatagramPacket packet = new DatagramPacket(data, data.length);
         try {
             while (true) {
@@ -443,13 +461,25 @@ public class MainActivity extends Activity {
                 synchronized (lock) {
                     expected = target;
                 }
-                if (packet.getLength() == PING_SIZE && packet.getAddress().equals(expected)) {
-                    rttMs = (System.nanoTime() - ByteBuffer.wrap(data).getLong()) / 1000000;
-                    lastPongAt = SystemClock.uptimeMillis();
-                }
+                if (packet.getAddress().equals(expected)) onPcMessage(data, 0, packet.getLength());
             }
         } catch (IOException closedWithTheSender) {
         }
+    }
+
+    /** One message from the PC, over Wi-Fi or the cable. Anything unknown is from a newer PC and skipped. */
+    private void onPcMessage(byte[] data, int offset, int length) {
+        ByteBuffer in = ByteBuffer.wrap(data, offset, length);
+        if (length == PING_SIZE) {
+            rttMs = (System.nanoTime() - in.getLong()) / 1000000;
+            lastPongAt = SystemClock.uptimeMillis();
+        } else if (length >= AUDIO_HEADER && in.getInt() == ByteBuffer.wrap(AUDIO_MAGIC).getInt()) {
+            onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
+        }
+    }
+
+    /** PCM from the PC. Nothing plays it yet, so it's dropped. */
+    private void onAudio(int seq, byte[] pcm, int offset, int length) {
     }
 
     private void fill(ByteBuffer out) {
