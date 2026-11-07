@@ -686,11 +686,14 @@ public class MainActivity extends Activity {
     }
 
     // SOURCE_GAMEPAD shares its class bit with keyboards, so test the whole mask.
+    // Some Bluetooth earbuds expose a joystick with no sticks, so a joystick also needs X and Y.
     private static boolean isGamepad(InputDevice device) {
         if (device == null) return false;
         int sources = device.getSources();
         return (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
-            || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+            || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                && device.getMotionRange(MotionEvent.AXIS_X, InputDevice.SOURCE_JOYSTICK) != null
+                && device.getMotionRange(MotionEvent.AXIS_Y, InputDevice.SOURCE_JOYSTICK) != null;
     }
 
     @Override

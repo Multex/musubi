@@ -9,7 +9,7 @@ CHANNELS = 2
 # 5 ms of 16-bit stereo per packet, which fits the phone's 2048-byte UDP buffer.
 CHUNK = RATE * CHANNELS * 2 * 5 // 1000
 LOAD = ['pactl', 'load-module', 'module-null-sink', f'sink_name={SINK}',
-        'sink_properties=device.description="Musubi (phone)"']
+        'sink_properties=device.description=Musubi']
 # The latency request also shrinks PipeWire's quantum to 256 frames, so reads arrive every 5.3 ms instead of 21.
 CAPTURE = ['parec', '-d', f'{SINK}.monitor', '--raw', '--format=s16le', f'--rate={RATE}',
            f'--channels={CHANNELS}', '--latency-msec=5']
@@ -22,7 +22,7 @@ def split_chunks(buffered):
 
 
 class PhoneAudio:
-    """The "Musubi (phone)" sink and its capture, which exist only while a phone can play the sound."""
+    """The "Musubi" sink and its capture, which exist only while a phone can play the sound."""
 
     def __init__(self, run=subprocess.run, popen=subprocess.Popen):
         self.run = run

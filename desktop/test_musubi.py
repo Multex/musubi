@@ -348,7 +348,7 @@ class PhoneAudioTest(unittest.TestCase):
         self.assertEqual((self.sound.sources(), self.sound.buffered), ([], b''))
 
     def test_removes_sinks_left_by_a_killed_service(self):
-        self.pactl.modules = ('7\tmodule-null-sink\tsink_name=musubi sink_properties=device.description="Musubi (phone)"\n'
+        self.pactl.modules = ('7\tmodule-null-sink\tsink_name=musubi sink_properties=device.description=Musubi\n'
                               '8\tmodule-null-sink\tsink_name=musubi2\n9\tmodule-x11-bell\t\n')
         self.sound.remove_stale()
         self.assertEqual(self.pactl.calls[1:], [['pactl', 'unload-module', '7']])
