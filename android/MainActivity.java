@@ -163,7 +163,6 @@ public class MainActivity extends Activity {
     private UsbManager usbManager;
     private ParcelFileDescriptor usbFile;
     private volatile FileOutputStream usbOut;
-    private final byte[] usbFrame = new byte[2 + 1024];
     private final Pc usbPc = new Pc("PC on USB", "Cable");
     private WifiManager.WifiLock wifiLock;
     private InputManager inputManager;
@@ -409,10 +408,11 @@ public class MainActivity extends Activity {
 
     /** USB doesn't keep message boundaries, so each message starts with its length, matching cable.py. */
     private void sendUsb(FileOutputStream usb, byte[] message) throws IOException {
-        usbFrame[0] = (byte) (message.length >> 8);
-        usbFrame[1] = (byte) message.length;
-        System.arraycopy(message, 0, usbFrame, 2, message.length);
-        usb.write(usbFrame, 0, 2 + message.length);
+        byte[] frame = new byte[2 + message.length];
+        frame[0] = (byte) (message.length >> 8);
+        frame[1] = (byte) message.length;
+        System.arraycopy(message, 0, frame, 2, message.length);
+        usb.write(frame);
     }
 
     /** Tells the PC who this phone is, matching HELLO in musubi.py. */

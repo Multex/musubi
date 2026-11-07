@@ -199,6 +199,20 @@ class BridgeTest(unittest.TestCase):
         self.bridge.set_allowed([])
         self.assertEqual(self.bridge.status()['phone']['ip'], musubi.USB)
 
+    def test_wifi_takes_over_from_an_unplugged_cable_without_dropping_the_pad(self):
+        usb = (musubi.USB, 0)
+        self.bridge.on_datagram(hello(), usb)
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        self.assertEqual(self.bridge.status()['phone']['ip'], musubi.USB)
+        self.now += musubi.TIMEOUT + 0.1
+        self.bridge.on_datagram(self.PRESSED, self.OTHER)
+        self.assertEqual(self.bridge.status()['phone']['ip'], musubi.USB)
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        self.assertEqual(self.bridge.status()['phone']['ip'], self.PHONE[0])
+        self.assertEqual(len(self.pads), 1)
+        self.assertFalse(self.pads[0].closed)
+        self.assertEqual(self.pads[0].syncs, 1)
+
     def test_a_pad_error_is_reported_instead_of_crashing(self):
         def denied():
             raise PermissionError('no access to /dev/uinput')

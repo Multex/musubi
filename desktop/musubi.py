@@ -174,6 +174,7 @@ class Bridge:
     def _drop_phone(self):
         self.active = None
         self.hello = None
+        self.pad_error = None
         if self.pad is not None:
             self._close_pad()
 
@@ -200,8 +201,8 @@ class Bridge:
             return
         now = self.clock()
         if self.active != ip:
-            # The cable takes over from Wi-Fi, and keeps the hello so the pad doesn't drop out meanwhile.
-            if self.active is not None and ip != USB:
+            # The cable takes over from Wi-Fi, and Wi-Fi from an unplugged cable. Both keep the hello so the pad doesn't drop out meanwhile.
+            if self.active is not None and ip != USB and not (self.active == USB and now - self.last_seen > TIMEOUT):
                 return
             if self.active is None:
                 self.hello = None
