@@ -20,6 +20,10 @@ import android.graphics.drawable.RippleDrawable;
 import android.hardware.input.InputManager;
 import android.hardware.usb.UsbAccessory;
 import android.hardware.usb.UsbManager;
+import android.media.AudioAttributes;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioTrack;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -122,6 +126,11 @@ public class MainActivity extends Activity {
     private static final int AUDIO_HEADER = AUDIO_MAGIC.length + 2;
     // 5 ms of 48 kHz stereo PCM is under 1 KB.
     private static final int UDP_RECEIVE_SIZE = 2048;
+    private static final int AUDIO_RATE = 48000;
+    private static final int AUDIO_FRAME = 4;
+    // 40 ms covers Wi-Fi jitter. The queue holds twice that, then drops back to 40 ms so a burst can't add lasting delay.
+    private static final int AUDIO_PREBUFFER = AUDIO_RATE / 1000 * 40 * AUDIO_FRAME;
+    private static final int AUDIO_IDLE_MS = 500;
     private static final int MAX_NAME_LENGTH = 64;
     // The accessory driver drops data when a read asks for less than this.
     private static final int USB_READ_SIZE = 16384;
@@ -155,6 +164,13 @@ public class MainActivity extends Activity {
     }
 
     private final Object lock = new Object();
+    private final Object audioLock = new Object();
+    private final byte[] audioQueue = new byte[2 * AUDIO_PREBUFFER];
+    private int audioStart;
+    private int audioSize;
+    private long lastAudioAt;
+    private Thread player;
+    private boolean audioBroken;
     private int held;
     private final short[] axes = new short[6];
     private boolean dirty;
@@ -269,6 +285,11 @@ public class MainActivity extends Activity {
         // The app gets no key-up events while in the background.
         axisButtons = 0;
         clearInput();
+        synchronized (audioLock) {
+            player = null;
+            audioSize = 0;
+            audioLock.notifyAll();
+        }
     }
 
     @Override
@@ -478,8 +499,94 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** PCM from the PC. Nothing plays it yet, so it's dropped. */
+    /** 16-bit stereo PCM at 48 kHz from the PC. A lost packet is simply skipped. */
     private void onAudio(int seq, byte[] pcm, int offset, int length) {
+        if (!running || length % AUDIO_FRAME != 0 || length > AUDIO_PREBUFFER) return;
+        synchronized (audioLock) {
+            if (audioBroken) return;
+            lastAudioAt = SystemClock.uptimeMillis();
+            if (audioSize + length > audioQueue.length) {
+                int drop = audioSize + length - AUDIO_PREBUFFER;
+                audioStart = (audioStart + drop) % audioQueue.length;
+                audioSize -= drop;
+            }
+            int end = (audioStart + audioSize) % audioQueue.length;
+            int first = Math.min(length, audioQueue.length - end);
+            System.arraycopy(pcm, offset, audioQueue, end, first);
+            System.arraycopy(pcm, offset + first, audioQueue, 0, length - first);
+            audioSize += length;
+            if (player == null) {
+                player = new Thread(this::playLoop, "musubi-audio");
+                player.start();
+            }
+            audioLock.notifyAll();
+        }
+    }
+
+    /** Its own thread, since AudioTrack.write blocks and the receive thread must not. */
+    private void playLoop() {
+        Thread self = Thread.currentThread();
+        AudioTrack track = newTrack();
+        if (track == null) {
+            synchronized (audioLock) {
+                audioBroken = true;
+                if (player == self) player = null;
+            }
+            return;
+        }
+        byte[] chunk = new byte[AUDIO_RATE / 1000 * 5 * AUDIO_FRAME];
+        boolean filling = true;
+        try {
+            track.play();
+            while (true) {
+                int length;
+                synchronized (audioLock) {
+                    while (player == self && audioSize < (filling ? AUDIO_PREBUFFER : AUDIO_FRAME)) {
+                        long idle = SystemClock.uptimeMillis() - lastAudioAt;
+                        if (idle >= AUDIO_IDLE_MS) player = null;
+                        else audioLock.wait(AUDIO_IDLE_MS - idle);
+                    }
+                    if (player != self) return;
+                    length = Math.min(chunk.length, audioSize);
+                    int first = Math.min(length, audioQueue.length - audioStart);
+                    System.arraycopy(audioQueue, audioStart, chunk, 0, first);
+                    System.arraycopy(audioQueue, 0, chunk, first, length - first);
+                    audioStart = (audioStart + length) % audioQueue.length;
+                    audioSize -= length;
+                    // Ran dry, so wait for the full prebuffer again instead of crackling packet by packet.
+                    filling = audioSize == 0;
+                }
+                track.write(chunk, 0, length);
+            }
+        } catch (InterruptedException | IllegalStateException stopped) {
+        } finally {
+            track.release();
+        }
+    }
+
+    private AudioTrack newTrack() {
+        AudioAttributes attributes = new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).build();
+        AudioFormat format = new AudioFormat.Builder().setSampleRate(AUDIO_RATE)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build();
+        // Twice the minimum leaves room for a late wakeup, and every extra byte is more delay.
+        int size = 2 * AudioTrack.getMinBufferSize(AUDIO_RATE, AudioFormat.CHANNEL_OUT_STEREO,
+            AudioFormat.ENCODING_PCM_16BIT);
+        AudioTrack track;
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                track = new AudioTrack.Builder().setAudioAttributes(attributes).setAudioFormat(format)
+                    .setBufferSizeInBytes(size).setTransferMode(AudioTrack.MODE_STREAM)
+                    .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY).build();
+            } else {
+                track = new AudioTrack(attributes, format, size, AudioTrack.MODE_STREAM,
+                    AudioManager.AUDIO_SESSION_ID_GENERATE);
+            }
+        } catch (RuntimeException unsupported) {
+            return null;
+        }
+        if (track.getState() == AudioTrack.STATE_INITIALIZED) return track;
+        track.release();
+        return null;
     }
 
     private void fill(ByteBuffer out) {

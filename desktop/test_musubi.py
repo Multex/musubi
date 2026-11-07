@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
+import io
+import subprocess
 import unittest
+from unittest import mock
 
+import audio
 import musubi
 from musubi import HELLO, HELLO_MAGIC, PACKET, Bridge, decode, decode_hello
 
@@ -272,12 +276,98 @@ class BridgeTest(unittest.TestCase):
         bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
         bridge.send_to_phone(self.AUDIO)
 
+    def test_sound_only_for_an_audio_phone_on_wifi(self):
+        self.assertFalse(self.bridge.audio_over_wifi())
+        self.bridge.on_datagram(hello(), self.PHONE)
+        self.assertFalse(self.bridge.audio_over_wifi())
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
+        self.assertTrue(self.bridge.audio_over_wifi())
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), (musubi.USB, 0))
+        self.assertFalse(self.bridge.audio_over_wifi())
+
+    def test_sound_stops_when_the_phone_goes(self):
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
+        self.now += musubi.PHONE_TIMEOUT + 1
+        self.bridge.on_tick()
+        self.assertFalse(self.bridge.audio_over_wifi())
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
+        self.bridge.set_allowed([])
+        self.assertFalse(self.bridge.audio_over_wifi())
+
     def test_a_pad_error_is_reported_instead_of_crashing(self):
         def denied():
             raise PermissionError('no access to /dev/uinput')
         bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status, make_pad=denied, clock=lambda: self.now)
         bridge.on_datagram(hello(), self.PHONE)
         self.assertIn('uinput', bridge.status()['pad_error'])
+
+
+class FakePactl:
+    def __init__(self, modules='', fail=False):
+        self.calls = []
+        self.modules = modules
+        self.fail = fail
+
+    def __call__(self, args, **kwargs):
+        self.calls.append(args)
+        if self.fail:
+            raise FileNotFoundError('pactl')
+        out = '42\n' if args[1] == 'load-module' else self.modules if args[1] == 'list' else ''
+        return subprocess.CompletedProcess(args, 0, out, '')
+
+
+class PhoneAudioTest(unittest.TestCase):
+    def setUp(self):
+        self.pactl = FakePactl()
+        self.capture = mock.Mock()
+        self.sound = audio.PhoneAudio(run=self.pactl, popen=mock.Mock(return_value=self.capture))
+
+    def test_chunks_are_exactly_5_ms(self):
+        self.assertEqual(audio.CHUNK, 960)
+        chunks, rest = audio.split_chunks(bytes(960 * 2 + 100))
+        self.assertEqual(([len(c) for c in chunks], len(rest)), ([960, 960], 100))
+
+    def test_reads_become_numbered_chunks_and_the_number_wraps(self):
+        self.sound.start()
+        self.sound.seq = 0xffff
+        pcm = bytes(range(256)) * 10
+        with mock.patch.object(audio.os, 'read', side_effect=[pcm[:1000], pcm[1000:]]):
+            first = self.sound.read()
+            second = self.sound.read()
+        self.assertEqual([seq for seq, _ in first + second], [0xffff, 0])
+        self.assertEqual(b''.join(c for _, c in first + second), pcm[:1920])
+        self.assertEqual(len(self.sound.buffered), len(pcm) - 1920)
+
+    def test_loads_once_and_unloads_its_own_module(self):
+        self.sound.start()
+        self.sound.start()
+        self.sound.stop()
+        self.sound.stop()
+        self.assertEqual(self.pactl.calls, [audio.LOAD, ['pactl', 'unload-module', '42']])
+        self.capture.terminate.assert_called_once()
+        self.assertEqual((self.sound.sources(), self.sound.buffered), ([], b''))
+
+    def test_removes_sinks_left_by_a_killed_service(self):
+        self.pactl.modules = ('7\tmodule-null-sink\tsink_name=musubi sink_properties=device.description="Musubi (phone)"\n'
+                              '8\tmodule-null-sink\tsink_name=musubi2\n9\tmodule-x11-bell\t\n')
+        self.sound.remove_stale()
+        self.assertEqual(self.pactl.calls[1:], [['pactl', 'unload-module', '7']])
+
+    def test_missing_pactl_is_logged_once_and_never_retried(self):
+        sound = audio.PhoneAudio(run=FakePactl(fail=True), popen=mock.Mock())
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            sound.remove_stale()
+            sound.start()
+            sound.start()
+        self.assertEqual(stderr.getvalue().count('\n'), 1)
+        self.assertEqual((sound.capture, sound.module), (None, None))
+
+    def test_a_capture_that_dies_unloads_the_sink(self):
+        self.sound.start()
+        with mock.patch('sys.stderr'), mock.patch.object(audio.os, 'read', return_value=b''):
+            self.assertEqual(self.sound.read(), [])
+        self.assertEqual(self.pactl.calls[-1], ['pactl', 'unload-module', '42'])
+        self.assertIsNone(self.sound.capture)
 
 
 if __name__ == '__main__':
