@@ -21,7 +21,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 import system  # noqa: E402
 from tray import Tray, tray_available  # noqa: E402
 
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 REPO = 'https://github.com/Multex/musubi'
 RECEIVER = Path(__file__).resolve().parent / 'musubi.py'
 BUTTON_NAMES = ['A', 'B', 'X', 'Y', 'L1', 'R1', 'Select', 'Start', 'Guide', 'L3', 'R3']
