@@ -3,8 +3,10 @@ package io.github.multex.musubi;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -224,6 +226,22 @@ public class MainActivity extends Activity {
     private long ignoreInputUntil;
     private String stepNote;
 
+    private boolean backgrounded;
+    // Once the PC stops answering, end the background session like leaving the app unconnected.
+    private final Runnable watchPc = new Runnable() {
+        @Override
+        public void run() {
+            if (pcState() == LOST) stopAll();
+            else handler.postDelayed(this, TICK_MS);
+        }
+    };
+    private final BroadcastReceiver stopReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            stopAll();
+            finish();
+        }
+    };
     private final Runnable finishCapture = this::finishCapture;
     private final Runnable tick = new Runnable() {
         @Override
@@ -260,12 +278,16 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        wifiLock.acquire();
-        running = true;
-        sender = new Thread(this::sendLoop, "musubi-sender");
-        sender.start();
         lastTouch = SystemClock.uptimeMillis();
-        targetSince = lastTouch;
+        // Coming back from the background keeps the same socket, threads and AudioTrack.
+        leaveBackground();
+        if (!running) {
+            wifiLock.acquire();
+            running = true;
+            sender = new Thread(this::sendLoop, "musubi-sender");
+            sender.start();
+            targetSince = lastTouch;
+        }
         openAccessory();
         inputManager.registerInputDeviceListener(deviceListener, handler);
         updateController();
@@ -275,9 +297,6 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        running = false;
-        sender.interrupt();
-        wifiLock.release();
         handler.removeCallbacks(tick);
         handler.removeCallbacks(finishCapture);
         capture.clear();
@@ -285,6 +304,24 @@ public class MainActivity extends Activity {
         // The app gets no key-up events while in the background.
         axisButtons = 0;
         clearInput();
+        // Connected, so keep the PC's sound playing; the sender keeps the neutral pad alive on the PC.
+        if (pcState() == RESPONDING) enterBackground();
+        else stopAll();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        stopAll();
+        closeAccessory();
+    }
+
+    private void stopAll() {
+        if (!running) return;
+        leaveBackground();
+        running = false;
+        sender.interrupt();
+        wifiLock.release();
         synchronized (audioLock) {
             player = null;
             audioSize = 0;
@@ -292,10 +329,24 @@ public class MainActivity extends Activity {
         }
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        closeAccessory();
+    private void enterBackground() {
+        backgrounded = true;
+        registerReceiver(stopReceiver, new IntentFilter(KeepAliveService.ACTION_STOP));
+        handler.postDelayed(watchPc, TICK_MS);
+        showKeepAlive();
+    }
+
+    private void leaveBackground() {
+        if (!backgrounded) return;
+        backgrounded = false;
+        unregisterReceiver(stopReceiver);
+        handler.removeCallbacks(watchPc);
+        stopService(new Intent(this, KeepAliveService.class));
+    }
+
+    /** Starts the service, or updates its notification when the cable comes or goes. */
+    private void showKeepAlive() {
+        startService(new Intent(this, KeepAliveService.class).putExtra(KeepAliveService.EXTRA_PC, currentPc().name));
     }
 
     /** Android only lists the accessory once Musubi on the PC has switched the phone over. */
@@ -328,6 +379,10 @@ public class MainActivity extends Activity {
         nextPing = 0;
         lastPongAt = 0;
         targetSince = SystemClock.uptimeMillis();
+        if (backgrounded) {
+            if (currentPc() == null) stopAll();
+            else showKeepAlive();
+        }
         if (screen == MAIN || screen == GAME) render();
     }
 
