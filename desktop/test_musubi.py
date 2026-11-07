@@ -276,23 +276,52 @@ class BridgeTest(unittest.TestCase):
         bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
         bridge.send_to_phone(self.AUDIO)
 
-    def test_sound_only_for_an_audio_phone_on_wifi(self):
-        self.assertFalse(self.bridge.audio_over_wifi())
+    def test_sound_only_for_an_audio_phone_on_either_link(self):
+        self.assertFalse(self.bridge.wants_audio())
         self.bridge.on_datagram(hello(), self.PHONE)
-        self.assertFalse(self.bridge.audio_over_wifi())
+        self.assertFalse(self.bridge.wants_audio())
         self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
-        self.assertTrue(self.bridge.audio_over_wifi())
+        self.assertTrue(self.bridge.wants_audio())
         self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), (musubi.USB, 0))
-        self.assertFalse(self.bridge.audio_over_wifi())
+        self.assertTrue(self.bridge.wants_audio())
+
+    def test_the_sink_survives_wifi_to_cable_to_wifi(self):
+        pactl = FakePactl()
+        sound = audio.PhoneAudio(run=pactl, popen=mock.Mock())
+        usb = (musubi.USB, 0)
+
+        def tick():
+            # The same choice run_service makes every loop.
+            self.bridge.on_tick()
+            if self.bridge.wants_audio():
+                sound.start()
+            else:
+                sound.stop()
+
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
+        tick()
+        self.bridge.on_datagram(self.PRESSED, usb)
+        tick()
+        self.bridge.send_to_phone(self.AUDIO)
+        self.assertEqual(self.usb_sent, [self.AUDIO])
+        self.now += musubi.TIMEOUT + 0.1
+        tick()
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        tick()
+        self.assertEqual(self.bridge.status()['phone']['ip'], self.PHONE[0])
+        self.assertEqual(pactl.calls, [audio.LOAD])
+        self.now += musubi.PHONE_TIMEOUT + 1
+        tick()
+        self.assertEqual(pactl.calls, [audio.LOAD, ['pactl', 'unload-module', '42']])
 
     def test_sound_stops_when_the_phone_goes(self):
         self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
         self.now += musubi.PHONE_TIMEOUT + 1
         self.bridge.on_tick()
-        self.assertFalse(self.bridge.audio_over_wifi())
+        self.assertFalse(self.bridge.wants_audio())
         self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
         self.bridge.set_allowed([])
-        self.assertFalse(self.bridge.audio_over_wifi())
+        self.assertFalse(self.bridge.wants_audio())
 
     def test_a_pad_error_is_reported_instead_of_crashing(self):
         def denied():

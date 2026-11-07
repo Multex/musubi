@@ -96,12 +96,17 @@ class Cable:
                 if done.is_set():
                     return
                 data = self.outbox.popleft()
-            try:
-                endpoint.write(data, timeout=1000)
-            except usb.core.USBTimeoutError:
-                pass  # Lost, like a dropped datagram.
-            except usb.core.USBError:
-                return  # Unplugged.
+            # A timeout that sent part of a frame returns the count instead of raising, and the rest
+            # must follow or the phone loses the framing. A timeout that sent nothing raises.
+            sent = 0
+            while sent < len(data):
+                try:
+                    sent += endpoint.write(data[sent:], timeout=1000)
+                except usb.core.USBTimeoutError:
+                    if sent == 0 or done.is_set():
+                        break  # Lost, like a dropped datagram.
+                except usb.core.USBError:
+                    return  # Unplugged.
 
     def _run(self):
         seen = None

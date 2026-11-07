@@ -275,9 +275,12 @@ class Bridge:
         except OSError:
             pass  # Like the ping echo, a failed send must never take the pad down.
 
-    def audio_over_wifi(self):
-        """Sound goes only to a phone on Wi-Fi that said it can play it. The cable carries none yet."""
-        return self.active not in (None, USB) and bool((self.hello or {}).get('audio'))
+    def wants_audio(self):
+        """Sound goes to the active phone, on either link, once it said it can play it.
+
+        A link switch keeps the phone and its hello, so the sink stays loaded and apps stay on it.
+        """
+        return self.active is not None and bool((self.hello or {}).get('audio'))
 
     def on_tick(self):
         now = self.clock()
@@ -386,7 +389,7 @@ def run_service():
             readable = select.select(sources + sound.sources(), [], [], TICK)[0]
             if sound.capture is not None and sound.capture.stdout in readable:
                 for seq, pcm in sound.read():
-                    if bridge.audio_over_wifi():
+                    if bridge.wants_audio():
                         bridge.send_to_phone(audio_message(seq, pcm))
             if sock in readable:
                 bridge.on_datagram(*sock.recvfrom(MAX_DATAGRAM))
@@ -405,7 +408,7 @@ def run_service():
                     if 'watch' in command:
                         watching[0] = bool(command['watch'])
             bridge.on_tick()
-            if bridge.audio_over_wifi():
+            if bridge.wants_audio():
                 sound.start()
             else:
                 sound.stop()

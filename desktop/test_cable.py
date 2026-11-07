@@ -16,6 +16,22 @@ class FakeEndpoint:
 
     def write(self, data, timeout):
         self.written += bytes(data)
+        return len(data)
+
+
+class StallingEndpoint(FakeEndpoint):
+    """Times out with nothing sent, then sends at most `step` bytes per write, like a phone that reads slowly."""
+
+    def __init__(self, step):
+        super().__init__()
+        self.step = step
+        self.stalled = False
+
+    def write(self, data, timeout):
+        if not self.stalled:
+            self.stalled = True
+            raise cable.usb.core.USBTimeoutError('timed out')
+        return super().write(bytes(data)[:self.step], timeout)
 
 
 class FakePhone:
@@ -58,12 +74,12 @@ class CableTest(unittest.TestCase):
             link.send(bytes([i]))
         self.assertEqual(list(link.outbox), [cable.frame(bytes([i])) for i in range(2, cable.QUEUE_SIZE + 2)])
 
-    def test_the_writer_sends_framed_messages_in_order_until_the_session_ends(self):
-        link, endpoint, done = self.idle_cable(), FakeEndpoint(), threading.Event()
+    def run_writer(self, link, endpoint, messages):
+        done = threading.Event()
         writer = threading.Thread(target=link._write, args=(endpoint, done))
         writer.start()
-        link.send(bytes(8))
-        link.send(b'PBAU\x00\x01pcm')
+        for message in messages:
+            link.send(message)
         deadline = time.monotonic() + 2
         while link.outbox and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -72,7 +88,19 @@ class CableTest(unittest.TestCase):
             link.wake.notify()
         writer.join(2)
         self.assertFalse(writer.is_alive())
+
+    def test_the_writer_sends_framed_messages_in_order_until_the_session_ends(self):
+        link, endpoint = self.idle_cable(), FakeEndpoint()
+        self.run_writer(link, endpoint, [bytes(8), b'PBAU\x00\x01pcm'])
         self.assertEqual(endpoint.written, cable.frame(bytes(8)) + cable.frame(b'PBAU\x00\x01pcm'))
+
+    def test_a_frame_cut_by_a_timeout_is_finished_and_one_that_never_started_is_dropped(self):
+        link, endpoint = self.idle_cable(), StallingEndpoint(step=300)
+        audio = b'PBAU\x00\x01' + b'p' * 960
+        with link.wake:
+            link.outbox.append(cable.frame(b'stale'))
+        self.run_writer(link, endpoint, [audio])
+        self.assertEqual(endpoint.written, cable.frame(audio))
 
     def test_switch_sends_every_string_then_starts(self):
         phone = FakePhone(protocol=2)
