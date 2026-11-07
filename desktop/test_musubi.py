@@ -367,6 +367,23 @@ class PhoneAudioTest(unittest.TestCase):
         self.assertEqual(b''.join(c for _, c in first + second), pcm[:1920])
         self.assertEqual(len(self.sound.buffered), len(pcm) - 1920)
 
+    def _seqs(self, chunks):
+        with mock.patch.object(audio.os, 'read', return_value=b''.join(chunks)):
+            return [seq for seq, _ in self.sound.read()]
+
+    def test_silence_stops_after_the_hangover_and_sound_resumes_at_once(self):
+        self.sound.start()
+        sound, zero = b'\x01' * audio.CHUNK, audio.SILENCE
+        self.assertEqual(self._seqs([zero] * 5), [])
+        self.assertEqual(len(self._seqs([sound] + [zero] * (audio.HANGOVER + 10))), 1 + audio.HANGOVER)
+        self.assertEqual(self._seqs([zero, sound]), [audio.HANGOVER + 1])
+
+    def test_pauses_shorter_than_the_hangover_keep_sending(self):
+        self.sound.start()
+        sound, zero = b'\x01' * audio.CHUNK, audio.SILENCE
+        pattern = ([sound] + [zero] * (audio.HANGOVER - 1)) * 3 + [sound]
+        self.assertEqual(self._seqs(pattern), list(range(len(pattern))))
+
     def test_loads_once_and_unloads_its_own_module(self):
         self.sound.start()
         self.sound.start()

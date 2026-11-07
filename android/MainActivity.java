@@ -132,7 +132,9 @@ public class MainActivity extends Activity {
     private static final int AUDIO_FRAME = 4;
     // 40 ms covers Wi-Fi jitter. The queue holds twice that, then drops back to 40 ms so a burst can't add lasting delay.
     private static final int AUDIO_PREBUFFER = AUDIO_RATE / 1000 * 40 * AUDIO_FRAME;
+    // Pause the track after a short silence, and only give it up after a long one, since rebuilding it delays the next sound.
     private static final int AUDIO_IDLE_MS = 500;
+    private static final int AUDIO_RELEASE_MS = 30000;
     private static final int MAX_NAME_LENGTH = 64;
     // The accessory driver drops data when a read asks for less than this.
     private static final int USB_READ_SIZE = 16384;
@@ -591,15 +593,25 @@ public class MainActivity extends Activity {
         }
         byte[] chunk = new byte[AUDIO_RATE / 1000 * 5 * AUDIO_FRAME];
         boolean filling = true;
+        boolean paused = true;
         try {
-            track.play();
             while (true) {
                 int length;
                 synchronized (audioLock) {
                     while (player == self && audioSize < (filling ? AUDIO_PREBUFFER : AUDIO_FRAME)) {
                         long idle = SystemClock.uptimeMillis() - lastAudioAt;
-                        if (idle >= AUDIO_IDLE_MS) player = null;
-                        else audioLock.wait(AUDIO_IDLE_MS - idle);
+                        if (idle >= AUDIO_RELEASE_MS) {
+                            player = null;
+                        } else if (idle >= AUDIO_IDLE_MS && !paused) {
+                            track.pause();
+                            track.flush();
+                            paused = true;
+                            // What's left is from before the silence, so the next sound starts clean.
+                            audioSize = 0;
+                            filling = true;
+                        } else {
+                            audioLock.wait((paused ? AUDIO_RELEASE_MS : AUDIO_IDLE_MS) - idle);
+                        }
                     }
                     if (player != self) return;
                     length = Math.min(chunk.length, audioSize);
@@ -610,6 +622,10 @@ public class MainActivity extends Activity {
                     audioSize -= length;
                     // Ran dry, so wait for the full prebuffer again instead of crackling packet by packet.
                     filling = audioSize == 0;
+                }
+                if (paused) {
+                    track.play();
+                    paused = false;
                 }
                 track.write(chunk, 0, length);
             }

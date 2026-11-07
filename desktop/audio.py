@@ -8,6 +8,10 @@ RATE = 48000
 CHANNELS = 2
 # 5 ms of 16-bit stereo per packet, which fits the phone's 2048-byte UDP buffer.
 CHUNK = RATE * CHANNELS * 2 * 5 // 1000
+# A null sink's monitor gives exact zeros while nothing plays, so those chunks aren't worth sending.
+SILENCE = bytes(CHUNK)
+# 200 ms of zeros still go out, so a short pause between sounds doesn't make the phone stop and refill.
+HANGOVER = 40
 LOAD = ['pactl', 'load-module', 'module-null-sink', f'sink_name={SINK}',
         'sink_properties=device.description=Musubi']
 # The latency request also shrinks PipeWire's quantum to 256 frames, so reads arrive every 5.3 ms instead of 21.
@@ -31,6 +35,7 @@ class PhoneAudio:
         self.capture = None
         self.buffered = b''
         self.seq = 0
+        self.quiet = HANGOVER
         self.failed = False
 
     def _pactl(self, *args):
@@ -69,6 +74,7 @@ class PhoneAudio:
                 self._fail(ex)
             self.module = None
         self.buffered = b''
+        self.quiet = HANGOVER
 
     def _fail(self, ex):
         """Sound is extra, so it gives up for this run and the pad carries on."""
@@ -80,7 +86,7 @@ class PhoneAudio:
         return [self.capture.stdout] if self.capture is not None else []
 
     def read(self):
-        """The PCM that's ready, as 5 ms chunks with their sequence numbers."""
+        """The PCM worth sending, as 5 ms chunks with their sequence numbers."""
         data = os.read(self.capture.stdout.fileno(), 65536)
         if not data:
             self._fail(RuntimeError('parec stopped'))
@@ -89,6 +95,13 @@ class PhoneAudio:
         chunks, self.buffered = split_chunks(self.buffered + data)
         numbered = []
         for chunk in chunks:
+            if chunk != SILENCE:
+                self.quiet = 0
+            elif self.quiet < HANGOVER:
+                self.quiet += 1
+            else:
+                continue
+            # Skipped silence takes no number, so a gap the phone sees is always a lost packet.
             numbered.append((self.seq, chunk))
             self.seq = (self.seq + 1) & 0xffff
         return numbered
