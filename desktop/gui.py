@@ -660,6 +660,8 @@ class App(Gtk.Application):
         self.refresh()
 
     def on_start(self):
+        # A failed save leaves the receiver running, and a second one couldn't bind the port.
+        self.stop_receiver()
         self.start_receiver()
         self.refresh()
 
@@ -705,6 +707,8 @@ class App(Gtk.Application):
         self.refresh_settings()
 
     def check_firewall(self):
+        if not self.window.get_visible():
+            return GLib.SOURCE_CONTINUE
         if self.status['phone'] is None and not self.stopped and not self.error:
             try:
                 process = Gio.Subprocess.new(['journalctl', '-k', '--no-pager', '-o', 'cat', f'--since={LOG_WINDOW}',
@@ -827,9 +831,7 @@ class App(Gtk.Application):
             parent.append(text("Can't read the firewall rules", 'row-title'))
             parent.append(text(f'If phones can\'t connect, allow UDP port {system.PORT}.', 'caption', wrap=True))
             return
-        network_open = self.network is not None and any(
-            source.prefixlen == 0 or str(source) == self.network for source in sources)
-        if network_open:
+        if self.network is not None and system.covers(sources, self.network):
             parent.append(text('Port open', 'row-title'))
             parent.append(text(f'UDP {system.PORT} · {self.network}', 'mono'))
             return

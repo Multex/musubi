@@ -2,6 +2,7 @@
 import ipaddress
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -56,12 +57,12 @@ def ufw_allowed_sources(rules_text, port=PORT):
     return sources
 
 
-def covers(sources, ip):
+def covers(sources, network):
     try:
-        address = ipaddress.ip_address(ip)
+        network = ipaddress.ip_network(network, strict=False)
     except ValueError:
         return False
-    return any(address in network for network in sources)
+    return any(network.version == source.version and network.subnet_of(source) for source in sources)
 
 
 def ufw_enabled(conf_text):
@@ -124,7 +125,7 @@ def open_port_command(network):
 
 
 def startup_command():
-    return f'{sys.executable} {GUI_SCRIPT} --hidden'
+    return shlex.join([sys.executable, str(GUI_SCRIPT), '--hidden'])
 
 
 def autostart_unit():

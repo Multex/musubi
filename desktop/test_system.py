@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import ipaddress
 import json
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from system import (blocked_sources, covers, default_network, load_config, save_config,
+from system import (blocked_sources, covers, default_network, load_config, save_config, startup_command,
                     ufw_allowed_sources, ufw_enabled)
 
 RULES = """
@@ -27,9 +29,15 @@ class FirewallTest(unittest.TestCase):
     def test_covers_single_hosts_and_networks(self):
         sources = ufw_allowed_sources(RULES)
         self.assertTrue(covers(sources, '192.168.1.10'))
-        self.assertTrue(covers(sources, '192.168.2.77'))
+        self.assertTrue(covers(sources, '192.168.2.0/24'))
+        self.assertFalse(covers(sources, '192.168.1.0/24'))
         self.assertFalse(covers(sources, '192.168.1.16'))
         self.assertFalse(covers(sources, 'not-an-ip'))
+
+    def test_a_wider_rule_covers_the_network(self):
+        self.assertTrue(covers([ipaddress.ip_network('192.168.0.0/16')], '192.168.1.0/24'))
+        self.assertTrue(covers([ipaddress.ip_network('0.0.0.0/0')], '192.168.1.0/24'))
+        self.assertFalse(covers([ipaddress.ip_network('::/0')], '192.168.1.0/24'))
 
     def test_reads_whether_ufw_is_on(self):
         self.assertTrue(ufw_enabled('# comment\nENABLED=yes\n'))
@@ -81,6 +89,14 @@ class ConfigTest(unittest.TestCase):
         self.path.write_text('{ not json')
         self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True})
         self.assertEqual(self.path.with_suffix('.broken').read_text(), '{ not json')
+
+
+class AutostartTest(unittest.TestCase):
+    def test_paths_with_spaces_stay_one_argument(self):
+        with mock.patch('system.GUI_SCRIPT', Path('/home/me/My Apps/musubi/gui.py')), \
+                mock.patch('sys.executable', '/usr/bin/python3'):
+            self.assertEqual(shlex.split(startup_command()),
+                             ['/usr/bin/python3', '/home/me/My Apps/musubi/gui.py', '--hidden'])
 
 
 if __name__ == '__main__':
