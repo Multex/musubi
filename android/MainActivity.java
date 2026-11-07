@@ -38,6 +38,8 @@ import android.text.Editable;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
+import android.text.format.DateFormat;
+import android.util.Log;
 import android.util.Patterns;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -60,8 +62,10 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -129,12 +133,11 @@ public class MainActivity extends Activity {
     // 5 ms of 48 kHz stereo PCM is under 1 KB.
     private static final int UDP_RECEIVE_SIZE = 2048;
     private static final int AUDIO_RATE = 48000;
-    private static final int AUDIO_FRAME = 4;
-    // 40 ms covers Wi-Fi jitter. The queue holds twice that, then drops back to 40 ms so a burst can't add lasting delay.
-    private static final int AUDIO_PREBUFFER = AUDIO_RATE / 1000 * 40 * AUDIO_FRAME;
     // Pause the track after a short silence, and only give it up after a long one, since rebuilding it delays the next sound.
     private static final int AUDIO_IDLE_MS = 500;
     private static final int AUDIO_RELEASE_MS = 30000;
+    // About 150 stats lines per file, and the previous file is kept, so a long session is still there after unplugging.
+    private static final int STATS_FILE_BYTES = 20000;
     private static final int MAX_NAME_LENGTH = 64;
     // The accessory driver drops data when a read asks for less than this.
     private static final int USB_READ_SIZE = 16384;
@@ -169,12 +172,12 @@ public class MainActivity extends Activity {
 
     private final Object lock = new Object();
     private final Object audioLock = new Object();
-    private final byte[] audioQueue = new byte[2 * AUDIO_PREBUFFER];
-    private int audioStart;
-    private int audioSize;
+    private final AudioBuffer audio = new AudioBuffer();
     private long lastAudioAt;
     private Thread player;
     private boolean audioBroken;
+    // What the AudioTrack queues ahead of the speaker, on top of the jitter buffer. Player thread only.
+    private AudioBuffer.Track trackSize;
     private int held;
     private final short[] axes = new short[6];
     private boolean dirty;
@@ -326,7 +329,7 @@ public class MainActivity extends Activity {
         wifiLock.release();
         synchronized (audioLock) {
             player = null;
-            audioSize = 0;
+            audio.reset();
             audioLock.notifyAll();
         }
     }
@@ -336,11 +339,17 @@ public class MainActivity extends Activity {
         registerReceiver(stopReceiver, new IntentFilter(KeepAliveService.ACTION_STOP));
         handler.postDelayed(watchPc, TICK_MS);
         showKeepAlive();
+        synchronized (audioLock) {
+            audio.setBackground(true);
+        }
     }
 
     private void leaveBackground() {
         if (!backgrounded) return;
         backgrounded = false;
+        synchronized (audioLock) {
+            audio.setBackground(false);
+        }
         unregisterReceiver(stopReceiver);
         handler.removeCallbacks(watchPc);
         stopService(new Intent(this, KeepAliveService.class));
@@ -558,20 +567,10 @@ public class MainActivity extends Activity {
 
     /** 16-bit stereo PCM at 48 kHz from the PC. A lost packet is simply skipped. */
     private void onAudio(int seq, byte[] pcm, int offset, int length) {
-        if (!running || length % AUDIO_FRAME != 0 || length > AUDIO_PREBUFFER) return;
+        if (!running) return;
         synchronized (audioLock) {
-            if (audioBroken) return;
+            if (audioBroken || !audio.push(seq, pcm, offset, length)) return;
             lastAudioAt = SystemClock.uptimeMillis();
-            if (audioSize + length > audioQueue.length) {
-                int drop = audioSize + length - AUDIO_PREBUFFER;
-                audioStart = (audioStart + drop) % audioQueue.length;
-                audioSize -= drop;
-            }
-            int end = (audioStart + audioSize) % audioQueue.length;
-            int first = Math.min(length, audioQueue.length - end);
-            System.arraycopy(pcm, offset, audioQueue, end, first);
-            System.arraycopy(pcm, offset + first, audioQueue, 0, length - first);
-            audioSize += length;
             if (player == null) {
                 player = new Thread(this::playLoop, "musubi-audio");
                 player.start();
@@ -591,14 +590,19 @@ public class MainActivity extends Activity {
             }
             return;
         }
-        byte[] chunk = new byte[AUDIO_RATE / 1000 * 5 * AUDIO_FRAME];
-        boolean filling = true;
+        byte[] chunk = new byte[AudioBuffer.CHUNK + AudioBuffer.FRAME];
         boolean paused = true;
+        int trackUnderruns = 0;
+        // Starving within 20 ms of waiting for audio is the network's fault, not the track's size.
+        int settle = 4;
         try {
             while (true) {
                 int length;
+                String stats;
+                boolean background;
                 synchronized (audioLock) {
-                    while (player == self && audioSize < (filling ? AUDIO_PREBUFFER : AUDIO_FRAME)) {
+                    while (player == self && !audio.ready()) {
+                        settle = 4;
                         long idle = SystemClock.uptimeMillis() - lastAudioAt;
                         if (idle >= AUDIO_RELEASE_MS) {
                             player = null;
@@ -607,27 +611,34 @@ public class MainActivity extends Activity {
                             track.flush();
                             paused = true;
                             // What's left is from before the silence, so the next sound starts clean.
-                            audioSize = 0;
-                            filling = true;
+                            audio.reset();
                         } else {
                             audioLock.wait((paused ? AUDIO_RELEASE_MS : AUDIO_IDLE_MS) - idle);
                         }
                     }
                     if (player != self) return;
-                    length = Math.min(chunk.length, audioSize);
-                    int first = Math.min(length, audioQueue.length - audioStart);
-                    System.arraycopy(audioQueue, audioStart, chunk, 0, first);
-                    System.arraycopy(audioQueue, 0, chunk, first, length - first);
-                    audioStart = (audioStart + length) % audioQueue.length;
-                    audioSize -= length;
-                    // Ran dry, so wait for the full prebuffer again instead of crackling packet by packet.
-                    filling = audioSize == 0;
+                    length = audio.pull(chunk);
+                    stats = audio.stats();
+                    background = audio.background();
+                }
+                if (stats != null) {
+                    String line = stats + ", track " + trackSize.ms + " ms";
+                    Log.i("musubi-audio", line);
+                    handler.post(() -> saveStats(line));
                 }
                 if (paused) {
                     track.play();
                     paused = false;
                 }
                 track.write(chunk, 0, length);
+                if (Build.VERSION.SDK_INT >= 24) {
+                    int count = track.getUnderrunCount();
+                    int ms = trackSize.setBackground(background);
+                    if (ms == 0) ms = trackSize.played(length, count > trackUnderruns && settle == 0);
+                    if (ms > 0) resizeTrack(track, ms);
+                    trackUnderruns = count;
+                    if (settle > 0) settle--;
+                }
             }
         } catch (InterruptedException | IllegalStateException stopped) {
         } finally {
@@ -655,9 +666,38 @@ public class MainActivity extends Activity {
         } catch (RuntimeException unsupported) {
             return null;
         }
-        if (track.getState() == AudioTrack.STATE_INITIALIZED) return track;
+        if (track.getState() == AudioTrack.STATE_INITIALIZED) {
+            // Without the fast mixer (Bluetooth, or the fast path refused) the whole capacity is queued, 170 to 256 ms on a Moto Edge 60.
+            if (Build.VERSION.SDK_INT >= 24) {
+                track.setBufferSizeInFrames(Math.min(track.getBufferSizeInFrames(), AudioBuffer.Track.STEP_MS * (AUDIO_RATE / 1000)));
+            }
+            trackSize = new AudioBuffer.Track(Build.VERSION.SDK_INT >= 23 ? track.getBufferSizeInFrames() / (AUDIO_RATE / 1000)
+                : size / AudioBuffer.BYTES_PER_MS);
+            Log.i("musubi-audio", "track " + trackSize.ms + " ms, asked for " + size / AudioBuffer.BYTES_PER_MS + " ms");
+            return track;
+        }
         track.release();
         return null;
+    }
+
+    private void resizeTrack(AudioTrack track, int ms) {
+        int frames = track.setBufferSizeInFrames(ms * (AUDIO_RATE / 1000));
+        if (frames <= 0 || frames / (AUDIO_RATE / 1000) == trackSize.ms) return;
+        Log.i("musubi-audio", "track " + (frames / (AUDIO_RATE / 1000) > trackSize.ms ? "starved" : "steady")
+            + ", now " + frames / (AUDIO_RATE / 1000) + " ms");
+        trackSize.ms = frames / (AUDIO_RATE / 1000);
+    }
+
+    /** Appends to a file adb can pull, on the main thread so a slow disk can't stall playback. */
+    private void saveStats(String line) {
+        File dir = getExternalFilesDir(null);
+        if (dir == null) return;
+        File file = new File(dir, "audio-stats.txt");
+        if (file.length() > STATS_FILE_BYTES) file.renameTo(new File(dir, "audio-stats.old.txt"));
+        try (FileWriter out = new FileWriter(file, true)) {
+            out.write(DateFormat.format("yyyy-MM-dd HH:mm:ss ", System.currentTimeMillis()) + line + "\n");
+        } catch (IOException ignored) {
+        }
     }
 
     private void fill(ByteBuffer out) {
