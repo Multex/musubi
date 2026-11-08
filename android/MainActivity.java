@@ -1610,19 +1610,55 @@ public class MainActivity extends Activity {
 
     /** Always the dialog, even with one PC: its "Manage PCs" button is the way to add another. */
     private void switchPc() {
-        CharSequence[] names = new CharSequence[pcs.size()];
-        for (int i = 0; i < names.length; i++) {
-            names[i] = pcs.get(i).name + " (" + pcs.get(i).ip + ")";
-        }
-        new AlertDialog.Builder(this)
-            .setTitle("Switch PC")
-            .setSingleChoiceItems(names, currentPc() == usbPc ? -1 : selectedPc, (dialog, which) -> {
-                selectPc(which);
+        AlertDialog dialog = new AlertDialog.Builder(this).create();
+        LinearLayout panel = column();
+        panel.setPadding(dp(16), dp(16), dp(16), dp(16));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(SURFACE);
+        background.setStroke(dp(1), BORDER);
+        background.setCornerRadius(dp(6));
+        panel.setBackground(background);
+        TextView title = text("Switch PC", 18, TEXT);
+        title.setTypeface(medium());
+        title.setPadding(0, 0, 0, dp(8));
+        panel.addView(title);
+        boolean onCable = currentPc() == usbPc;
+        for (int i = 0; i < pcs.size(); i++) {
+            int index = i;
+            Pc pc = pcs.get(i);
+            boolean active = !onCable && i == selectedPc;
+            LinearLayout row = clickableRow(() -> {
+                selectPc(index);
                 dialog.dismiss();
                 render();
-            })
-            .setPositiveButton("Manage PCs", (dialog, which) -> show(SETTINGS))
-            .show();
+            }, pc.name + ", " + pc.ip + (active ? ", in use" : ""));
+            row.setPadding(dp(8), dp(6), dp(8), dp(6));
+            View dot = new View(this);
+            GradientDrawable circle = new GradientDrawable();
+            circle.setShape(GradientDrawable.OVAL);
+            if (active) circle.setColor(ACTIVE);
+            else circle.setStroke(dp(2), IDLE);
+            dot.setBackground(circle);
+            LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(14), dp(14));
+            dotParams.rightMargin = dp(12);
+            row.addView(dot, dotParams);
+            LinearLayout labels = column();
+            TextView name = text(pc.name, 15, active ? ACTIVE : TEXT);
+            name.setTypeface(medium());
+            labels.addView(name);
+            labels.addView(mono(pc.ip + (active ? " · In use" : "")));
+            row.addView(labels, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+            panel.addView(row);
+        }
+        panel.addView(spaced(button("Manage PCs", SECONDARY, () -> {
+            dialog.dismiss();
+            show(SETTINGS);
+        }), 44));
+        dialog.setView(panel);
+        dialog.show();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(0));
+        }
     }
 
     private View buildGame() {
