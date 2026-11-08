@@ -1,3 +1,5 @@
 __pycache__/
 android/build/
 android/debug.keystore
+docs/hub-ui-spec.md
+docs/ui-bugs.md

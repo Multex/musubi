@@ -157,7 +157,7 @@ final class PadView extends View {
             canvas.drawCircle(x, y, 36, stroke);
             stroke.setStrokeWidth(2);
         }
-        int thumb = active ? MainActivity.ACTIVE : control == target ? MainActivity.TEXT : 0xFF2A2621;
+        int thumb = active ? MainActivity.ACTIVE : control == target ? MainActivity.TEXT : MainActivity.THUMB;
         circle(canvas, x + dx * STICK_TRAVEL, y + dy * STICK_TRAVEL, 20, thumb, outline);
     }
 

@@ -10,7 +10,6 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
-import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -23,8 +22,10 @@ import android.hardware.input.InputManager;
 import android.hardware.usb.UsbAccessory;
 import android.hardware.usb.UsbManager;
 import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioTimestamp;
 import android.media.AudioTrack;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
@@ -82,6 +83,7 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     static final int BACKGROUND = 0xFF0D0C0A, SURFACE = 0xFF171512, BORDER = 0xFF332E28, IDLE = 0xFF6B6256;
     static final int TEXT = 0xFFE6DEC8, MUTED = 0xFF8F8573, ACTIVE = 0xFFFF9E1B, ALERT = 0xFFE04F3E;
+    static final int LATER = 0xFF4A443B, THUMB = 0xFF2A2621, PRIMARY_HOVER = 0xFFF4EDDA, GAME_BG = 0xFF000000;
 
     // The first 11 bits match BUTTONS in musubi.py; the rest become trigger and hat axes.
     static final int A_BIT = 0, B_BIT = 1, X_BIT = 2, Y_BIT = 3, L1_BIT = 4, R1_BIT = 5, SELECT_BIT = 6, START_BIT = 7;
@@ -155,10 +157,14 @@ public class MainActivity extends Activity {
     private static final float DISPLAY_DEAD_ZONE = 0.05f;
     private static final String REPO = "https://github.com/Multex/musubi";
 
-    private static final int MAIN = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5;
+    // MAIN is the controller screen, opened from HOME.
+    private static final int MAIN = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6;
     private static final int CONNECTING = 0, RESPONDING = 1, LOST = 2;
     private static final int PRIMARY = 0, SECONDARY = 1, PLAIN = 2;
-    private static final int ICON_DOWN = 0, ICON_RIGHT = 1, ICON_LEFT = 2;
+    private static final int ICON_DOWN = 0, ICON_RIGHT = 1, ICON_LEFT = 2, ICON_ARROW_UP = 3, ICON_ARROW_DOWN = 4;
+    private static final int NODE_LIVE = 0, NODE_IDLE = 1, NODE_LATER = 2;
+    // How often the player thread re-measures the delay, in 5 ms chunks.
+    private static final int DELAY_EVERY = 50;
 
     private static final class Pc {
         String name;
@@ -179,6 +185,17 @@ public class MainActivity extends Activity {
     // What the AudioTrack queues ahead of the speaker, on top of the jitter buffer. Player thread only.
     private AudioBuffer.Track trackSize;
     private int held;
+    // Peaks of the PCM just played, for the headphones drawing; the UI thread takes and clears them.
+    private volatile float peakLeft, peakRight;
+    // Queued in Musubi plus what the track, mixer and output add, without the network; -1 until first measured.
+    private volatile int delayMs = -1;
+    private final HeadphonesView.Source levels = out -> {
+        if (this.backgrounded || !receivingAudio()) return false;
+        out[0] = peakLeft;
+        out[1] = peakRight;
+        peakLeft = peakRight = 0;
+        return true;
+    };
     private final short[] axes = new short[6];
     private boolean dirty;
     private InetAddress target;
@@ -196,6 +213,7 @@ public class MainActivity extends Activity {
     private final Pc usbPc = new Pc("PC on USB", "Cable");
     private WifiManager.WifiLock wifiLock;
     private InputManager inputManager;
+    private AudioManager audioManager;
     private SharedPreferences prefs;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
@@ -211,8 +229,9 @@ public class MainActivity extends Activity {
     private int axisButtons;
     private String unmapped;
 
-    private int screen = MAIN;
-    private int orientation;
+    private int screen = HOME;
+    private int gameFrom = HOME;
+    private boolean shownAudio;
     private int shownPcState = -1;
     private long lastTouch;
     private long lastUiUpdate;
@@ -220,7 +239,8 @@ public class MainActivity extends Activity {
     private int editIndex = -1;
 
     private PadView padView;
-    private TextView readout, pcDetail;
+    private TextView readout, pcDetail, soundName, soundDetail;
+    private HeadphonesView headphones;
 
     private int step;
     private ButtonMap pending;
@@ -271,8 +291,8 @@ public class MainActivity extends Activity {
             Build.VERSION.SDK_INT >= 29 ? WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF, "musubi");
         inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         prefs = getPreferences(MODE_PRIVATE);
-        orientation = getResources().getConfiguration().orientation;
         autoGameMode = prefs.getBoolean("autoGameMode", true);
         loadPcs();
         applySelectedPc();
@@ -394,7 +414,7 @@ public class MainActivity extends Activity {
             if (currentPc() == null) stopAll();
             else showKeepAlive();
         }
-        if (screen == MAIN || screen == GAME) render();
+        if (screen == MAIN || screen == HOME || screen == GAME) render();
     }
 
     /** Messages from the PC are length-prefixed like ours, and one read can hold several or part of one. */
@@ -423,24 +443,19 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    public void onConfigurationChanged(Configuration config) {
-        super.onConfigurationChanged(config);
-        // Pairing a pad also lands here, and rebuilding then would drop what's being typed.
-        if (config.orientation != orientation) {
-            orientation = config.orientation;
-            render();
-        }
-    }
-
-    @Override
     public void onBackPressed() {
-        if (screen == MAIN) {
-            super.onBackPressed();
+        if (screen == HOME) {
+            // Leaves the app without finishing it, so the sound keeps playing in the background.
+            moveTaskToBack(true);
         } else if (screen == EDIT_PC) {
             show(SETTINGS);
-        } else {
+        } else if (screen == GAME) {
+            show(gameFrom);
+        } else if (screen == REMAP || screen == REMAP_DONE) {
             if (screen == REMAP_DONE) loadMap();
             show(MAIN);
+        } else {
+            show(HOME);
         }
     }
 
@@ -593,11 +608,14 @@ public class MainActivity extends Activity {
         byte[] chunk = new byte[AudioBuffer.CHUNK + AudioBuffer.FRAME];
         boolean paused = true;
         int trackUnderruns = 0;
+        int written = 0;
+        long frames = 0;
+        AudioTimestamp stamp = new AudioTimestamp();
         // Starving within 20 ms of waiting for audio is the network's fault, not the track's size.
         int settle = 4;
         try {
             while (true) {
-                int length;
+                int length, queued;
                 String stats;
                 boolean background;
                 synchronized (audioLock) {
@@ -609,6 +627,7 @@ public class MainActivity extends Activity {
                         } else if (idle >= AUDIO_IDLE_MS && !paused) {
                             track.pause();
                             track.flush();
+                            frames = 0;
                             paused = true;
                             // What's left is from before the silence, so the next sound starts clean.
                             audio.reset();
@@ -618,6 +637,7 @@ public class MainActivity extends Activity {
                     }
                     if (player != self) return;
                     length = audio.pull(chunk);
+                    queued = audio.level();
                     stats = audio.stats();
                     background = audio.background();
                 }
@@ -631,6 +651,12 @@ public class MainActivity extends Activity {
                     paused = false;
                 }
                 track.write(chunk, 0, length);
+                frames += length / AudioBuffer.FRAME;
+                peaks(chunk, length);
+                if (written++ % DELAY_EVERY == 0) {
+                    int out = outputLatency(track, stamp, frames);
+                    if (out >= 0) delayMs = queued / AudioBuffer.BYTES_PER_MS + out;
+                }
                 if (Build.VERSION.SDK_INT >= 24) {
                     int count = track.getUnderrunCount();
                     int ms = trackSize.setBackground(background);
@@ -643,6 +669,34 @@ public class MainActivity extends Activity {
         } catch (InterruptedException | IllegalStateException stopped) {
         } finally {
             track.release();
+        }
+    }
+
+    /** Little-endian 16-bit stereo, as the PC sends it. */
+    private void peaks(byte[] pcm, int length) {
+        int left = 0, right = 0;
+        for (int i = 0; i + 3 < length; i += AudioBuffer.FRAME) {
+            left = Math.max(left, Math.abs((short) (pcm[i] & 0xff | pcm[i + 1] << 8)));
+            right = Math.max(right, Math.abs((short) (pcm[i + 2] & 0xff | pcm[i + 3] << 8)));
+        }
+        peakLeft = Math.max(peakLeft, Math.min(1, left / 32767f));
+        peakRight = Math.max(peakRight, Math.min(1, right / 32767f));
+    }
+
+    /**
+     * Frames written but not yet heard: the track's queue, the mixer and the output, Bluetooth included when its HAL
+     * reports it (the Moto's matches AudioFlinger's ~320 ms). The hidden getLatency read 52 ms on one run and 384 on
+     * the next with the same earbuds, so it isn't used. Returns -1 while the track has no position yet.
+     */
+    private static int outputLatency(AudioTrack track, AudioTimestamp stamp, long written) {
+        if (!track.getTimestamp(stamp)) return -1;
+        long ms = (written - stamp.framePosition) * 1000 / AUDIO_RATE - (System.nanoTime() - stamp.nanoTime) / 1000000;
+        return (int) Math.max(0, ms);
+    }
+
+    private boolean receivingAudio() {
+        synchronized (audioLock) {
+            return player != null;
         }
     }
 
@@ -766,7 +820,7 @@ public class MainActivity extends Activity {
     private void updateController() {
         int before = deviceId;
         findController();
-        if (deviceId != before && (screen == MAIN || screen == SETTINGS)) {
+        if (deviceId != before && (screen == MAIN || screen == HOME || screen == SETTINGS)) {
             render();
         }
     }
@@ -1021,22 +1075,55 @@ public class MainActivity extends Activity {
 
     private void refreshStatus() {
         int state = pcState();
-        if (state != shownPcState) {
+        if (state != shownPcState || (screen == HOME && receivingAudio() != shownAudio)) {
             shownPcState = state;
-            if ((screen == MAIN && currentPc() != null) || screen == GAME) render();
+            if (((screen == MAIN || screen == HOME) && currentPc() != null) || screen == GAME) render();
         }
         if (pcDetail != null) pcDetail.setText(pcDetailText(state));
+        updateSound();
         updateReadout(true);
-        if (screen == MAIN && autoGameMode && deviceId != -1 && currentPc() != null
+        if ((screen == MAIN || screen == HOME) && autoGameMode && deviceId != -1 && currentPc() != null
                 && SystemClock.uptimeMillis() - lastTouch >= AUTO_GAME_MODE_MS) {
-            show(GAME);
+            openGame();
         }
     }
 
     private String pcDetailText(int state) {
         Pc pc = currentPc();
         if (pc == null) return "";
-        return pc.ip + " · " + (state == RESPONDING ? rttMs + " ms" : "Connecting");
+        return (pc == usbPc ? "USB cable" : "Wi-Fi · " + pc.ip) + " · "
+            + (state == RESPONDING ? rttMs + " ms" : state == LOST ? "no answer" : "connecting");
+    }
+
+    private void updateSound() {
+        if (soundName == null) return;
+        boolean lost = shownPcState == LOST;
+        soundName.setText(lost ? "Paused" : outputName());
+        soundDetail.setText(lost ? "Waiting for the PC"
+            : !shownAudio ? "Nothing playing on the PC"
+            : delayMs < 0 ? "Measuring the delay" : "Delay ≈ " + Math.round((rttMs / 2 + delayMs) / 10f) * 10 + " ms");
+        if (shownAudio && !lost) headphones.start();
+    }
+
+    /** The earbuds' name from the real audio route, so earbuds without buttons count too. */
+    private String outputName() {
+        if (Build.VERSION.SDK_INT >= 23) return bluetoothOutputName();
+        return audioManager.isBluetoothA2dpOn() ? "Bluetooth earbuds" : "Phone speaker";
+    }
+
+    // Its own method so Android 5 never has to resolve AudioDeviceInfo.
+    private String bluetoothOutputName() {
+        for (AudioDeviceInfo device : audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+            if (device.getType() != AudioDeviceInfo.TYPE_BLUETOOTH_A2DP) continue;
+            CharSequence name = device.getProductName();
+            return name != null && name.length() > 0 ? name.toString() : "Bluetooth earbuds";
+        }
+        return "Phone speaker";
+    }
+
+    private void openGame() {
+        gameFrom = screen;
+        show(GAME);
     }
 
     private void show(int next) {
@@ -1048,10 +1135,15 @@ public class MainActivity extends Activity {
         padView = null;
         readout = null;
         pcDetail = null;
-        if (screen != EDIT_PC && screen != MAIN) formError = null;
+        soundName = null;
+        soundDetail = null;
+        headphones = null;
+        if (screen != EDIT_PC && screen != MAIN && screen != HOME) formError = null;
         applyGameWindow(screen == GAME);
         shownPcState = pcState();
+        shownAudio = receivingAudio();
         switch (screen) {
+            case HOME: setContentView(currentPc() != null ? buildHome(currentPc()) : buildMain()); break;
             case GAME: setContentView(buildGame()); break;
             case REMAP: setContentView(buildRemap()); break;
             case REMAP_DONE: setContentView(buildRemapDone()); break;
@@ -1060,6 +1152,7 @@ public class MainActivity extends Activity {
             default: setContentView(buildMain()); break;
         }
         pushPadState();
+        updateSound();
         updateReadout(true);
     }
 
@@ -1072,32 +1165,13 @@ public class MainActivity extends Activity {
             : 0);
     }
 
-    private boolean landscape() {
-        return orientation == Configuration.ORIENTATION_LANDSCAPE;
-    }
-
-    /** Controller drawing beside a side panel, or between its parts in portrait. Middle may be null. */
+    /** Controller drawing between the parts of a screen. Middle may be null. */
     private View withPad(int control, View top, View middle, View bottom) {
         padView = new PadView(this);
         padView.setContentDescription("Controller");
         padView.setTarget(control);
         int padding = dp(8);
         padView.setPadding(padding, padding, padding, padding);
-        if (landscape()) {
-            LinearLayout root = column();
-            root.setOrientation(LinearLayout.HORIZONTAL);
-            root.addView(padView, weighted(0, ViewGroup.LayoutParams.MATCH_PARENT));
-            View divider = new View(this);
-            divider.setBackgroundColor(BORDER);
-            root.addView(divider, new LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT));
-            LinearLayout panel = column();
-            panel.setPadding(dp(16), dp(16), dp(16), dp(16));
-            panel.addView(top);
-            panel.addView(middle != null ? middle : new View(this), weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
-            panel.addView(bottom);
-            root.addView(scrolling(panel), new LinearLayout.LayoutParams(dp(250), ViewGroup.LayoutParams.MATCH_PARENT));
-            return root;
-        }
         LinearLayout root = column();
         root.setPadding(dp(16), dp(16), dp(16), dp(16));
         root.addView(top);
@@ -1131,13 +1205,196 @@ public class MainActivity extends Activity {
             readout.setGravity(Gravity.CENTER);
             readout.setPadding(0, dp(8), 0, dp(8));
             middle = readout;
-            actions.addView(button("Game mode", PRIMARY, () -> show(GAME)), buttonParams(48));
+            actions.addView(button("Game mode", PRIMARY, this::openGame), buttonParams(48));
             Button remap = button("Remap", SECONDARY, this::startRemap);
             remap.setEnabled(deviceId != -1);
             remap.setAlpha(deviceId != -1 ? 1 : 0.5f);
             actions.addView(pair(remap, button("Settings", SECONDARY, () -> show(SETTINGS))));
         }
         return withPad(-1, top, middle, actions);
+    }
+
+    /** The cord: the PC on top, then one node per feature, live in amber while data flows. */
+    private View buildHome(Pc pc) {
+        boolean lost = shownPcState == LOST, answering = shownPcState == RESPONDING;
+        boolean soundLive = answering && shownAudio;
+        int players = deviceId != -1 ? 1 : 0;
+        // Below the last live feature the cord is always off.
+        int toControllers = answering ? ACTIVE : BORDER, toSound = soundLive ? ACTIVE : BORDER;
+
+        LinearLayout pcBlock = column();
+        pcBlock.setPadding(0, 0, 0, dp(16));
+        LinearLayout pcLine = row();
+        LinearLayout labels = column();
+        labels.addView(text("PC", 12, MUTED));
+        TextView name = text(pc.name, 22, TEXT);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        labels.addView(name);
+        pcDetail = mono(pcDetailText(shownPcState));
+        labels.addView(pcDetail);
+        pcLine.addView(labels, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Button switchButton = button("Switch", SECONDARY, this::switchPc);
+        switchButton.setContentDescription("Switch PC");
+        pcLine.addView(switchButton, new LinearLayout.LayoutParams(dp(84), dp(44)));
+        pcBlock.addView(pcLine);
+        if (lost) {
+            TextView status = text("PC not responding", 14, ALERT);
+            status.setTypeface(Typeface.DEFAULT_BOLD);
+            status.setPadding(0, dp(8), 0, dp(4));
+            pcBlock.addView(status);
+            pcBlock.addView(detail(lostMessage(pc)));
+        }
+        View square = new View(this);
+        GradientDrawable squareShape = new GradientDrawable();
+        squareShape.setCornerRadius(dp(3));
+        squareShape.setColor(lost ? ALERT : answering ? ACTIVE : IDLE);
+        square.setBackground(squareShape);
+
+        LinearLayout controllers = clickableRow(() -> show(MAIN),
+            "Controllers, " + players + " of 4 players connected, open");
+        controllers.setMinimumHeight(dp(64));
+        controllers.setPadding(dp(4), dp(6), dp(4), dp(6));
+        LinearLayout controllerText = featureText("Controllers · to PC", players + " of 4 players", TEXT);
+        LinearLayout chips = row();
+        chips.setPadding(0, dp(2), 0, 0);
+        for (int i = 1; i <= 4; i++) chips.addView(chip(i, i <= players));
+        controllerText.addView(chips);
+        controllers.addView(controllerText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        padView = new PadView(this);
+        padView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        padView.setAlpha(deviceId != -1 ? 1 : 0.35f);
+        controllers.addView(padView, gapped(84, 52));
+        controllers.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
+
+        LinearLayout sound = row();
+        sound.setMinimumHeight(dp(64));
+        sound.setPadding(dp(4), dp(6), dp(4), dp(6));
+        LinearLayout soundText = featureText("Headphones · from PC", "", TEXT);
+        soundName = (TextView) soundText.getChildAt(1);
+        soundDetail = mono("");
+        soundText.addView(soundDetail);
+        sound.addView(soundText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        headphones = new HeadphonesView(this, levels);
+        headphones.setContentDescription(shownAudio ? "Headphones, sound arriving" : "Headphones, nothing playing");
+        sound.addView(headphones, gapped(60, 60));
+
+        LinearLayout mic = row();
+        mic.setMinimumHeight(dp(64));
+        mic.setPadding(dp(4), dp(6), dp(4), dp(6));
+        LinearLayout micText = featureText("Mic · to PC", "Coming later", MUTED);
+        micText.addView(detail("A spot for the next feature. Not built yet."));
+        mic.addView(micText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout features = column();
+        features.setAlpha(lost ? 0.45f : 1);
+        features.addView(strand(toControllers, 26, node(answering && players > 0 ? NODE_LIVE : NODE_IDLE, true), 24, toSound, controllers, true));
+        features.addView(strand(toSound, 26, node(soundLive ? NODE_LIVE : NODE_IDLE, false), 24, BORDER, sound, true));
+        features.addView(strand(BORDER, 26, node(NODE_LATER, true), 24, 0, mic, true));
+
+        LinearLayout cord = column();
+        cord.setPadding(dp(16), dp(16), dp(16), 0);
+        cord.addView(strand(0, 22, square, 14, toControllers, pcBlock, false));
+        cord.addView(features);
+
+        LinearLayout actions = column();
+        actions.addView(new View(this), weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        if (!lost) {
+            Button game = button("Game mode", PRIMARY, this::openGame);
+            LinearLayout.LayoutParams gameParams = buttonParams(48);
+            gameParams.topMargin = dp(16);
+            actions.addView(game, gameParams);
+        }
+        actions.addView(spaced(button("Settings", SECONDARY, () -> show(SETTINGS)), 44));
+
+        actions.setPadding(dp(16), 0, dp(16), dp(16));
+        LinearLayout root = column();
+        root.addView(cord);
+        root.addView(actions, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        return scrolling(root);
+    }
+
+    /** One stretch of the cord beside its content: a line in, the node, then a line out that stretches with the row. */
+    private LinearLayout strand(int inColor, int inDp, View node, int nodeDp, int outColor, View content, boolean feature) {
+        LinearLayout cord = column();
+        cord.setGravity(Gravity.CENTER_HORIZONTAL);
+        cord.addView(cordLine(inColor), new LinearLayout.LayoutParams(dp(2), dp(inDp)));
+        cord.addView(node, new LinearLayout.LayoutParams(dp(nodeDp), dp(nodeDp)));
+        cord.addView(cordLine(outColor), weighted(dp(2), 0));
+        LinearLayout strand = new LinearLayout(this);
+        strand.addView(cord, new LinearLayout.LayoutParams(dp(24), ViewGroup.LayoutParams.MATCH_PARENT));
+        LinearLayout.LayoutParams params = weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT);
+        // A feature row's middle lines up with its node: 6 above, 14 below.
+        params.setMargins(dp(12), feature ? dp(6) : 0, 0, feature ? dp(14) : 0);
+        strand.addView(content, params);
+        return strand;
+    }
+
+    private View cordLine(int color) {
+        View line = new View(this);
+        line.setBackgroundColor(color);
+        return line;
+    }
+
+    private View node(int kind, boolean up) {
+        FrameLayout node = new FrameLayout(this);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setShape(GradientDrawable.OVAL);
+        if (kind == NODE_LIVE) {
+            shape.setColor(ACTIVE);
+        } else {
+            shape.setColor(BACKGROUND);
+            if (kind == NODE_IDLE) shape.setStroke(dp(2), IDLE);
+            else shape.setStroke(dp(2), LATER, dp(3), dp(2));
+        }
+        node.setBackground(shape);
+        int arrow = kind == NODE_LIVE ? BACKGROUND : kind == NODE_IDLE ? MUTED : IDLE;
+        node.addView(new IconView(this, up ? ICON_ARROW_UP : ICON_ARROW_DOWN, arrow),
+            new FrameLayout.LayoutParams(dp(12), dp(12), Gravity.CENTER));
+        return node;
+    }
+
+    private TextView chip(int number, boolean on) {
+        TextView chip = text(String.valueOf(number), 10, on ? BACKGROUND : MUTED);
+        chip.setTypeface(Typeface.DEFAULT_BOLD);
+        chip.setGravity(Gravity.CENTER);
+        chip.setIncludeFontPadding(false);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setShape(GradientDrawable.OVAL);
+        if (on) shape.setColor(ACTIVE);
+        else shape.setStroke(dp(1.5f), IDLE, dp(2), dp(2));
+        chip.setBackground(shape);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(18), dp(18));
+        params.rightMargin = dp(4);
+        chip.setLayoutParams(params);
+        return chip;
+    }
+
+    /** Caption, then the value line. */
+    private LinearLayout featureText(String caption, String value, int valueColor) {
+        LinearLayout block = column();
+        block.addView(text(caption, 12, MUTED));
+        TextView line = text(value, 16, valueColor);
+        line.setTypeface(medium());
+        block.addView(line);
+        return block;
+    }
+
+    private TextView mono(String value) {
+        TextView view = text(value, 12, MUTED);
+        view.setTypeface(Typeface.MONOSPACE);
+        return view;
+    }
+
+    private TextView detail(String value) {
+        TextView view = text(value, 13, MUTED);
+        view.setLineSpacing(0, 1.4f);
+        return view;
+    }
+
+    private LinearLayout.LayoutParams gapped(int widthDp, int heightDp) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(widthDp), dp(heightDp));
+        params.leftMargin = dp(10);
+        return params;
     }
 
     private String lostMessage(Pc pc) {
@@ -1209,18 +1466,15 @@ public class MainActivity extends Activity {
         render();
     }
 
+    /** Always the dialog, even with one PC: its "Manage PCs" button is the way to add another. */
     private void switchPc() {
-        if (pcs.size() < 2) {
-            show(SETTINGS);
-            return;
-        }
         CharSequence[] names = new CharSequence[pcs.size()];
         for (int i = 0; i < names.length; i++) {
             names[i] = pcs.get(i).name + " (" + pcs.get(i).ip + ")";
         }
         new AlertDialog.Builder(this)
             .setTitle("Switch PC")
-            .setSingleChoiceItems(names, selectedPc, (dialog, which) -> {
+            .setSingleChoiceItems(names, currentPc() == usbPc ? -1 : selectedPc, (dialog, which) -> {
                 selectPc(which);
                 dialog.dismiss();
                 render();
@@ -1232,10 +1486,10 @@ public class MainActivity extends Activity {
     private View buildGame() {
         LinearLayout root = column();
         root.setGravity(Gravity.CENTER);
-        root.setBackgroundColor(0xFF000000);
+        root.setBackgroundColor(GAME_BG);
         root.setClickable(true);
         root.setContentDescription("Game mode. Tap to go back");
-        root.setOnClickListener(view -> show(MAIN));
+        root.setOnClickListener(view -> show(gameFrom));
         Pc pc = currentPc();
         boolean lost = shownPcState == LOST;
         String status = lost ? "PC not responding"
@@ -1447,15 +1701,9 @@ public class MainActivity extends Activity {
         otherSection.addView(version);
 
         LinearLayout body = column();
-        if (landscape()) {
-            body.setOrientation(LinearLayout.HORIZONTAL);
-            body.addView(padded(pcSection), weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
-            body.addView(padded(otherSection), weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
-        } else {
-            body.addView(padded(pcSection));
-            body.addView(padded(otherSection));
-        }
-        return withHeader("Settings", () -> show(MAIN), body);
+        body.addView(padded(pcSection));
+        body.addView(padded(otherSection));
+        return withHeader("Settings", () -> show(HOME), body);
     }
 
     private View pcSettingsRow(int index) {
@@ -1536,7 +1784,7 @@ public class MainActivity extends Activity {
                 savePcs();
                 applySelectedPc();
                 draftIp = "";
-                show(pcs.isEmpty() ? MAIN : SETTINGS);
+                show(pcs.isEmpty() ? HOME : SETTINGS);
             })
             .setNegativeButton("Keep", null)
             .show();
@@ -1669,7 +1917,8 @@ public class MainActivity extends Activity {
         } else if (kind == SECONDARY) {
             shape.setStroke(dp(1), IDLE);
         }
-        button.setBackground(ripple(kind == PLAIN ? new ColorDrawable(0) : shape));
+        button.setBackground(kind == PRIMARY ? new RippleDrawable(ColorStateList.valueOf(PRIMARY_HOVER), shape, null)
+            : ripple(kind == PLAIN ? new ColorDrawable(0) : shape));
         button.setOnClickListener(view -> action.run());
         return button;
     }
@@ -1770,11 +2019,24 @@ public class MainActivity extends Activity {
         private final Path path = new Path();
 
         IconView(Context context, int kind) {
+            this(context, kind, kind == ICON_LEFT ? TEXT : MUTED);
+        }
+
+        IconView(Context context, int kind, int color) {
             super(context);
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(2);
-            paint.setColor(kind == ICON_LEFT ? TEXT : MUTED);
-            if (kind == ICON_DOWN) {
+            paint.setColor(color);
+            if (kind == ICON_ARROW_UP || kind == ICON_ARROW_DOWN) {
+                // The spec's 12-unit arrow with its 2-unit stroke, in this view's 20-unit space.
+                paint.setStrokeWidth(2 * 20 / 12f);
+                float tip = kind == ICON_ARROW_UP ? 3.3f : 16.7f, wing = kind == ICON_ARROW_UP ? 9.2f : 10.8f;
+                path.moveTo(10, 20 - tip);
+                path.lineTo(10, tip);
+                path.moveTo(4.2f, wing);
+                path.lineTo(10, tip);
+                path.lineTo(15.8f, wing);
+            } else if (kind == ICON_DOWN) {
                 path.moveTo(5, 8);
                 path.lineTo(10, 13);
                 path.lineTo(15, 8);
