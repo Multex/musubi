@@ -1,23 +1,35 @@
-# Musubi
-
-Bridge between your phone and your PC for wireless gamepads.
-
-Pair a Bluetooth gamepad with an Android phone, and your Linux PC gets a virtual Xbox 360 pad that games treat as a normal controller. I built it because my PC has no Bluetooth and I had an old phone lying around.
-
-```
-gamepad  --Bluetooth-->  Android app  --UDP over Wi-Fi-->  Musubi on the PC  --uinput-->  game
-```
-
 <p align="center">
-  <img src="docs/assets/main.png" alt="Musubi on a phone: a drawn controller with the right stick lit in amber, the connected controller and PC, and an 11 ms ping." width="700">
+  <img src="docs/assets/musubi-transparent.svg" alt="Musubi" width="135">
 </p>
 
-**Early stage.** It has run on two Arch-based PCs and three Android phones, including an LG K40S and a Samsung A12. I've played Persona 5 with it on one PC using a BSP G6 pad. On the second PC I only checked the controller on a gamepad tester page. Please open an issue if something fails on your setup.
+<h1 align="center">Musubi</h1>
+
+<p align="center">
+  <strong>Use your phone as the Bluetooth hub your PC doesn't have.</strong>
+</p>
+
+Pair a Bluetooth gamepad with an Android phone, and your Linux PC gets a virtual Xbox 360 pad that games treat as a normal controller. Since 0.6.0 it also works the other way: your PC's sound can play on the earbuds paired with the phone. I built it because my PC has no Bluetooth and I had an old phone lying around.
+
+<p align="center">
+  <img src="docs/assets/home.png" alt="Musubi Home screen on Android showing the connected PC, 1 of 4 players, and active headphones with a 170 ms delay." width="250">
+  &nbsp;
+  <img src="docs/assets/controller.png" alt="Musubi Controller screen on Android with the left trigger at 39% and the right stick tilted in amber." width="250">
+  &nbsp;
+  <img src="docs/assets/headphones.png" alt="Musubi Headphones screen on Android with amber level meters and wave showing sound arriving over Wi-Fi." width="250">
+</p>
+
+**Early stage.** It has run on two Arch-based PCs and four Android phones, including an LG K40S, a Samsung A12 and a Motorola Edge 60 Fusion. I've played Persona 5 Royal with it on one PC using a BSP G6 pad. On the second PC I only checked the controller on a gamepad tester page. Please open an issue if something fails on your setup.
+
+## Why "Musubi"?
+
+*Musubi* (結び) means "tying" or "connecting" in Japanese. In [Your Name](https://anilist.co/anime/21519/Kimi-no-Na-wa/), Mitsuha's grandmother explains it while braiding cords: musubi is the thread that ties people together, even across distance and time, and that thread can twist, tangle, come apart and connect again.
+
+That's what this app does. Your Bluetooth devices and your PC can't reach each other on their own, so your phone becomes the knot in the middle that ties them together. The cord runs both ways: your controller's input travels up to the PC, and the PC's sound travels back to your earbuds.
 
 ## What you need
 
-- A Linux PC with Python 3, `python-evdev` and access to `/dev/uinput`. Windows and macOS won't work, because the virtual pad depends on `uinput`. The desktop app also needs GTK 4 and PyGObject.
-- An Android phone with the app open while you play. The app declares Android 5.0 or newer, but it has only run on those three phones.
+- A Linux PC with Python 3, `python-evdev` and access to `/dev/uinput`. Windows and macOS won't work, because the virtual pad depends on `uinput`. The desktop app also needs GTK 4 and PyGObject. Sound on the phone needs `pactl` and `parec`, which come with PipeWire's PulseAudio support on most desktops.
+- An Android phone with the app open while you play. The app declares Android 5.0 or newer, but it has only run on those four phones.
 - A Bluetooth gamepad that Android recognizes as a gamepad.
 - The phone and the PC on the same network, or a USB cable between them.
 
@@ -57,12 +69,12 @@ Open **Musubi** from your launcher. It shows the address to type on your phone. 
 2. Disconnect the pad from the PC if it is plugged in, because some pads stay in USB mode.
 3. Put the pad in pairing mode and pair it in the phone's Bluetooth settings. The button combination depends on the pad, so check its manual.
 4. Open Musubi, type your PC's IP in **PC IP address** and tap **Save PC**.
-5. On the PC, tap **Allow** when the desktop app asks about the phone. The phone should then show the PC with its ping in milliseconds.
-6. Press a button. It lights up on both drawings, and the virtual pad reacts on the PC.
+5. On the PC, click **Allow** when the desktop app asks about the phone. The phone's Home screen then shows the PC with its ping in milliseconds. You can save more than one PC and switch between them from the Home screen.
+6. Tap **Controllers** and press a button. It lights up on both drawings, and the virtual pad reacts on the PC.
 
 Keep the app open and in front while you play. **Game mode** dims the screen and stops drawing the controller, and it turns on by itself after 1 minute without touching the screen. You can turn that off in **Settings**.
 
-Update the PC and the phone together. The desktop app still works with phone app 0.2.0, but it can't show that phone's name or controller.
+Update the PC and the phone together. Over Wi-Fi the desktop app still works with older phone apps, but over the USB cable both sides must be on 0.6.0 or newer.
 
 ### Over a USB cable
 
@@ -86,6 +98,11 @@ python3 desktop/musubi.py 192.168.1.10
 
 ## Desktop app
 
+<p align="center">
+  <img src="docs/assets/desktop.png" alt="Musubi on a Linux PC: the cord sidebar on the left with an LG phone connected at 17 ms, and the live controller drawing in the center." width="700">
+</p>
+
+- **Sidebar:** shows the connected phone, its link (Wi-Fi or USB cable) and ping, with pages for **Controllers** and **Sound on phone**.
 - **Allowed phones:** a new phone asks for your approval once. Manage them in **Settings > Manage phones**. Phones are recognized by IP, so reserve the address in your router if you can, or the phone will ask again when it changes. If you ignore or remove a phone, the waiting screen offers **Allow** for as long as that phone keeps trying to connect.
 - **Virtual controller:** it only exists while a controller is connected to the phone, so games don't see a pad you can't use.
 - **Start with my PC:** this adds a systemd user service in **Settings**. It needs a desktop session that starts `graphical-session.target`. If yours doesn't, the app shows the command to add to your desktop's startup instead.
@@ -97,12 +114,24 @@ python3 desktop/musubi.py 192.168.1.10
   <img src="docs/assets/remap.png" alt="The remap setup on step 1 of 16: the A button is highlighted on the drawing, with Back, Skip and Cancel buttons beside it." width="700">
 </p>
 
-Tap **Remap** and press each button as the app asks, or tap **Skip** for the ones your pad doesn't have. You can try the layout before saving it. Each controller keeps its own layout, and **Reset** goes back to the default. Sticks can't be remapped.
+On the **Controllers** page, tap **Remap** and press each button as the app asks, or tap **Skip** for the ones your pad doesn't have. You can try the layout before saving it. Each controller keeps its own layout, and **Reset** goes back to the default. Sticks can't be remapped.
+
+## Headphones
+
+Musubi can play your PC's sound on the earbuds paired with your phone. It's off by default.
+
+1. On the phone, open **Headphones** from the Home screen and turn on **Play PC sound**.
+2. On the PC, pick **Musubi** as the output in your sound settings. It only appears while a phone with sound turned on is connected.
+3. Choose where it plays: **Headphones** (your earbuds, or wired headphones) or **Phone speaker**. With Headphones picked and no earbuds connected, nothing plays.
+
+It works over Wi-Fi and the USB cable, and keeps playing when you switch between them. If you leave the app or lock the screen, the sound keeps going, with a notification that has a **Stop** button.
+
+**Delay:** Musubi's own part is about 70 ms. Bluetooth earbuds add their own delay on top, often 100 to 250 ms. If your earbuds have a game or low-latency mode, turn it on: on mine it cut the total from about 330 ms to about 150 ms.
 
 ## Limits
 
-- **The app must stay in the foreground.** If you leave it, the phone stops sending and the PC releases every button after half a second. The app keeps the screen on while it is open.
-- **One pad at a time.** Two pads paired with the phone would be merged into one.
+- **The controller needs the app on screen.** Android only gives controller input to the app in front, so if you leave the app, the PC releases every button after half a second. **Game mode** keeps the screen on but dim. Sound is different: it keeps playing in the background.
+- **One pad at a time.** Two pads paired with the phone would be merged into one. *(for now)* Bluetooth earbuds that pretend to be a controller for their media buttons are ignored so they don't take the controller spot.
 - **No rumble.** The PC only answers the app's pings, and nothing travels back to the pad.
 - **The guide button can't be remapped,** and it may not arrive at all, because Android can keep it for itself.
 - **One phone at a time.** If two allowed phones are on, the first one keeps the pad until it has been silent for 5 seconds.
@@ -126,6 +155,8 @@ Persona 5 plays fine, but it is turn-based. I can't vouch for rhythm or fighting
 | The phone says **PC not responding** | Check that Musubi is running on the PC and that you allowed the phone, then check the firewall and the phone's IP. Some routers also block Wi-Fi devices from reaching wired ones. |
 | A button shows `(not mapped)` on the phone | Your pad sends a key Musubi doesn't know yet. Use **Remap** to assign it. |
 | The desktop app says it **can't run** | Another program is using UDP port 9999. Check that `musubi.py` isn't still running in a terminal. |
+| No **Musubi** output in the PC's sound settings | Turn on **Play PC sound** on the phone's Headphones page. The output only exists while the phone is connected with sound on. |
+| Sound cuts out with the phone locked | Locked phones save power on Wi-Fi. Use 5 GHz Wi-Fi or the USB cable. |
 | **Open the port** fails | Your desktop may have no password prompt for system changes. The app shows a command you can run in a terminal instead. |
 
 ### uinput permissions
@@ -150,9 +181,11 @@ Any program you run can then create virtual input devices, so remove the rule if
 
 ## How it works
 
-Each packet is 20 bytes and holds the whole pad state: 11 button bits, then 8 axes (`!I8h` in `desktop/musubi.py`). The app sends one on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases everything.
+Each controller packet is 20 bytes and holds the whole pad state: 11 button bits, then 8 axes (`!I8h` in `desktop/musubi.py`). The app sends one on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases everything.
 
-Once a second the app also sends an 8-byte ping, and the receiver echoes it back to allowed phones. That is how the app knows the PC is answering and what the round trip takes. It also sends a hello packet with the phone's model, the controller's name and that ping time, which the desktop app shows.
+Once a second the app also sends an 8-byte ping, and the receiver echoes it back to allowed phones. That is how the app knows the PC is answering and what the round trip takes. It also sends a hello packet with the phone's model, the controller's name, that ping time, and a feature flag for sound.
+
+When the phone announces that **Play PC sound** is on, the PC loads a virtual `Musubi` output (`module-null-sink` via `pactl` in `desktop/audio.py`) and captures 48 kHz 16-bit stereo PCM in 5 ms chunks with `parec`. Each chunk goes back over the same UDP socket (or USB cable) with a 2-byte sequence number (`!4sH`). After 200 ms of silence the PC stops sending chunks until sound plays again. On the phone, an adaptive jitter buffer (`android/AudioBuffer.java`) feeds a low-latency `AudioTrack`, and a foreground service (`android/KeepAliveService.java`) keeps the sound going in the background.
 
 Over a USB cable the phone uses Android Open Accessory instead of Wi-Fi. The PC asks the phone to switch modes (`desktop/cable.py`), and then the same packets travel over USB, each one starting with its length in 2 bytes.
 
@@ -170,15 +203,23 @@ The virtual pad uses the same IDs and layout as the kernel's `xpad` driver, so g
 
 The result is `android/build/musubi.apk`. The first build creates `android/debug.keystore`, which stays out of git. Keep that file: Android refuses updates signed with a different key.
 
-`build.sh` also runs the button map test. Run the PC tests with:
+`build.sh` also runs the button map and audio buffer tests. Run the PC tests with:
 
 ```sh
 python3 desktop/test_musubi.py
-```
-
-```sh
+python3 desktop/test_cable.py
 python3 desktop/test_system.py
 ```
+
+## AI disclosure
+
+AI tools (Claude and Gemini) are used to help write code, debug, and explore ideas in this project. Nothing here is "vibe-coded" or merged blindly: every change is directed, read line by line, and tested on real phones and PCs before it lands. None of the art is AI-generated.
+
+If you open an issue or a pull request, please write the description yourself and make sure you understand and have tested every line of code you send. Unchecked AI output ("AI slop") will be closed. If you used AI to help write a patch, mention it in the pull request.
+
+## Credits
+
+The Musubi icon was designed by [@sr.miaomix](https://www.instagram.com/sr.miaomix/). Check out her work!
 
 ## License
 
