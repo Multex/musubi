@@ -57,6 +57,7 @@ final class HeadphonesView extends View implements Runnable {
     }
 
     void setMode(int mode) {
+        if (mode == this.mode) return;
         this.mode = mode;
         setAlpha(mode == NONE ? 0.4f : 1);
         if (mode != ON) left = right = 0;

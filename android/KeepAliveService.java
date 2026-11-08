@@ -14,6 +14,7 @@ import android.os.PowerManager;
 public class KeepAliveService extends Service {
     static final String ACTION_STOP = "io.github.multex.musubi.STOP";
     static final String EXTRA_PC = "pc";
+    static final String EXTRA_SOUND = "sound";
     private static final String CHANNEL = "background";
 
     private PowerManager.WakeLock wakeLock;
@@ -42,7 +43,9 @@ public class KeepAliveService extends Service {
         PendingIntent stop = PendingIntent.getBroadcast(this, 0, stopIntent(), 0);
         builder.setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("Connected to " + intent.getStringExtra(EXTRA_PC))
-            .setContentText("Sound keeps playing. Open Musubi to use the controller.")
+            .setContentText(intent.getBooleanExtra(EXTRA_SOUND, true)
+                ? "Sound keeps playing. Open Musubi to use the controller."
+                : "PC sound is off. Open Musubi to use the controller.")
             .setContentIntent(open)
             .setOngoing(true)
             .addAction(0, "Stop", stop);

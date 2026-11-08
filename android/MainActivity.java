@@ -13,10 +13,12 @@ import android.content.res.ColorStateList;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.hardware.input.InputManager;
 import android.hardware.usb.UsbAccessory;
@@ -50,7 +52,9 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
+import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -138,6 +142,8 @@ public class MainActivity extends Activity {
     // Pause the track after a short silence, and only give it up after a long one, since rebuilding it delays the next sound.
     private static final int AUDIO_IDLE_MS = 500;
     private static final int AUDIO_RELEASE_MS = 30000;
+    // Android warns a moment before the earbuds' sound moves to the speaker, while they're still listed as connected.
+    private static final int NOISY_HOLD_MS = 2000;
     // About 150 stats lines per file, and the previous file is kept, so a long session is still there after unplugging.
     private static final int STATS_FILE_BYTES = 20000;
     private static final int MAX_NAME_LENGTH = 64;
@@ -158,7 +164,7 @@ public class MainActivity extends Activity {
     private static final String REPO = "https://github.com/Multex/musubi";
 
     // MAIN is the controller screen, opened from HOME.
-    private static final int MAIN = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6;
+    private static final int MAIN = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6, HEADPHONES = 7;
     private static final int CONNECTING = 0, RESPONDING = 1, LOST = 2;
     private static final int PRIMARY = 0, SECONDARY = 1, PLAIN = 2;
     private static final int ICON_DOWN = 0, ICON_RIGHT = 1, ICON_LEFT = 2, ICON_ARROW_UP = 3, ICON_ARROW_DOWN = 4;
@@ -182,6 +188,16 @@ public class MainActivity extends Activity {
     private long lastAudioAt;
     private Thread player;
     private boolean audioBroken;
+    // No sound may play: PC sound is off, or it's set to headphones and none are connected. Guarded by audioLock.
+    private boolean muted = true;
+    // PC sound is opt-in; while off, the hello doesn't offer audio, so the PC never creates its output.
+    private volatile boolean soundOn;
+    // Force the phone's own speaker instead of following the system route (Android 6+).
+    private volatile boolean speaker;
+    // The connected earbuds or wired headphones, or null. UI thread only.
+    private String earbuds;
+    private boolean earbudsWired;
+    private long quietUntil;
     // What the AudioTrack queues ahead of the speaker, on top of the jitter buffer. Player thread only.
     private AudioBuffer.Track trackSize;
     private int held;
@@ -231,7 +247,6 @@ public class MainActivity extends Activity {
 
     private int screen = HOME;
     private int gameFrom = HOME;
-    private boolean shownAudio;
     private int shownPcState = -1;
     private long lastTouch;
     private long lastUiUpdate;
@@ -240,6 +255,7 @@ public class MainActivity extends Activity {
 
     private PadView padView;
     private TextView readout, pcDetail, soundName, soundDetail;
+    private TextView earbudsName, earbudsDetail, soundReadout, soundStatus;
     private HeadphonesView headphones;
 
     private int step;
@@ -256,8 +272,12 @@ public class MainActivity extends Activity {
     private final Runnable watchPc = new Runnable() {
         @Override
         public void run() {
-            if (pcState() == LOST) stopAll();
-            else handler.postDelayed(this, TICK_MS);
+            if (pcState() == LOST) {
+                stopAll();
+            } else {
+                refreshOutput();
+                handler.postDelayed(this, TICK_MS);
+            }
         }
     };
     private final BroadcastReceiver stopReceiver = new BroadcastReceiver() {
@@ -265,6 +285,13 @@ public class MainActivity extends Activity {
         public void onReceive(Context context, Intent intent) {
             stopAll();
             finish();
+        }
+    };
+    private final BroadcastReceiver noisyReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            quietUntil = SystemClock.uptimeMillis() + NOISY_HOLD_MS;
+            refreshOutput();
         }
     };
     private final Runnable finishCapture = this::finishCapture;
@@ -294,6 +321,11 @@ public class MainActivity extends Activity {
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         prefs = getPreferences(MODE_PRIVATE);
         autoGameMode = prefs.getBoolean("autoGameMode", true);
+        soundOn = prefs.getBoolean("sound", false);
+        speaker = prefs.getBoolean("speaker", false);
+        // Registered for the app's whole life, since the sound also plays in the background.
+        registerReceiver(noisyReceiver, new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
+        refreshOutput();
         loadPcs();
         applySelectedPc();
         findController();
@@ -337,6 +369,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        unregisterReceiver(noisyReceiver);
         stopAll();
         closeAccessory();
     }
@@ -347,11 +380,17 @@ public class MainActivity extends Activity {
         running = false;
         sender.interrupt();
         wifiLock.release();
+        stopPlayer();
+    }
+
+    /** Ends the player thread, which releases its AudioTrack; the next packet that may play starts a new one. */
+    private void stopPlayer() {
         synchronized (audioLock) {
             player = null;
             audio.reset();
             audioLock.notifyAll();
         }
+        delayMs = -1;
     }
 
     private void enterBackground() {
@@ -377,7 +416,8 @@ public class MainActivity extends Activity {
 
     /** Starts the service, or updates its notification when the cable comes or goes. */
     private void showKeepAlive() {
-        startService(new Intent(this, KeepAliveService.class).putExtra(KeepAliveService.EXTRA_PC, currentPc().name));
+        startService(new Intent(this, KeepAliveService.class).putExtra(KeepAliveService.EXTRA_PC, currentPc().name)
+            .putExtra(KeepAliveService.EXTRA_SOUND, soundOn));
     }
 
     /** Android only lists the accessory once Musubi on the PC has switched the phone over. */
@@ -544,7 +584,7 @@ public class MainActivity extends Activity {
         out.putShort((short) Math.min(rttMs, 65535));
         out.put(names);
         out.put((byte) 0);
-        out.put(FEATURE_AUDIO);
+        out.put(soundOn ? FEATURE_AUDIO : 0);
         return out.array();
     }
 
@@ -584,7 +624,7 @@ public class MainActivity extends Activity {
     private void onAudio(int seq, byte[] pcm, int offset, int length) {
         if (!running) return;
         synchronized (audioLock) {
-            if (audioBroken || !audio.push(seq, pcm, offset, length)) return;
+            if (audioBroken || muted || !audio.push(seq, pcm, offset, length)) return;
             lastAudioAt = SystemClock.uptimeMillis();
             if (player == null) {
                 player = new Thread(this::playLoop, "musubi-audio");
@@ -721,6 +761,7 @@ public class MainActivity extends Activity {
             return null;
         }
         if (track.getState() == AudioTrack.STATE_INITIALIZED) {
+            if (useSpeaker()) preferSpeaker(track);
             // Without the fast mixer (Bluetooth, or the fast path refused) the whole capacity is queued, 170 to 256 ms on a Moto Edge 60.
             if (Build.VERSION.SDK_INT >= 24) {
                 track.setBufferSizeInFrames(Math.min(track.getBufferSizeInFrames(), AudioBuffer.Track.STEP_MS * (AUDIO_RATE / 1000)));
@@ -732,6 +773,20 @@ public class MainActivity extends Activity {
         }
         track.release();
         return null;
+    }
+
+    // Its own method so Android 5 never has to resolve AudioDeviceInfo.
+    private void preferSpeaker(AudioTrack track) {
+        for (AudioDeviceInfo device : audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+            if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                track.setPreferredDevice(device);
+                return;
+            }
+        }
+    }
+
+    private boolean useSpeaker() {
+        return speaker && Build.VERSION.SDK_INT >= 23;
     }
 
     private void resizeTrack(AudioTrack track, int ms) {
@@ -1075,9 +1130,10 @@ public class MainActivity extends Activity {
 
     private void refreshStatus() {
         int state = pcState();
-        if (state != shownPcState || (screen == HOME && receivingAudio() != shownAudio)) {
+        refreshOutput();
+        if (state != shownPcState) {
             shownPcState = state;
-            if (((screen == MAIN || screen == HOME) && currentPc() != null) || screen == GAME) render();
+            if (((screen == MAIN || screen == HOME || screen == HEADPHONES) && currentPc() != null) || screen == GAME) render();
         }
         if (pcDetail != null) pcDetail.setText(pcDetailText(state));
         updateSound();
@@ -1095,30 +1151,112 @@ public class MainActivity extends Activity {
             + (state == RESPONDING ? rttMs + " ms" : state == LOST ? "no answer" : "connecting");
     }
 
-    private void updateSound() {
-        if (soundName == null) return;
-        boolean lost = shownPcState == LOST;
-        soundName.setText(lost ? "Paused" : outputName());
-        soundDetail.setText(lost ? "Waiting for the PC"
-            : !shownAudio ? "Nothing playing on the PC"
-            : delayMs < 0 ? "Measuring the delay" : "Delay ≈ " + Math.round((rttMs / 2 + delayMs) / 10f) * 10 + " ms");
-        if (shownAudio && !lost) headphones.start();
+    /** Works out whether the phone may play, and stops the sound the moment it may not. */
+    private void refreshOutput() {
+        findEarbuds();
+        boolean mute = !soundOn
+            || !useSpeaker() && (earbuds == null || SystemClock.uptimeMillis() < quietUntil);
+        boolean stop;
+        synchronized (audioLock) {
+            stop = mute && !muted;
+            muted = mute;
+        }
+        if (stop) stopPlayer();
     }
 
-    /** The earbuds' name from the real audio route, so earbuds without buttons count too. */
-    private String outputName() {
-        if (Build.VERSION.SDK_INT >= 23) return bluetoothOutputName();
-        return audioManager.isBluetoothA2dpOn() ? "Bluetooth earbuds" : "Phone speaker";
+    private void setSound(boolean on) {
+        soundOn = on;
+        prefs.edit().putBoolean("sound", on).apply();
+        // The PC hears about it with the next hello instead of up to a second later.
+        nextPing = 0;
+        refreshOutput();
+        render();
+    }
+
+    private void setSpeaker(boolean on) {
+        if (speaker == on) return;
+        speaker = on;
+        prefs.edit().putBoolean("speaker", on).apply();
+        // The route is chosen when the track is built, so the next packet builds one for the new output.
+        stopPlayer();
+        refreshOutput();
+        render();
+    }
+
+    private boolean soundLive() {
+        return soundOn && shownPcState == RESPONDING;
+    }
+
+    /** Packets are arriving now, not just a player kept around after the sound stopped. */
+    private boolean soundArriving() {
+        synchronized (audioLock) {
+            return player != null && SystemClock.uptimeMillis() - lastAudioAt < AUDIO_IDLE_MS;
+        }
+    }
+
+    /** Fills the Home row or the Headphones page, whichever is on screen, twice a second. */
+    private void updateSound() {
+        if (headphones == null) return;
+        boolean lost = shownPcState == LOST, waiting = soundOn && !useSpeaker() && earbuds == null;
+        boolean arriving = soundOn && !lost && soundArriving();
+        String delay = delayMs < 0 ? null : "Delay ≈ " + Math.round((rttMs / 2 + delayMs) / 10f) * 10 + " ms";
+        headphones.setMode(!soundOn ? HeadphonesView.OFF : waiting ? HeadphonesView.NONE : HeadphonesView.ON);
+        headphones.setContentDescription(!soundOn ? "Headphones, sound off" : waiting ? "Headphones, no earbuds connected"
+            : arriving ? "Headphones, sound arriving" : "Headphones, nothing playing");
+        if (arriving) headphones.start();
+        if (soundName != null) {
+            soundName.setText(!soundOn ? "PC sound is off" : lost ? "Paused" : waiting ? "No earbuds connected"
+                : useSpeaker() ? "Phone speaker" : earbuds);
+            soundDetail.setText(!soundOn ? (useSpeaker() ? "Plays on the phone speaker" : "Plays on your paired earbuds")
+                : lost ? "Waiting for the PC" : waiting ? "Waiting for earbuds" : !arriving ? "Nothing playing on the PC"
+                : delay != null ? delay : "Measuring the delay");
+        }
+        if (earbudsName != null) {
+            earbudsName.setText(earbuds != null ? earbuds : "No earbuds connected");
+            earbudsName.setTextColor(earbuds != null ? TEXT : waiting ? ALERT : MUTED);
+            earbudsDetail.setText(earbuds != null
+                ? (useSpeaker() ? "Connected, but PC sound plays on the phone speaker"
+                    : earbudsWired ? "Plugged into this phone" : "Paired with this phone")
+                : useSpeaker() ? "PC sound plays on the phone speaker."
+                : waiting ? (Build.VERSION.SDK_INT >= 23 ? "Connect them, or switch to the phone speaker."
+                    : "Connect them in the phone's Bluetooth settings.")
+                : "Connect them in the phone's Bluetooth settings.");
+            soundReadout.setText(!soundOn ? "Turn on PC sound to test" : lost ? "Waiting for the PC"
+                : waiting ? "Waiting for earbuds" : arriving ? "Sound arriving" : "Nothing playing on the PC");
+            soundReadout.setTextColor(!soundOn || lost ? MUTED : waiting ? ALERT : arriving ? ACTIVE : MUTED);
+            soundStatus.setText(!soundOn ? "Off"
+                : (delay != null ? delay + " · " : "") + (currentPc() == usbPc ? "USB cable" : "Wi-Fi"));
+        }
+    }
+
+    /** From the real audio route, so earbuds without buttons count too. Bluetooth first, since it takes the sound. */
+    private void findEarbuds() {
+        if (Build.VERSION.SDK_INT >= 23) {
+            findOutputDevice();
+        } else {
+            earbudsWired = !audioManager.isBluetoothA2dpOn() && audioManager.isWiredHeadsetOn();
+            earbuds = audioManager.isBluetoothA2dpOn() ? "Bluetooth earbuds" : earbudsWired ? "Wired headphones" : null;
+        }
     }
 
     // Its own method so Android 5 never has to resolve AudioDeviceInfo.
-    private String bluetoothOutputName() {
+    private void findOutputDevice() {
+        earbuds = null;
+        earbudsWired = false;
         for (AudioDeviceInfo device : audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
-            if (device.getType() != AudioDeviceInfo.TYPE_BLUETOOTH_A2DP) continue;
-            CharSequence name = device.getProductName();
-            return name != null && name.length() > 0 ? name.toString() : "Bluetooth earbuds";
+            int type = device.getType();
+            if (type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP) {
+                CharSequence name = device.getProductName();
+                earbuds = name != null && name.length() > 0 ? name.toString() : "Bluetooth earbuds";
+                earbudsWired = false;
+                return;
+            }
+            if (type == AudioDeviceInfo.TYPE_WIRED_HEADSET || type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                    || type == AudioDeviceInfo.TYPE_USB_HEADSET) {
+                earbuds = "Wired headphones";
+                earbudsWired = true;
+            }
         }
-        return "Phone speaker";
     }
 
     private void openGame() {
@@ -1137,11 +1275,14 @@ public class MainActivity extends Activity {
         pcDetail = null;
         soundName = null;
         soundDetail = null;
+        earbudsName = null;
+        earbudsDetail = null;
+        soundReadout = null;
+        soundStatus = null;
         headphones = null;
         if (screen != EDIT_PC && screen != MAIN && screen != HOME) formError = null;
         applyGameWindow(screen == GAME);
         shownPcState = pcState();
-        shownAudio = receivingAudio();
         switch (screen) {
             case HOME: setContentView(currentPc() != null ? buildHome(currentPc()) : buildMain()); break;
             case GAME: setContentView(buildGame()); break;
@@ -1149,6 +1290,7 @@ public class MainActivity extends Activity {
             case REMAP_DONE: setContentView(buildRemapDone()); break;
             case SETTINGS: setContentView(buildSettings()); break;
             case EDIT_PC: setContentView(buildEditPc()); break;
+            case HEADPHONES: setContentView(buildHeadphones()); break;
             default: setContentView(buildMain()); break;
         }
         pushPadState();
@@ -1217,7 +1359,7 @@ public class MainActivity extends Activity {
     /** The cord: the PC on top, then one node per feature, live in amber while data flows. */
     private View buildHome(Pc pc) {
         boolean lost = shownPcState == LOST, answering = shownPcState == RESPONDING;
-        boolean soundLive = answering && shownAudio;
+        boolean soundLive = soundLive();
         int players = deviceId != -1 ? 1 : 0;
         // Below the last live feature the cord is always off.
         int toControllers = answering ? ACTIVE : BORDER, toSound = soundLive ? ACTIVE : BORDER;
@@ -1266,7 +1408,7 @@ public class MainActivity extends Activity {
         controllers.addView(padView, gapped(84, 52));
         controllers.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
-        LinearLayout sound = row();
+        LinearLayout sound = clickableRow(() -> show(HEADPHONES), "Headphones, open");
         sound.setMinimumHeight(dp(64));
         sound.setPadding(dp(4), dp(6), dp(4), dp(6));
         LinearLayout soundText = featureText("Headphones · from PC", "", TEXT);
@@ -1275,8 +1417,8 @@ public class MainActivity extends Activity {
         soundText.addView(soundDetail);
         sound.addView(soundText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         headphones = new HeadphonesView(this, levels);
-        headphones.setContentDescription(shownAudio ? "Headphones, sound arriving" : "Headphones, nothing playing");
         sound.addView(headphones, gapped(60, 60));
+        sound.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
         LinearLayout mic = row();
         mic.setMinimumHeight(dp(64));
@@ -1503,6 +1645,93 @@ public class MainActivity extends Activity {
         return root;
     }
 
+    /** Spec 4.5, plus the output choice between the sound switch and the note about the delay. */
+    private View buildHeadphones() {
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(16), dp(16), dp(16));
+        body.addView(text("Earbuds", 12, MUTED));
+        earbudsName = text("", 16, TEXT);
+        earbudsName.setTypeface(medium());
+        body.addView(earbudsName);
+        earbudsDetail = detail("");
+        body.addView(earbudsDetail);
+
+        FrameLayout stage = new FrameLayout(this);
+        stage.setPadding(0, dp(16), 0, dp(8));
+        headphones = new HeadphonesView(this, levels);
+        stage.addView(headphones, new FrameLayout.LayoutParams(dp(250), dp(222), Gravity.CENTER));
+        body.addView(stage, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        soundReadout = mono("");
+        soundReadout.setGravity(Gravity.CENTER);
+        soundReadout.setPadding(0, 0, 0, dp(8));
+        body.addView(soundReadout);
+
+        LinearLayout play = row();
+        LinearLayout playText = column();
+        TextView playTitle = text("Play PC sound", 16, TEXT);
+        playTitle.setTypeface(medium());
+        playText.addView(playTitle);
+        soundStatus = mono("");
+        playText.addView(soundStatus);
+        play.addView(playText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        play.addView(soundSwitch(), gapped(56, 44));
+        body.addView(divided(play));
+
+        LinearLayout output = column();
+        output.addView(text("Plays on", 12, MUTED));
+        LinearLayout tabs = row();
+        tabs.setPadding(0, dp(6), 0, 0);
+        tabs.addView(outputTab("Headphones", false), weighted(0, dp(44)));
+        View gap = new View(this);
+        tabs.addView(gap, new LinearLayout.LayoutParams(dp(4), 0));
+        tabs.addView(outputTab("Phone speaker", true), weighted(0, dp(44)));
+        output.addView(tabs);
+        output.addView(cordLine(BORDER), buttonParams(1));
+        TextView outputNote = detail(useSpeaker() ? "The phone's own speaker, even while earbuds are connected."
+            : "Earbuds or wired headphones, when connected. Without them, nothing plays."
+                + (Build.VERSION.SDK_INT >= 23 ? "" : " The phone speaker needs Android 6 or newer."));
+        outputNote.setPadding(0, dp(8), 0, 0);
+        output.addView(outputNote);
+        body.addView(divided(output));
+
+        LinearLayout about = column();
+        about.addView(text("About the delay", 12, MUTED));
+        TextView aboutNote = detail("Bluetooth adds its own delay. Some phones include it here and some can't measure it. "
+            + "A USB cable to the PC removes the Wi-Fi part.");
+        aboutNote.setPadding(0, dp(8), 0, 0);
+        about.addView(aboutNote);
+        body.addView(divided(about));
+        return withHeader("Headphones", node(soundLive() ? NODE_LIVE : NODE_IDLE, false), () -> show(HOME), body);
+    }
+
+    private View soundSwitch() {
+        SwitchView view = new SwitchView(this);
+        view.setChecked(soundOn);
+        view.setContentDescription("Play PC sound");
+        view.setBackground(ripple(new ColorDrawable(0)));
+        view.setOnCheckedChangeListener((button, on) -> setSound(on));
+        return view;
+    }
+
+    /** Styled like the player strip: the chosen output gets the surface fill and a cream bottom edge. */
+    private Button outputTab(String label, boolean forSpeaker) {
+        Button tab = button(label, PLAIN, () -> setSpeaker(forSpeaker));
+        boolean chosen = forSpeaker == useSpeaker();
+        tab.setSelected(chosen);
+        tab.setTextColor(chosen ? TEXT : MUTED);
+        if (chosen) {
+            ColorDrawable edge = new ColorDrawable(TEXT);
+            LayerDrawable fill = new LayerDrawable(new Drawable[] {new ColorDrawable(SURFACE), edge});
+            fill.setLayerInset(1, 0, dp(42), 0, 0);
+            tab.setBackground(ripple(fill));
+        }
+        if (forSpeaker && Build.VERSION.SDK_INT < 23) {
+            tab.setEnabled(false);
+            tab.setAlpha(0.5f);
+        }
+        return tab;
+    }
+
     private void startRemap() {
         pending = map.copy();
         history.clear();
@@ -1703,7 +1932,7 @@ public class MainActivity extends Activity {
         LinearLayout body = column();
         body.addView(padded(pcSection));
         body.addView(padded(otherSection));
-        return withHeader("Settings", () -> show(HOME), body);
+        return withHeader("Settings", null, () -> show(HOME), body);
     }
 
     private View pcSettingsRow(int index) {
@@ -1751,7 +1980,7 @@ public class MainActivity extends Activity {
             extras.add(button("Delete", SECONDARY, this::deletePc));
             form.addView(extras.size() == 2 ? pair(extras.get(0), extras.get(1)) : spaced(extras.get(0), 44));
         }
-        return withHeader(editIndex >= 0 ? "Edit PC" : "Add PC", () -> show(SETTINGS), padded(form));
+        return withHeader(editIndex >= 0 ? "Edit PC" : "Add PC", null, () -> show(SETTINGS), padded(form));
     }
 
     private void savePc() {
@@ -1990,7 +2219,8 @@ public class MainActivity extends Activity {
         return block;
     }
 
-    private View withHeader(String title, Runnable onBack, View body) {
+    /** The page header: back, an optional cord node, then the title. */
+    private View withHeader(String title, View node, Runnable onBack, View body) {
         LinearLayout root = column();
         LinearLayout header = row();
         header.setPadding(dp(4), 0, dp(16), 0);
@@ -2003,6 +2233,11 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER);
         back.addView(new IconView(this, ICON_LEFT), iconParams);
         header.addView(back, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        if (node != null) {
+            LinearLayout.LayoutParams nodeParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+            nodeParams.setMargins(dp(4), 0, dp(10), 0);
+            header.addView(node, nodeParams);
+        }
         TextView heading = text(title, 18, TEXT);
         heading.setTypeface(medium());
         header.addView(heading);
@@ -2012,6 +2247,45 @@ public class MainActivity extends Activity {
         root.addView(line, buttonParams(1));
         root.addView(scrolling(body), weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
         return root;
+    }
+
+    /** The spec's switch: a 44×24 track and an 18 knob, the same on every Android version. */
+    private static final class SwitchView extends CompoundButton {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF track = new RectF();
+
+        SwitchView(Context context) {
+            super(context, null);
+            setClickable(true);
+            setFocusable(true);
+        }
+
+        @Override
+        public void setChecked(boolean checked) {
+            super.setChecked(checked);
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float d = getResources().getDisplayMetrics().density, x = getWidth() / 2f, y = getHeight() / 2f;
+            boolean on = isChecked();
+            track.set(x - 22 * d, y - 12 * d, x + 22 * d, y + 12 * d);
+            if (!on) track.inset(d / 2, d / 2);
+            paint.setStyle(on ? Paint.Style.FILL : Paint.Style.STROKE);
+            paint.setStrokeWidth(d);
+            paint.setColor(on ? TEXT : IDLE);
+            canvas.drawRoundRect(track, 12 * d, 12 * d, paint);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(on ? BACKGROUND : MUTED);
+            canvas.drawCircle(x + (on ? 10 : -10) * d, y, 9 * d, paint);
+        }
+
+        @Override
+        public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+            super.onInitializeAccessibilityNodeInfo(info);
+            info.setClassName(Switch.class.getName());
+        }
     }
 
     private static final class IconView extends View {
