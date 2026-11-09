@@ -41,7 +41,8 @@ public class KeepAliveService extends Service {
         PendingIntent open = PendingIntent.getActivity(this, 0,
             getPackageManager().getLaunchIntentForPackage(getPackageName()), 0);
         PendingIntent stop = PendingIntent.getBroadcast(this, 0, stopIntent(), 0);
-        builder.setSmallIcon(android.R.drawable.ic_media_play)
+        // The build makes no R class, so the icon is looked up by name.
+        builder.setSmallIcon(getResources().getIdentifier("ic_stat_musubi", "drawable", getPackageName()))
             .setContentTitle("Connected to " + intent.getStringExtra(EXTRA_PC))
             .setContentText(intent.getBooleanExtra(EXTRA_SOUND, true)
                 ? "Sound keeps playing. Open Musubi to use the controller."

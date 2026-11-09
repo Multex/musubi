@@ -93,7 +93,7 @@ class Tray:
             'Id': GLib.Variant('s', 'musubi'),
             'Title': GLib.Variant('s', self.status),
             'Status': GLib.Variant('s', 'Active'),
-            'IconName': GLib.Variant('s', 'input-gaming'),
+            'IconName': GLib.Variant('s', 'io.github.multex.musubi'),
             'ItemIsMenu': GLib.Variant('b', False),
             'Menu': GLib.Variant('o', MENU_PATH),
             'ToolTip': GLib.Variant('(sa(iiay)ss)', ('input-gaming', [], 'Musubi', self.status)),

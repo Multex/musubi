@@ -6,7 +6,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
-    <application android:label="Musubi" android:theme="@style/Theme.Musubi">
+    <application android:label="Musubi" android:icon="@mipmap/ic_launcher" android:theme="@style/Theme.Musubi">
         <!-- configChanges: pairing a pad changes "keyboard" and would otherwise restart the activity. -->
         <!-- singleTop: plugging in while the app is open reuses it instead of opening a second copy. -->
         <activity android:name=".MainActivity"
