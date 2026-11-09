@@ -21,8 +21,6 @@ except ImportError:
     BUILD = 'from source'
 
 LOG_FILE = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'musubi' / 'musubi.log'
-# Stops Windows from failing recvfrom after a send to a phone that closed its port.
-SIO_UDP_CONNRESET = 0x9800000C
 FIREWALL_HINT_AFTER = 30
 MEMORY_LOG_AFTER = 300
 log = logging.getLogger('musubi')
@@ -132,7 +130,7 @@ class Console:
             try:
                 data, addr = self.sock.recvfrom(core.MAX_DATAGRAM)
             except OSError:
-                pass  # Windows raises here for an oversized packet, which is never ours.
+                pass  # Windows raises here after a send to a phone that closed its port, and for oversized packets.
             else:
                 if not self.heard:
                     self.heard = True
@@ -171,7 +169,7 @@ def run():
     except OSError as ex:
         log.error('driver check: %s', ex)
         print(f'ViGEmBus driver: {ex}')
-        print('Install it, then start Musubi again.')
+        print('The controller will not work until that is fixed. Then start Musubi again.')
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -180,7 +178,6 @@ def run():
         log.error('bind: %s', ex)
         print(f'Another program is using UDP port {core.PORT}. Is Musubi already running?')
         return
-    sock.ioctl(SIO_UDP_CONNRESET, False)
 
     address = local_ip()
     log.info('listening, local address %s', address)
