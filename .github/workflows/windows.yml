@@ -42,6 +42,16 @@ jobs:
           "BUILD = '$("${{ github.sha }}".Substring(0, 7))'" | Out-File desktop/build.py -Encoding utf8
           pip install pyinstaller
           pyinstaller --onefile --console --name Musubi-test --paths desktop --add-binary "desktop/ViGEmClient.dll;." desktop/win_main.py
+      - name: Start the exe once
+        shell: pwsh
+        run: |
+          $musubi = Start-Process dist/Musubi-test.exe -PassThru -RedirectStandardOutput out.txt
+          Start-Sleep 10
+          $log = "$env:LOCALAPPDATA/musubi/musubi.log"
+          Get-Content out.txt, $log -ErrorAction SilentlyContinue
+          if ($musubi.HasExited) { throw 'The exe stopped by itself.' }
+          Stop-Process $musubi
+          if (-not (Select-String -Path $log -Pattern 'listening' -Quiet)) { throw 'The exe never started listening.' }
       - uses: actions/upload-artifact@v4
         with:
           name: Musubi-test

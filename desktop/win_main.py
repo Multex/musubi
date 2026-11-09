@@ -145,7 +145,8 @@ class Console:
 
 
 def read_lines(console):
-    for line in sys.stdin:
+    # Started without a console there is no stdin at all.
+    for line in sys.stdin or ():
         console.post('line', line.strip())
 
 
