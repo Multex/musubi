@@ -172,8 +172,8 @@ public class MainActivity extends Activity {
     private static final float DISPLAY_DEAD_ZONE = 0.05f;
     private static final String REPO = "https://github.com/Multex/musubi";
 
-    // MAIN is the controller screen, opened from HOME.
-    private static final int MAIN = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6, HEADPHONES = 7;
+    // CONTROLLERS is the controllers page, opened from HOME.
+    private static final int CONTROLLERS = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6, HEADPHONES = 7;
     private static final int CONNECTING = 0, RESPONDING = 1, LOST = 2;
     private static final int PRIMARY = 0, SECONDARY = 1, PLAIN = 2;
     private static final int ICON_DOWN = 0, ICON_RIGHT = 1, ICON_LEFT = 2, ICON_ARROW_UP = 3, ICON_ARROW_DOWN = 4;
@@ -256,6 +256,7 @@ public class MainActivity extends Activity {
 
     private int screen = HOME;
     private int gameFrom = HOME;
+    private int selectedPlayer = 1;
     private int shownPcState = -1;
     private long lastTouch;
     private long lastUiUpdate;
@@ -466,7 +467,7 @@ public class MainActivity extends Activity {
             if (currentPc() == null) stopAll();
             else showKeepAlive();
         }
-        if (screen == MAIN || screen == HOME || screen == GAME) render();
+        if (screen == CONTROLLERS || screen == HOME || screen == GAME) render();
     }
 
     /** Messages from the PC are length-prefixed like ours, and one read can hold several or part of one. */
@@ -505,7 +506,7 @@ public class MainActivity extends Activity {
             show(gameFrom);
         } else if (screen == REMAP || screen == REMAP_DONE) {
             if (screen == REMAP_DONE) loadMap();
-            show(MAIN);
+            show(CONTROLLERS);
         } else {
             show(HOME);
         }
@@ -697,6 +698,21 @@ public class MainActivity extends Activity {
         if (weak > 0) add.invoke(parallel, ids[1], VibrationEffect.createOneShot(duration, amplitude(weak)));
         managerClass.getMethod("vibrate", combinedClass).invoke(manager, parallelClass.getMethod("combine").invoke(parallel));
         return true;
+    }
+
+    /** The same vibrator the rumble falls back to; many pads have none over Bluetooth. */
+    private static boolean canVibrate(int id) {
+        InputDevice device = InputDevice.getDevice(id);
+        try {
+            if (device == null) return false;
+            if (Build.VERSION.SDK_INT >= 31) {
+                Object manager = InputDevice.class.getMethod("getVibratorManager").invoke(device);
+                if (((int[]) manager.getClass().getMethod("getVibratorIds").invoke(manager)).length > 0) return true;
+            }
+            return device.getVibrator().hasVibrator();
+        } catch (ReflectiveOperationException | RuntimeException ex) {
+            return false;
+        }
     }
 
     private static int amplitude(int level) {
@@ -961,8 +977,10 @@ public class MainActivity extends Activity {
         if (deviceId != before) {
             rumble(before, 0, 0, 0);
             showRumble(0, 0, 0);
+            // A controller joining or dropping is always player 1 until multi-pad, so show that tab.
+            selectedPlayer = 1;
         }
-        if (deviceId != before && (screen == MAIN || screen == HOME || screen == SETTINGS)) {
+        if (deviceId != before && (screen == CONTROLLERS || screen == HOME || screen == SETTINGS)) {
             render();
         }
     }
@@ -1220,12 +1238,12 @@ public class MainActivity extends Activity {
         refreshOutput();
         if (state != shownPcState) {
             shownPcState = state;
-            if (((screen == MAIN || screen == HOME || screen == HEADPHONES) && currentPc() != null) || screen == GAME) render();
+            if (((screen == CONTROLLERS || screen == HOME || screen == HEADPHONES) && currentPc() != null) || screen == GAME) render();
         }
         if (pcDetail != null) pcDetail.setText(pcDetailText(state));
         updateSound();
         updateReadout(true);
-        if ((screen == MAIN || screen == HOME) && autoGameMode && deviceId != -1 && currentPc() != null
+        if ((screen == CONTROLLERS || screen == HOME) && autoGameMode && deviceId != -1 && currentPc() != null
                 && SystemClock.uptimeMillis() - lastTouch >= AUTO_GAME_MODE_MS) {
             openGame();
         }
@@ -1367,7 +1385,7 @@ public class MainActivity extends Activity {
         soundReadout = null;
         soundStatus = null;
         headphones = null;
-        if (screen != EDIT_PC && screen != MAIN && screen != HOME) formError = null;
+        if (screen != EDIT_PC && screen != HOME) formError = null;
         applyGameWindow(screen == GAME);
         shownPcState = pcState();
         switch (screen) {
@@ -1378,7 +1396,7 @@ public class MainActivity extends Activity {
             case SETTINGS: setContentView(buildSettings()); break;
             case EDIT_PC: setContentView(buildEditPc()); break;
             case HEADPHONES: setContentView(buildHeadphones()); break;
-            default: setContentView(buildMain()); break;
+            default: setContentView(currentPc() != null ? buildControllers(currentPc()) : buildMain()); break;
         }
         pushPadState();
         updateSound();
@@ -1411,37 +1429,14 @@ public class MainActivity extends Activity {
         return root;
     }
 
+    /** First run, before any PC is saved. */
     private View buildMain() {
         LinearLayout top = column();
         top.addView(controllerBlock());
+        top.addView(firstRunForm());
         LinearLayout actions = column();
-        View middle = null;
-        Pc pc = currentPc();
-        if (pc == null) {
-            top.addView(firstRunForm());
-            actions.addView(button("Save PC", PRIMARY, this::saveFirstPc), buttonParams(48));
-        } else if (shownPcState == LOST) {
-            top.addView(lostBlock(pc));
-            TextView message = text(lostMessage(pc), 13, TEXT);
-            message.setLineSpacing(0, 1.3f);
-            message.setPadding(0, dp(8), 0, dp(8));
-            middle = message;
-            actions.addView(button("Switch PC", PRIMARY, this::switchPc), buttonParams(48));
-            actions.addView(spaced(button("Settings", SECONDARY, () -> show(SETTINGS)), 44));
-        } else {
-            top.addView(pcRow(pc));
-            readout = text("", 12, MUTED);
-            readout.setTypeface(Typeface.MONOSPACE);
-            readout.setGravity(Gravity.CENTER);
-            readout.setPadding(0, dp(8), 0, dp(8));
-            middle = readout;
-            actions.addView(button("Game mode", PRIMARY, this::openGame), buttonParams(48));
-            Button remap = button("Remap", SECONDARY, this::startRemap);
-            remap.setEnabled(deviceId != -1);
-            remap.setAlpha(deviceId != -1 ? 1 : 0.5f);
-            actions.addView(pair(remap, button("Settings", SECONDARY, () -> show(SETTINGS))));
-        }
-        return withPad(-1, top, middle, actions);
+        actions.addView(button("Save PC", PRIMARY, this::saveFirstPc), buttonParams(48));
+        return withPad(-1, top, null, actions);
     }
 
     /** The cord: the PC on top, then one node per feature, live in amber while data flows. */
@@ -1480,7 +1475,10 @@ public class MainActivity extends Activity {
         squareShape.setColor(lost ? ALERT : answering ? ACTIVE : IDLE);
         square.setBackground(squareShape);
 
-        LinearLayout controllers = clickableRow(() -> show(MAIN),
+        LinearLayout controllers = clickableRow(() -> {
+                selectedPlayer = 1;
+                show(CONTROLLERS);
+            },
             "Controllers, " + players + " of 4 players connected, open");
         controllers.setMinimumHeight(dp(64));
         controllers.setPadding(dp(4), dp(6), dp(4), dp(6));
@@ -1647,33 +1645,6 @@ public class MainActivity extends Activity {
         return block;
     }
 
-    private View pcRow(Pc pc) {
-        LinearLayout row = clickableRow(this::switchPc, "Switch PC");
-        LinearLayout labels = column();
-        labels.addView(text("PC", 12, MUTED));
-        TextView name = text(pc.name, 16, TEXT);
-        name.setTypeface(medium());
-        labels.addView(name);
-        pcDetail = text(pcDetailText(shownPcState), 12, MUTED);
-        pcDetail.setTypeface(Typeface.MONOSPACE);
-        labels.addView(pcDetail);
-        row.addView(labels, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
-        row.addView(new IconView(this, ICON_DOWN), new LinearLayout.LayoutParams(dp(20), dp(20)));
-        return divided(row);
-    }
-
-    private View lostBlock(Pc pc) {
-        LinearLayout block = column();
-        block.addView(text("PC", 12, MUTED));
-        TextView name = text(pc.name, 16, TEXT);
-        name.setTypeface(medium());
-        block.addView(name);
-        TextView status = text("PC not responding", 14, ALERT);
-        status.setTypeface(Typeface.DEFAULT_BOLD);
-        block.addView(status);
-        return divided(block);
-    }
-
     private View firstRunForm() {
         LinearLayout form = column();
         form.addView(field("PC IP address", draftIp, "192.168.1.12", true, value -> draftIp = value));
@@ -1765,6 +1736,7 @@ public class MainActivity extends Activity {
         line.setGravity(Gravity.CENTER);
         root.addView(line);
         TextView back = text("Tap to go back", 13, MUTED);
+        back.setGravity(Gravity.CENTER);
         back.setPadding(0, dp(8), 0, 0);
         root.addView(back);
         return root;
@@ -1827,6 +1799,113 @@ public class MainActivity extends Activity {
         about.addView(aboutNote);
         body.addView(divided(about));
         return withHeader("Headphones", node(soundLive() ? NODE_LIVE : NODE_IDLE, false), () -> show(HOME), body);
+    }
+
+    /** Spec 4.3. Until multi-pad ships only player 1 is real; players 2 to 4 are placeholders. */
+    private View buildControllers(Pc pc) {
+        boolean connected = deviceId != -1;
+        int n = selectedPlayer;
+        LinearLayout strip = row();
+        for (int i = 1; i <= 4; i++) {
+            if (i > 1) strip.addView(new View(this), new LinearLayout.LayoutParams(dp(4), 0));
+            strip.addView(playerTab(i, connected), weighted(0, dp(64)));
+        }
+
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(16), dp(16), dp(16));
+        TextView value = text(n > 1 ? "Player " + n : connected ? deviceName : "Player 1 is free", 16, TEXT);
+        value.setTypeface(medium());
+        body.addView(value);
+        body.addView(detail(n > 1 ? "More controllers at once are coming in a later version."
+            : connected ? "Player 1 · games see Xbox 360 controller 1"
+            : "Turn on a controller paired with this phone. Games will see it as Xbox 360 controller 1."));
+        if (n == 1 && connected && !canVibrate(deviceId)) body.addView(detail("Can't vibrate over Bluetooth"));
+        if (n > 1) {
+            body.addView(new View(this), weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        } else {
+            PadView pad = new PadView(this);
+            pad.setContentDescription("Controller");
+            int padding = dp(8);
+            pad.setPadding(padding, padding, padding, padding);
+            body.addView(pad, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+            TextView status = mono(connected ? "" : "Waiting for a controller");
+            status.setGravity(Gravity.CENTER);
+            status.setPadding(0, 0, 0, dp(8));
+            body.addView(status);
+            if (connected) {
+                padView = pad;
+                pad.setRumble(rumbleStrong, rumbleWeak);
+                readout = status;
+                body.addView(button("Remap", SECONDARY, this::startRemap), buttonParams(44));
+            } else {
+                pad.setAlpha(0.35f);
+                body.addView(button("Pair a new controller", SECONDARY, () -> {
+                    try {
+                        startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));
+                    } catch (ActivityNotFoundException missing) {
+                        Toast.makeText(this, "This phone has no Bluetooth settings to open", Toast.LENGTH_SHORT).show();
+                    }
+                }), buttonParams(44));
+                TextView caption = text("Opens the phone's Bluetooth settings", 12, MUTED);
+                caption.setGravity(Gravity.CENTER);
+                caption.setPadding(0, dp(6), 0, 0);
+                body.addView(caption);
+            }
+        }
+        LinearLayout footer = column();
+        footer.addView(detail("Controllers only work while Musubi is open. Game mode keeps it open with the screen dimmed."));
+        LinearLayout.LayoutParams gameParams = buttonParams(48);
+        gameParams.topMargin = dp(12);
+        footer.addView(button("Game mode", PRIMARY, this::openGame), gameParams);
+        body.addView(divided(footer));
+
+        LinearLayout page = column();
+        page.addView(strip);
+        page.addView(cordLine(BORDER), buttonParams(1));
+        page.addView(body, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        LinearLayout root = (LinearLayout) withHeader("Controllers", node(shownPcState == RESPONDING && deviceId != -1 ? NODE_LIVE : NODE_IDLE, true), () -> show(HOME), page);
+        LinearLayout header = (LinearLayout) root.getChildAt(0);
+        header.getChildAt(0).setContentDescription("Back to " + pc.name);
+        header.addView(new View(this), weighted(0, 0));
+        header.addView(mono((connected ? 1 : 0) + " of 4"));
+        return root;
+    }
+
+    /** Number over label; the selected tab gets the surface fill and a cream bottom edge, like the output tabs. */
+    private View playerTab(int n, boolean connected) {
+        boolean real = n == 1, on = real && connected, selected = n == selectedPlayer;
+        LinearLayout tab = column();
+        tab.setGravity(Gravity.CENTER);
+        tab.setClickable(true);
+        tab.setFocusable(true);
+        tab.setSelected(selected);
+        tab.setContentDescription("Player " + n + (on ? ", " + deviceName : real ? ", free" : ", coming later"));
+        tab.setOnClickListener(view -> {
+            selectedPlayer = n;
+            render();
+        });
+        Drawable fill = new ColorDrawable(0);
+        if (selected) {
+            LayerDrawable layered = new LayerDrawable(new Drawable[] {new ColorDrawable(SURFACE), new ColorDrawable(TEXT)});
+            layered.setLayerInset(1, 0, dp(62), 0, 0);
+            fill = layered;
+        }
+        tab.setBackground(ripple(fill));
+        TextView number = text(String.valueOf(n), 13, on ? BACKGROUND : MUTED);
+        number.setTypeface(Typeface.DEFAULT_BOLD);
+        number.setGravity(Gravity.CENTER);
+        number.setIncludeFontPadding(false);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setShape(GradientDrawable.OVAL);
+        if (on) shape.setColor(ACTIVE);
+        else shape.setStroke(dp(2), IDLE, dp(3), dp(2));
+        number.setBackground(shape);
+        tab.addView(number, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        TextView label = text(on ? "Connected" : real ? "Free" : "Later", 12, selected ? TEXT : MUTED);
+        label.setGravity(Gravity.CENTER);
+        label.setPadding(0, dp(4), 0, 0);
+        tab.addView(label);
+        return tab;
     }
 
     private View soundSwitch() {
@@ -1960,7 +2039,7 @@ public class MainActivity extends Activity {
         LinearLayout pair = pair(back, button("Skip", SECONDARY, this::skipStep));
         ((LinearLayout.LayoutParams) pair.getLayoutParams()).topMargin = 0;
         actions.addView(pair);
-        actions.addView(spaced(button("Cancel remap", PLAIN, () -> show(MAIN)), 44));
+        actions.addView(spaced(button("Cancel remap", PLAIN, () -> show(CONTROLLERS)), 44));
         return withPad(STEP_CONTROLS[step], top, status, actions);
     }
 
@@ -1988,7 +2067,7 @@ public class MainActivity extends Activity {
         LinearLayout actions = column();
         actions.addView(button("Save", PRIMARY, () -> {
             prefs.edit().putString(mapKey(), map.encode()).apply();
-            show(MAIN);
+            show(CONTROLLERS);
         }), buttonParams(48));
         actions.addView(pair(
             button("Start over", SECONDARY, () -> {
@@ -1997,7 +2076,7 @@ public class MainActivity extends Activity {
             }),
             button("Reset", SECONDARY, () -> {
                 resetLayout();
-                show(MAIN);
+                show(CONTROLLERS);
             })));
         return withPad(-1, top, null, actions);
     }
