@@ -37,6 +37,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextUtils;
@@ -72,6 +74,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -133,9 +136,15 @@ public class MainActivity extends Activity {
     private static final byte[] HELLO_MAGIC = {'P', 'B', 'H', 'I'};
     // Below 0x20, so 0.5.x desktops drop it from the controller name as a control character.
     private static final byte FEATURE_AUDIO = 1;
+    private static final byte FEATURE_RUMBLE = 2;
     // Magic, sequence number, then PCM, matching AUDIO in musubi.py.
     private static final byte[] AUDIO_MAGIC = {'P', 'B', 'A', 'U'};
     private static final int AUDIO_HEADER = AUDIO_MAGIC.length + 2;
+    // Magic, strong and weak motor 0..65535, then ms (0 = until the next message), matching RUMBLE in musubi.py.
+    private static final byte[] RUMBLE_MAGIC = {'P', 'B', 'R', 'M'};
+    private static final int RUMBLE_SIZE = RUMBLE_MAGIC.length + 6;
+    // The PC repeats an endless rumble every second, so a lost stop can't leave the pad buzzing past this.
+    private static final int RUMBLE_CAP_MS = 2000;
     // 5 ms of 48 kHz stereo PCM is under 1 KB.
     private static final int UDP_RECEIVE_SIZE = 2048;
     private static final int AUDIO_RATE = 48000;
@@ -237,7 +246,7 @@ public class MainActivity extends Activity {
     private int selectedPc;
     private boolean autoGameMode;
 
-    private int deviceId = -1;
+    private volatile int deviceId = -1;
     private volatile String deviceName;
     private String descriptor;
     private int stickXAxis = MotionEvent.AXIS_Z, stickYAxis = MotionEvent.AXIS_RZ;
@@ -267,7 +276,7 @@ public class MainActivity extends Activity {
     private long ignoreInputUntil;
     private String stepNote;
 
-    private boolean backgrounded;
+    private volatile boolean backgrounded;
     // Once the PC stops answering, end the background session like leaving the app unconnected.
     private final Runnable watchPc = new Runnable() {
         @Override
@@ -358,6 +367,7 @@ public class MainActivity extends Activity {
         handler.removeCallbacks(finishCapture);
         capture.clear();
         inputManager.unregisterInputDeviceListener(deviceListener);
+        rumble(deviceId, 0, 0, 0);
         // The app gets no key-up events while in the background.
         axisButtons = 0;
         clearInput();
@@ -584,7 +594,7 @@ public class MainActivity extends Activity {
         out.putShort((short) Math.min(rttMs, 65535));
         out.put(names);
         out.put((byte) 0);
-        out.put(soundOn ? FEATURE_AUDIO : 0);
+        out.put((byte) ((soundOn ? FEATURE_AUDIO : 0) | FEATURE_RUMBLE));
         // Same figure as the Headphones page; 0 means no reading.
         int delay = soundOn && delayMs >= 0 ? Math.round((rttMs / 2 + delayMs) / 10f) * 10 : 0;
         out.putShort((short) Math.min(delay, 65535));
@@ -618,9 +628,62 @@ public class MainActivity extends Activity {
         if (length == PING_SIZE) {
             rttMs = (System.nanoTime() - in.getLong()) / 1000000;
             lastPongAt = SystemClock.uptimeMillis();
-        } else if (length >= AUDIO_HEADER && in.getInt() == ByteBuffer.wrap(AUDIO_MAGIC).getInt()) {
-            onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
+        } else if (length >= 4) {
+            int magic = in.getInt();
+            if (length >= AUDIO_HEADER && magic == ByteBuffer.wrap(AUDIO_MAGIC).getInt()) {
+                onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
+            } else if (length >= RUMBLE_SIZE && magic == ByteBuffer.wrap(RUMBLE_MAGIC).getInt()) {
+                // The pad's input doesn't reach the PC from the background, so neither does its rumble.
+                if (running && !backgrounded) rumble(deviceId, in.getShort() & 0xffff, in.getShort() & 0xffff, in.getShort() & 0xffff);
+            }
         }
+    }
+
+    /** Drives the controller's motors; levels are 0..65535, and 0, 0 stops them. */
+    private static void rumble(int id, int strong, int weak, int ms) {
+        InputDevice device = InputDevice.getDevice(id);
+        if (device == null) return;
+        int duration = ms > 0 ? ms : RUMBLE_CAP_MS;
+        try {
+            if (Build.VERSION.SDK_INT >= 31 && rumbleMotors(device, strong, weak, duration)) return;
+            Vibrator vibrator = device.getVibrator();
+            int level = Math.max(strong, weak);
+            if (!vibrator.hasVibrator()) return;
+            if (level == 0) vibrator.cancel();
+            else if (Build.VERSION.SDK_INT >= 26) vibrator.vibrate(VibrationEffect.createOneShot(duration, amplitude(level)));
+            else vibrator.vibrate(duration);
+        } catch (ReflectiveOperationException | RuntimeException ex) {
+            Log.w("musubi", "rumble failed", ex);
+        }
+    }
+
+    /**
+     * Android 12+ drives each motor on its own. The android-28 jar lacks these classes, so they go through reflection.
+     * Returns false for a pad with fewer than two motors, which the single vibrator handles.
+     */
+    private static boolean rumbleMotors(InputDevice device, int strong, int weak, int duration)
+            throws ReflectiveOperationException {
+        Class<?> managerClass = Class.forName("android.os.VibratorManager");
+        Object manager = InputDevice.class.getMethod("getVibratorManager").invoke(device);
+        int[] ids = (int[]) managerClass.getMethod("getVibratorIds").invoke(manager);
+        if (ids.length < 2) return false;
+        if (strong == 0 && weak == 0) {
+            managerClass.getMethod("cancel").invoke(manager);
+            return true;
+        }
+        Class<?> combinedClass = Class.forName("android.os.CombinedVibration");
+        Class<?> parallelClass = Class.forName("android.os.CombinedVibration$ParallelCombination");
+        Object parallel = combinedClass.getMethod("startParallel").invoke(null);
+        Method add = parallelClass.getMethod("addVibrator", int.class, VibrationEffect.class);
+        // AOSP's EventHub gives a rumble pad vibrator 0 as the strong (low-frequency) motor and 1 as the weak one.
+        if (strong > 0) add.invoke(parallel, ids[0], VibrationEffect.createOneShot(duration, amplitude(strong)));
+        if (weak > 0) add.invoke(parallel, ids[1], VibrationEffect.createOneShot(duration, amplitude(weak)));
+        managerClass.getMethod("vibrate", combinedClass).invoke(manager, parallelClass.getMethod("combine").invoke(parallel));
+        return true;
+    }
+
+    private static int amplitude(int level) {
+        return Math.max(1, level * 255 / 65535);
     }
 
     /** 16-bit stereo PCM at 48 kHz from the PC. A lost packet is simply skipped. */
@@ -878,6 +941,7 @@ public class MainActivity extends Activity {
     private void updateController() {
         int before = deviceId;
         findController();
+        if (deviceId != before) rumble(before, 0, 0, 0);
         if (deviceId != before && (screen == MAIN || screen == HOME || screen == SETTINGS)) {
             render();
         }

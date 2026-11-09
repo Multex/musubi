@@ -5,6 +5,8 @@ import subprocess
 import unittest
 from unittest import mock
 
+from evdev import InputEvent, ecodes as e, ff
+
 import audio
 import musubi
 from musubi import HELLO, HELLO_MAGIC, PACKET, Bridge, decode, decode_hello
@@ -42,7 +44,7 @@ class HelloTest(unittest.TestCase):
     def test_reads_every_field(self):
         self.assertEqual(decode_hello(hello()), {
             'name': 'LM-X430', 'controller': 'Xbox Wireless Controller',
-            'controller_connected': True, 'rtt': 9, 'audio': False, 'delay': None,
+            'controller_connected': True, 'rtt': 9, 'audio': False, 'rumble': False, 'delay': None,
         })
 
     def test_reads_the_features_after_the_names(self):
@@ -101,6 +103,56 @@ class FakeUi:
 
     def close(self):
         self.closed = True
+
+
+class FakeFfUi(FakeUi):
+    """Stands in for the uinput fd: queued events, and the effects behind each upload request."""
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+        self.uploads = {}
+        self.erases = {}
+        self.answered = []
+
+    def read(self):
+        if not self.events:
+            raise BlockingIOError
+        events, self.events = self.events, []
+        return iter(events)
+
+    def queue(self, kind, code, value):
+        self.events.append(InputEvent(0, 0, kind, code, value))
+
+    def upload(self, request, effect_id, strong, weak, length):
+        upload = ff.UInputUpload()
+        upload.request_id = request
+        upload.effect.type = e.FF_RUMBLE
+        upload.effect.id = effect_id
+        upload.effect.ff_replay.length = length
+        upload.effect.u.ff_rumble_effect.strong_magnitude = strong
+        upload.effect.u.ff_rumble_effect.weak_magnitude = weak
+        self.uploads[request] = upload
+        self.queue(e.EV_UINPUT, e.UI_FF_UPLOAD, request)
+
+    def erase(self, request, effect_id):
+        erase = ff.UInputErase()
+        erase.request_id = request
+        erase.effect_id = effect_id
+        self.erases[request] = erase
+        self.queue(e.EV_UINPUT, e.UI_FF_ERASE, request)
+
+    def begin_upload(self, request):
+        return self.uploads.pop(request)
+
+    def end_upload(self, upload):
+        self.answered.append(('upload', upload.request_id, upload.retval))
+
+    def begin_erase(self, request):
+        return self.erases.pop(request)
+
+    def end_erase(self, erase):
+        self.answered.append(('erase', erase.request_id, erase.retval))
 
 
 class BridgeTest(unittest.TestCase):
@@ -344,6 +396,122 @@ class BridgeTest(unittest.TestCase):
 
 def pcm(left, right, frames=240):
     return struct.pack('<2h', left, right) * frames
+
+
+class RumbleTest(unittest.TestCase):
+    PHONE = ('192.168.1.10', 5000)
+    STOP = musubi.rumble_message(0, 0, 0)
+
+    def setUp(self):
+        self.sock = FakeSock()
+        self.now = 100.0
+        self.usb_sent = []
+        self.bridge = Bridge(self.sock, [self.PHONE[0]], lambda: None, make_pad=FakeFfUi,
+                             clock=lambda: self.now, send_usb=self.usb_sent.append)
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_RUMBLE), self.PHONE)
+        self.pad = self.bridge.pad
+
+    def sent(self):
+        return [data for data, _ in self.sock.sent]
+
+    def play(self, effect_id, count=1):
+        self.pad.queue(e.EV_FF, effect_id, count)
+        self.bridge.on_pad_events()
+
+    def test_message_layout(self):
+        self.assertEqual(musubi.rumble_message(0xffff, 0x8000, 250), b'PBRM\xff\xff\x80\x00\x00\xfa')
+
+    def test_hello_flag(self):
+        self.assertTrue(decode_hello(hello(features=musubi.FEATURE_RUMBLE))['rumble'])
+        self.assertFalse(decode_hello(hello(features=musubi.FEATURE_AUDIO))['rumble'])
+
+    def test_upload_play_and_stop(self):
+        self.pad.upload(3, 0, 0xffff, 0x1000, 500)
+        self.bridge.on_pad_events()
+        self.assertEqual(self.pad.answered, [('upload', 3, 0)])
+        self.assertEqual(self.sent(), [])
+        self.play(0)
+        self.play(0, 0)
+        self.assertEqual(self.sent(), [musubi.rumble_message(0xffff, 0x1000, 500), self.STOP])
+
+    def test_play_count_multiplies_the_length_and_unknown_ids_are_ignored(self):
+        self.pad.upload(0, 1, 100, 200, 300)
+        self.play(5)
+        self.play(1, 3)
+        self.assertEqual(self.sent(), [musubi.rumble_message(100, 200, 900)])
+
+    def test_updating_the_playing_effect_resends_and_repeats_dont(self):
+        self.pad.upload(0, 0, 100, 0, 0)
+        self.play(0)
+        self.bridge.on_tick()
+        self.pad.upload(1, 0, 100, 0, 0)
+        self.bridge.on_pad_events()
+        self.pad.upload(2, 0, 900, 0, 0)
+        self.bridge.on_pad_events()
+        self.assertEqual(self.sent(), [musubi.rumble_message(100, 0, 0), musubi.rumble_message(900, 0, 0)])
+
+    def test_stops_when_the_length_runs_out(self):
+        self.pad.upload(0, 0, 1, 1, 200)
+        self.play(0)
+        self.now += 0.1
+        self.bridge.on_tick()
+        self.now += 0.2
+        self.bridge.on_tick()
+        self.bridge.on_tick()
+        self.assertEqual(self.sent(), [musubi.rumble_message(1, 1, 200), self.STOP])
+
+    def test_endless_rumble_is_refreshed_before_the_phone_gives_up(self):
+        self.pad.upload(0, 0, 1, 1, 0)
+        self.play(0)
+        self.now += musubi.RUMBLE_REFRESH / 2
+        self.bridge.on_tick()
+        self.now += musubi.RUMBLE_REFRESH / 2
+        self.bridge.on_tick()
+        self.assertEqual(self.sent(), [musubi.rumble_message(1, 1, 0)] * 2)
+
+    def test_erasing_the_playing_effect_stops_it(self):
+        self.pad.upload(0, 2, 5, 5, 0)
+        self.play(2)
+        self.pad.erase(7, 2)
+        self.bridge.on_pad_events()
+        self.assertEqual(self.pad.answered[-1], ('erase', 7, 0))
+        self.assertEqual(self.sent()[-1], self.STOP)
+        self.play(2)
+        self.assertEqual(len(self.sent()), 2)
+
+    def test_a_dropped_phone_gets_a_final_stop(self):
+        self.pad.upload(0, 0, 5, 5, 0)
+        self.play(0)
+        self.now += musubi.PHONE_TIMEOUT + 1
+        self.bridge.on_tick()
+        self.assertEqual(self.sent()[-1], self.STOP)
+        self.assertTrue(self.pad.closed)
+
+    def test_a_disconnected_controller_stops_the_rumble(self):
+        self.pad.upload(0, 0, 5, 5, 0)
+        self.play(0)
+        self.bridge.on_datagram(hello(connected=False, features=musubi.FEATURE_RUMBLE), self.PHONE)
+        self.assertEqual(self.sent()[-1], self.STOP)
+        self.assertIsNone(self.bridge.pad)
+
+    def test_only_phones_with_the_flag_get_rumble(self):
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), self.PHONE)
+        self.pad.upload(0, 0, 5, 5, 0)
+        self.play(0)
+        self.assertEqual(self.sent(), [])
+
+    def test_goes_over_the_cable_too(self):
+        self.bridge.on_datagram(hello(features=musubi.FEATURE_RUMBLE), (musubi.USB, 0))
+        self.pad.upload(0, 0, 5, 5, 0)
+        self.play(0)
+        self.assertEqual(self.usb_sent, [musubi.rumble_message(5, 5, 0)])
+
+    def test_a_failed_request_is_skipped(self):
+        self.pad.queue(e.EV_UINPUT, e.UI_FF_UPLOAD, 9)
+        self.pad.begin_upload = mock.Mock(side_effect=OSError)
+        self.bridge.on_pad_events()
+        self.bridge.on_pad_events()
+        self.assertEqual(self.sent(), [])
 
 
 class LevelsTest(unittest.TestCase):

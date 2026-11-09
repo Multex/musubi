@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Receive gamepad state from the Android app and replay it on a virtual pad."""
 import argparse
+import ctypes
 import json
 import os
 import select
@@ -10,7 +11,7 @@ import struct
 import sys
 import time
 
-from evdev import AbsInfo, UInput, ecodes as e
+from evdev import AbsInfo, UInput, UInputError, ecodes as e, ff
 
 import audio
 
@@ -39,9 +40,17 @@ HELLO = struct.Struct('!4sBH')
 HELLO_MAGIC = b'PBHI'
 # Feature bits stay below 0x20: 0.5.x desktops read the byte as part of the controller name and drop it as a control character.
 FEATURE_AUDIO = 1
+FEATURE_RUMBLE = 2
 # PC to phone: magic, sequence number, then PCM.
 AUDIO = struct.Struct('!4sH')
 AUDIO_MAGIC = b'PBAU'
+# PC to phone: magic, strong and weak motor 0..65535, then ms left (0 = until the next message). Sent on change only.
+RUMBLE = struct.Struct('!4sHHH')
+RUMBLE_MAGIC = b'PBRM'
+RUMBLE_STOPPED = (0, 0, None)
+# The phone stops an endless rumble after 2 s unless told again, so a lost stop can't leave the pad buzzing.
+RUMBLE_REFRESH = 1.0
+MAX_EFFECTS = 16
 MAX_DATAGRAM = 512
 MAX_NAME = 64
 MAX_PENDING = 8
@@ -92,12 +101,17 @@ def decode_hello(data):
         'controller_connected': bool(connected),
         'rtt': rtt,
         'audio': bool(flags & FEATURE_AUDIO),
+        'rumble': bool(flags & FEATURE_RUMBLE),
         'delay': delay or None,
     }
 
 
 def audio_message(seq, pcm):
     return AUDIO.pack(AUDIO_MAGIC, seq & 0xffff) + pcm
+
+
+def rumble_message(strong, weak, ms):
+    return RUMBLE.pack(RUMBLE_MAGIC, strong, weak, ms)
 
 
 def apply(ui, state):
@@ -109,9 +123,25 @@ def apply(ui, state):
     ui.syn()
 
 
-def make_pad():
-    return UInput({e.EV_KEY: BUTTONS, e.EV_ABS: AXES}, name='Musubi', vendor=0x045e,
-                  product=0x028e, version=0x110, bustype=e.BUS_USB)
+class Pad(UInput):
+    """python-evdev 2.0 never sets request_id, so it would answer the wrong game once two requests overlap."""
+
+    def begin_upload(self, request_id):
+        return self._begin(ff.UInputUpload(), request_id, self.dll._uinput_begin_upload)
+
+    def begin_erase(self, request_id):
+        return self._begin(ff.UInputErase(), request_id, self.dll._uinput_begin_erase)
+
+    def _begin(self, request, request_id, ioctl):
+        request.request_id = request_id
+        if ioctl(self.fd, ctypes.byref(request)):
+            raise UInputError('uinput force feedback request failed')
+        return request
+
+
+def make_pad(name='Musubi'):
+    return Pad({e.EV_KEY: BUTTONS, e.EV_ABS: AXES, e.EV_FF: [e.FF_RUMBLE]}, name=name, vendor=0x045e,
+               product=0x028e, version=0x110, bustype=e.BUS_USB, max_effects=MAX_EFFECTS)
 
 
 class Bridge:
@@ -137,6 +167,13 @@ class Bridge:
         self.active_since = 0
         self.pending = {}
         self.pending_seen = {}
+        # Effect id to (strong, weak, length in ms), as the game uploaded them.
+        self.effects = {}
+        # shortcut: one effect plays at a time, the latest play wins, mix them if a game layers effects.
+        self.playing = None
+        self.playing_until = None
+        self.rumble_sent = RUMBLE_STOPPED
+        self.rumble_sent_at = 0
 
     def status(self):
         phone = None
@@ -186,6 +223,9 @@ class Bridge:
             self.on_status()
 
     def _close_pad(self):
+        self.effects = {}
+        self.playing = None
+        self._send_rumble()
         apply(self.pad, decode(NEUTRAL))
         self.pad.close()
         self.pad = None
@@ -194,12 +234,13 @@ class Bridge:
             self.on_input(decode(NEUTRAL))
 
     def _drop_phone(self):
+        # Before forgetting the phone, so its final rumble stop still has somewhere to go.
+        if self.pad is not None:
+            self._close_pad()
         self.active = None
         self.addr = None
         self.hello = None
         self.pad_error = None
-        if self.pad is not None:
-            self._close_pad()
 
     def _note_unknown(self, ip, data):
         hello = decode_hello(data)
@@ -263,11 +304,64 @@ class Bridge:
             if self.on_input:
                 self.on_input(state)
 
+    def on_pad_events(self):
+        """Force feedback from games: effect uploads and erases, then plays and stops."""
+        try:
+            events = list(self.pad.read())
+        except OSError:
+            return
+        for event in events:
+            try:
+                if event.type == e.EV_UINPUT and event.code == e.UI_FF_UPLOAD:
+                    upload = self.pad.begin_upload(event.value)
+                    effect = upload.effect
+                    rumble = effect.u.ff_rumble_effect
+                    self.effects[effect.id] = (rumble.strong_magnitude, rumble.weak_magnitude, effect.ff_replay.length)
+                    upload.retval = 0
+                    self.pad.end_upload(upload)
+                elif event.type == e.EV_UINPUT and event.code == e.UI_FF_ERASE:
+                    erase = self.pad.begin_erase(event.value)
+                    self.effects.pop(erase.effect_id, None)
+                    if erase.effect_id == self.playing:
+                        self.playing = None
+                    erase.retval = 0
+                    self.pad.end_erase(erase)
+                elif event.type == e.EV_FF and event.code in self.effects:
+                    if event.value:
+                        length = self.effects[event.code][2]
+                        self.playing = event.code
+                        # The value is a repeat count; a length of 0 plays until stopped.
+                        self.playing_until = self.clock() + length * event.value / 1000 if length else None
+                    elif event.code == self.playing:
+                        self.playing = None
+            except (OSError, UInputError):
+                continue  # A game's bad request must never take the pad down.
+        self._send_rumble()
+
+    def _send_rumble(self, refresh=False):
+        now = self.clock()
+        if self.playing is not None and self.playing_until is not None and now >= self.playing_until:
+            self.playing = None
+        wanted = RUMBLE_STOPPED
+        if self.playing is not None:
+            strong, weak, _ = self.effects[self.playing]
+            if strong or weak:
+                wanted = (strong, weak, self.playing_until)
+        if wanted == self.rumble_sent and not (refresh and wanted != RUMBLE_STOPPED):
+            return
+        self.rumble_sent = wanted
+        self.rumble_sent_at = now
+        strong, weak, until = wanted
+        ms = 0 if until is None else min(max(round((until - now) * 1000), 1), 0xffff)
+        self.send_to_phone(rumble_message(strong, weak, ms))
+
     def send_to_phone(self, message):
-        """Send to the active phone over its link. Audio goes only to a phone that said it can play it."""
+        """Send to the active phone over its link. Audio and rumble go only to a phone that said it can use them."""
         if self.active is None or (self.active != USB and self.active not in self.allowed):
             return
         if message[:4] == AUDIO_MAGIC and not (self.hello or {}).get('audio'):
+            return
+        if message[:4] == RUMBLE_MAGIC and not (self.hello or {}).get('rumble'):
             return
         if self.active == USB:
             if self.send_usb:
@@ -289,6 +383,8 @@ class Bridge:
         now = self.clock()
         if self.active:
             self._sync_pad()
+        if self.pad is not None:
+            self._send_rumble(refresh=self.playing_until is None and now - self.rumble_sent_at >= RUMBLE_REFRESH)
         if self.pad is not None and self.last != NEUTRAL and now - self.last_state_at > TIMEOUT:
             apply(self.pad, decode(NEUTRAL))
             self.last = NEUTRAL
@@ -333,7 +429,10 @@ def run_console(phone_ip):
     print(f'waiting for {phone_ip} on UDP {PORT}')
     try:
         while True:
-            if select.select([sock], [], [], TICK)[0]:
+            readable = select.select([sock] + ([bridge.pad] if bridge.pad is not None else []), [], [], TICK)[0]
+            if bridge.pad is not None and bridge.pad in readable:
+                bridge.on_pad_events()
+            if sock in readable:
                 bridge.on_datagram(*sock.recvfrom(MAX_DATAGRAM))
             bridge.on_tick()
     finally:
@@ -400,7 +499,11 @@ def run_service():
     next_status = 0
     try:
         while True:
-            readable = select.select(sources + sound.sources(), [], [], TICK)[0]
+            pad = [bridge.pad] if bridge.pad is not None else []
+            readable = select.select(sources + sound.sources() + pad, [], [], TICK)[0]
+            # Before the datagrams, which can close this pad.
+            if pad and pad[0] in readable:
+                bridge.on_pad_events()
             if sound.capture is not None and sound.capture.stdout in readable:
                 for seq, pcm in sound.read():
                     if bridge.wants_audio():
