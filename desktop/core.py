@@ -277,6 +277,11 @@ class Bridge:
         if self.on_rumble and (strong, weak) != before:
             self.on_rumble(round(strong / 0xffff, 2), round(weak / 0xffff, 2))
 
+    def set_rumble(self, strong, weak):
+        """For pads that report motor levels, 0..65535, instead of effects."""
+        self.rumble = (strong, weak, None) if strong or weak else RUMBLE_STOPPED
+        self._send_rumble()
+
     def send_to_phone(self, message):
         """Send to the active phone over its link. Audio and rumble go only to a phone that said it can use them."""
         if self.active is None or (self.active != USB and self.active not in self.allowed):

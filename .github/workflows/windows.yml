@@ -12,3 +12,37 @@ jobs:
           python-version: '3.13'
       - run: pip install evdev pyusb
       - run: python -m unittest discover -s desktop -p 'test_*.py'
+
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Get ViGEmClient.dll
+        shell: pwsh
+        run: |
+          $url = 'https://raw.githubusercontent.com/yannbouteiller/vgamepad/74318af82918336f8c8f311f4cfb26cdda0dccab/vgamepad/win/vigem/client/x64/ViGEmClient.dll'
+          Invoke-WebRequest $url -OutFile desktop/ViGEmClient.dll
+          $hash = (Get-FileHash desktop/ViGEmClient.dll -Algorithm SHA256).Hash
+          if ($hash -ne '2BF0CB1D809039573C922737D298A1653D4DBC61408060FF45A9BCFDE82E97D2') { throw "ViGEmClient.dll changed: $hash" }
+      # Without the driver the pad test skips itself, so a runner that refuses it doesn't block the build.
+      - name: Install the ViGEmBus driver
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          Invoke-WebRequest 'https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe' -OutFile vigembus.exe
+          Start-Process ./vigembus.exe -ArgumentList '/exenoui', '/qn', '/norestart' -Wait
+      - run: python -m unittest discover -s desktop -p 'test_win*.py' -v
+      - name: Build the exe
+        shell: pwsh
+        run: |
+          "BUILD = '$("${{ github.sha }}".Substring(0, 7))'" | Out-File desktop/build.py -Encoding utf8
+          pip install pyinstaller
+          pyinstaller --onefile --console --name Musubi-test --paths desktop --add-binary "desktop/ViGEmClient.dll;." desktop/win_main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Musubi-test
+          path: dist/Musubi-test.exe
