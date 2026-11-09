@@ -13,7 +13,7 @@ Pair a Bluetooth gamepad with an Android phone, and your Linux PC gets a virtual
 <p align="center">
   <img src="docs/assets/home.png" alt="Musubi Home screen on Android showing the connected PC, 1 of 4 players, and active headphones with a 170 ms delay." width="250">
   &nbsp;
-  <img src="docs/assets/controller.png" alt="Musubi Controller screen on Android with the left trigger at 39% and the right stick tilted in amber." width="250">
+  <img src="docs/assets/controller.png" alt="Musubi Controllers page on Android: player 1 connected, the left stick tilted in amber, and rumble waves beside both grips." width="250">
   &nbsp;
   <img src="docs/assets/headphones.png" alt="Musubi Headphones screen on Android with amber level meters and wave showing sound arriving over Wi-Fi." width="250">
 </p>
@@ -99,10 +99,11 @@ python3 desktop/musubi.py 192.168.1.10
 ## Desktop app
 
 <p align="center">
-  <img src="docs/assets/desktop.png" alt="Musubi on a Linux PC: the cord sidebar on the left with an LG phone connected at 17 ms, and the live controller drawing in the center." width="700">
+  <img src="docs/assets/desktop.png" alt="Musubi on a Linux PC: the Overview page with a Motorola phone on the USB cable, 1 of 4 players connected, and sound playing on the phone with amber levels in the headphone cups." width="700">
 </p>
 
-- **Sidebar:** shows the connected phone, its link (Wi-Fi or USB cable) and ping, with pages for **Controllers** and **Sound on phone**.
+- **Sidebar:** shows the connected phone, its link (Wi-Fi or USB cable) and ping, with pages for **Overview**, **Controllers** and **Sound on phone**.
+- **Overview:** the phone, the controller and the sound at a glance. **Controllers** shows the live pad, and **Sound on phone** shows the PC's sound levels and can turn sound off from the PC.
 - **Allowed phones:** a new phone asks for your approval once. Manage them in **Settings > Manage phones**. Phones are recognized by IP, so reserve the address in your router if you can, or the phone will ask again when it changes. If you ignore or remove a phone, the waiting screen offers **Allow** for as long as that phone keeps trying to connect.
 - **Virtual controller:** it only exists while a controller is connected to the phone, so games don't see a pad you can't use.
 - **Start with my PC:** this adds a systemd user service in **Settings**. It needs a desktop session that starts `graphical-session.target`. If yours doesn't, the app shows the command to add to your desktop's startup instead.
@@ -115,6 +116,10 @@ python3 desktop/musubi.py 192.168.1.10
 </p>
 
 On the **Controllers** page, tap **Remap** and press each button as the app asks, or tap **Skip** for the ones your pad doesn't have. You can try the layout before saving it. Each controller keeps its own layout, and **Reset** goes back to the default. Sticks can't be remapped.
+
+## Vibration
+
+When a game rumbles the controller, the phone makes your real pad vibrate, with the strong and weak motors kept apart. Waves on the controller drawing show it, on the phone and on the PC. It depends on the pad: Android has to be able to vibrate it over Bluetooth. If yours can't, the Controllers page says so.
 
 ## Headphones
 
@@ -132,7 +137,6 @@ It works over Wi-Fi and the USB cable, and keeps playing when you switch between
 
 - **The controller needs the app on screen.** Android only gives controller input to the app in front, so if you leave the app, the PC releases every button after half a second. **Game mode** keeps the screen on but dim. Sound is different: it keeps playing in the background.
 - **One pad at a time.** Two pads paired with the phone would be merged into one. *(for now)* Bluetooth earbuds that pretend to be a controller for their media buttons are ignored so they don't take the controller spot.
-- **No rumble.** The PC only answers the app's pings, and nothing travels back to the pad.
 - **The guide button can't be remapped,** and it may not arrive at all, because Android can keep it for itself.
 - **One phone at a time.** If two allowed phones are on, the first one keeps the pad until it has been silent for 5 seconds.
 - **Use it only on a network you trust.** Packets are not encrypted or authenticated, and approval only checks the IP. Someone on your network who fakes an allowed phone's address could press buttons in your game.
@@ -186,6 +190,8 @@ Each controller packet is 20 bytes and holds the whole pad state: 11 button bits
 Once a second the app also sends an 8-byte ping, and the receiver echoes it back to allowed phones. That is how the app knows the PC is answering and what the round trip takes. It also sends a hello packet with the phone's model, the controller's name, that ping time, and a feature flag for sound.
 
 When the phone announces that **Play PC sound** is on, the PC loads a virtual `Musubi` output (`module-null-sink` via `pactl` in `desktop/audio.py`) and captures 48 kHz 16-bit stereo PCM in 5 ms chunks with `parec`. Each chunk goes back over the same UDP socket (or USB cable) with a 2-byte sequence number (`!4sH`). After 200 ms of silence the PC stops sending chunks until sound plays again. On the phone, an adaptive jitter buffer (`android/AudioBuffer.java`) feeds a low-latency `AudioTrack`, and a foreground service (`android/KeepAliveService.java`) keeps the sound going in the background.
+
+When a game sends force feedback to the virtual pad, the PC sends the strong and weak motor levels and the duration back to the phone (`!4sHHH`), and the phone drives the pad's motors (both motors on Android 12 and newer, one on older versions).
 
 Over a USB cable the phone uses Android Open Accessory instead of Wi-Fi. The PC asks the phone to switch modes (`desktop/cable.py`), and then the same packets travel over USB, each one starting with its length in 2 bytes.
 
