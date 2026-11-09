@@ -103,10 +103,28 @@ switch:focus-visible { outline: 2px solid #FF9E1B; outline-offset: 2px; }
 """
 
 
+def _rumble_wave(x0, y0, x1, y1, sx, sy):
+    dx, dy = x1 - x0, y1 - y0
+    length = math.hypot(dx, dy)
+    nx, ny = dy / length * 9.0, -dx / length * 9.0
+    points = tuple(
+        (x0 + dx * i / 9.0, y0 + dy * i / 9.0,
+         (0.0 if i in (0, 9) else (nx if i % 2 else -nx)),
+         (0.0 if i in (0, 9) else (ny if i % 2 else -ny)))
+        for i in range(10)
+    )
+    return points[0], points[1:], sx, sy
+
+
 class PadArea(Gtk.DrawingArea):
-    """The same drawing as android/PadView.java, from the same 560 x 348 coordinates."""
-    WIDTH, HEIGHT = 560, 348
-    ART_X, ART_Y, ART_WIDTH, ART_HEIGHT = 18, 3, 524, 338
+    """The same drawing as android/PadView.java, from the -20 0 600 348 viewBox."""
+    WIDTH, HEIGHT = 600, 348
+    PAD_WIDTH = 560
+    ART_X, ART_Y, ART_WIDTH, ART_HEIGHT = -20, 0, 600, 348
+    RUMBLE_WAVES = (
+        _rumble_wave(172.0, 280.0, 130.0, 328.0, 1.1, 1.0),
+        _rumble_wave(17.5, 201.0, 1.5, 281.0, 1.4, 0.3),
+    )
 
     def __init__(self, width=None):
         compact = width is not None and width < 200
@@ -119,13 +137,93 @@ class PadArea(Gtk.DrawingArea):
         self.fixed_width = width is not None
         self.buttons = 0
         self.axes = [0] * 8
+        self.strong = 0.0
+        self.weak = 0.0
+        self.left_level = 0.0
+        self.right_level = 0.0
+        self.left_fade = 0.0
+        self.right_fade = 0.0
+        self.clock_ms = 0.0
+        self.last_tick_ms = 0.0
+        self.tick_id = 0
         self.update_property([Gtk.AccessibleProperty.LABEL], ['Controller'])
         self.set_draw_func(self.draw)
+        self.connect('map', self.on_map)
+        self.connect('unmap', self.on_unmap)
 
     def set_state(self, buttons, axes):
         if buttons != self.buttons or axes != self.axes:
             self.buttons, self.axes = buttons, axes
             self.queue_draw()
+
+    def set_rumble(self, strong, weak):
+        strong = min(max(float(strong), 0.0), 1.0)
+        weak = min(max(float(weak), 0.0), 1.0)
+        if strong == self.strong and weak == self.weak:
+            return
+        self.strong, self.weak = strong, weak
+        if not self.get_mapped():
+            self.left_level = strong
+            self.right_level = weak
+            self.left_fade = 1.0 if strong > 0.0 else 0.0
+            self.right_fade = 1.0 if weak > 0.0 else 0.0
+            return
+        if strong > 0.0:
+            self.left_level = strong
+        if weak > 0.0:
+            self.right_level = weak
+        self.sync_rumble()
+        self.queue_draw()
+
+    def on_map(self, _widget):
+        self.sync_rumble()
+
+    def on_unmap(self, _widget):
+        if self.tick_id:
+            self.remove_tick_callback(self.tick_id)
+            self.tick_id = 0
+        self.left_level = self.strong
+        self.right_level = self.weak
+        self.left_fade = 1.0 if self.strong > 0.0 else 0.0
+        self.right_fade = 1.0 if self.weak > 0.0 else 0.0
+
+    def sync_rumble(self):
+        want = self.get_mapped() and (
+            self.strong > 0.0 or self.weak > 0.0 or self.left_fade > 0.0 or self.right_fade > 0.0
+        )
+        if want and not self.tick_id:
+            self.last_tick_ms = GLib.get_monotonic_time() / 1000.0
+            self.clock_ms = self.last_tick_ms
+            self.tick_id = self.add_tick_callback(self.on_tick)
+        elif not want and self.tick_id:
+            self.remove_tick_callback(self.tick_id)
+            self.tick_id = 0
+
+    def on_tick(self, _widget, clock):
+        if not self.get_mapped():
+            self.tick_id = 0
+            return GLib.SOURCE_REMOVE
+        now = clock.get_frame_time() / 1000.0
+        dt = max(0.0, now - self.last_tick_ms) if self.last_tick_ms else 0.0
+        self.last_tick_ms = now
+        self.clock_ms = now
+        if self.strong > 0.0:
+            self.left_fade = min(1.0, self.left_fade + dt / 120.0)
+        elif self.left_fade > 0.0:
+            self.left_fade = max(0.0, self.left_fade - dt / 400.0)
+            if self.left_fade == 0.0:
+                self.left_level = 0.0
+        if self.weak > 0.0:
+            self.right_fade = min(1.0, self.right_fade + dt / 120.0)
+        elif self.right_fade > 0.0:
+            self.right_fade = max(0.0, self.right_fade - dt / 400.0)
+            if self.right_fade == 0.0:
+                self.right_level = 0.0
+        self.queue_draw()
+        if self.strong == 0.0 and self.weak == 0.0 and self.left_fade == 0.0 and self.right_fade == 0.0:
+            self.tick_id = 0
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
 
     def on(self, bit):
         return bool(self.buttons >> bit & 1)
@@ -197,6 +295,25 @@ class PadArea(Gtk.DrawingArea):
         self.rounded(cr, x, y, 30, 16, 8)
         self.shape(cr, ACTIVE if on else BACKGROUND, ACTIVE if on else IDLE)
 
+    def draw_waves(self, cr, level, fade, rising, period_ms, right):
+        if level <= 0.0 or fade <= 0.0:
+            return
+        envelope = fade * (2.0 - fade) if rising else fade * fade
+        alpha = min(1.0, level * 5.0) * envelope
+        if alpha <= 0.0:
+            return
+        buzz = -1.0 if int(self.clock_ms // period_ms) & 1 else 1.0
+        cr.set_source_rgba(ACTIVE[0], ACTIVE[1], ACTIVE[2], alpha)
+        for (bx0, by0, ox0, oy0), rest, sx, sy in self.RUMBLE_WAVES:
+            dx = buzz * sx
+            dy = buzz * sy
+            x = bx0 + level * ox0 + dx
+            cr.move_to(self.PAD_WIDTH - x if right else x, by0 + level * oy0 + dy)
+            for bx, by, ox, oy in rest:
+                x = bx + level * ox + dx
+                cr.line_to(self.PAD_WIDTH - x if right else x, by + level * oy + dy)
+            cr.stroke()
+
     def draw(self, _area, cr, width, height, _data=None):
         if not self.compact:
             cr.set_source_rgb(*BACKGROUND)
@@ -214,7 +331,7 @@ class PadArea(Gtk.DrawingArea):
         self.trigger(cr, 364, axes[5] / TRIGGER_MAX, 464, 'R2', not self.compact)
 
         for bit, side in ((L1, 1), (R1, -1)):
-            origin = 0 if side == 1 else self.WIDTH
+            origin = 0 if side == 1 else self.PAD_WIDTH
             self.path(cr, (origin + side * 70, 100), [
                 (origin + side * 80, 62, origin + side * 118, 36, origin + side * 170, 36),
                 (origin + side * 190, 36, origin + side * 208, 38, origin + side * 222, 42),
@@ -257,6 +374,13 @@ class PadArea(Gtk.DrawingArea):
         self.face(cr, X, 376, 128, 'X')
         self.face(cr, B, 444, 128, 'B')
         self.face(cr, A, 410, 162, 'A')
+
+        if self.left_fade > 0.0 or self.right_fade > 0.0:
+            cr.set_line_width(3)
+            cr.set_line_join(0)
+            cr.set_line_cap(1)
+            self.draw_waves(cr, self.left_level, self.left_fade, self.strong > 0.0, 70.0, False)
+            self.draw_waves(cr, self.right_level, self.right_fade, self.weak > 0.0, 40.0, True)
 
 
 def describe_input(buttons, axes):
@@ -1019,6 +1143,10 @@ class App(Gtk.Application):
                 self.readout.remove_css_class('live')
                 if description:
                     self.readout.add_css_class('live')
+        elif kind == 'rumble':
+            self.pad.set_rumble(event['strong'], event['weak'])
+            if self.overview_pad is not None:
+                self.overview_pad.set_rumble(event['strong'], event['weak'])
         elif kind == 'levels':
             for area in (self.overview_headphones, self.sound_headphones):
                 if area is not None:
@@ -1141,8 +1269,10 @@ class App(Gtk.Application):
             self.selected_item = 'overview'
         if not self.status['pad']:
             self.pad.set_state(0, [0] * 8)
+            self.pad.set_rumble(0, 0)
             if self.overview_pad is not None:
                 self.overview_pad.set_state(0, [0] * 8)
+                self.overview_pad.set_rumble(0, 0)
         pending = self.pending_phones()
         firewall = bool(self.blocked) and not self.firewall_dismissed and phone is None
         state = self.current_state(pending, firewall)
@@ -1323,6 +1453,7 @@ class App(Gtk.Application):
         self.overview_pad = PadArea(width=128)
         if controller_on:
             self.overview_pad.set_state(self.pad.buttons, self.pad.axes)
+            self.overview_pad.set_rumble(self.pad.strong, self.pad.weak)
         self.overview_pad.set_opacity(1.0 if controller_on else 0.35)
 
         rows.append(self.overview_row(

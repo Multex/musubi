@@ -406,8 +406,10 @@ class RumbleTest(unittest.TestCase):
         self.sock = FakeSock()
         self.now = 100.0
         self.usb_sent = []
-        self.bridge = Bridge(self.sock, [self.PHONE[0]], lambda: None, make_pad=FakeFfUi,
-                             clock=lambda: self.now, send_usb=self.usb_sent.append)
+        self.rumbles = []
+        self.bridge = Bridge(self.sock, [self.PHONE[0]], lambda: None,
+                             on_rumble=lambda strong, weak: self.rumbles.append((strong, weak)),
+                             make_pad=FakeFfUi, clock=lambda: self.now, send_usb=self.usb_sent.append)
         self.bridge.on_datagram(hello(features=musubi.FEATURE_RUMBLE), self.PHONE)
         self.pad = self.bridge.pad
 
@@ -512,6 +514,27 @@ class RumbleTest(unittest.TestCase):
         self.bridge.on_pad_events()
         self.bridge.on_pad_events()
         self.assertEqual(self.sent(), [])
+
+    def test_reports_normalized_levels_on_change_and_zero_when_stopped_or_expired(self):
+        self.pad.upload(0, 0, 0xc000, 0x4000, 200)
+        self.bridge.on_pad_events()
+        self.assertEqual(self.rumbles, [])
+        self.play(0)
+        self.play(0)
+        self.now += 0.1
+        self.bridge.on_tick()
+        self.assertEqual(self.rumbles, [(0.75, 0.25)])
+        self.now += 0.2
+        self.bridge.on_tick()
+        self.bridge.on_tick()
+        self.assertEqual(self.rumbles, [(0.75, 0.25), (0.0, 0.0)])
+        self.pad.upload(1, 0, 0xffff, 0, 0)
+        self.play(0)
+        self.now += musubi.RUMBLE_REFRESH
+        self.bridge.on_tick()
+        self.assertEqual(self.rumbles, [(0.75, 0.25), (0.0, 0.0), (1.0, 0.0)])
+        self.play(0, 0)
+        self.assertEqual(self.rumbles[-1], (0.0, 0.0))
 
 
 class LevelsTest(unittest.TestCase):

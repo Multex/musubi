@@ -5,21 +5,34 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
+import android.os.SystemClock;
+import android.provider.Settings;
 import android.view.View;
 
 /** The controller drawing. Input arrives on the UI thread, so onDraw stays cheap and allocates nothing. */
 final class PadView extends View {
-    private static final float WIDTH = 560, HEIGHT = 348, STICK_TRAVEL = 14;
+    // The drawing is 560 wide; the view box is 20 wider on each side so the rumble waves fit.
+    private static final float PAD = 560, WIDTH = 600, HEIGHT = 348, STICK_TRAVEL = 14;
+    private static final long FADE_IN_MS = 120, FADE_OUT_MS = 400, TICK_MS = 40;
+    // Inner and outer wave axes of the left grip: x0, y0, x1, y1, then the buzz shift.
+    private static final float[][] AXES = {{172, 280, 130, 328, 1.1f, 1.0f}, {17.5f, 201, 1.5f, 281, 1.4f, 0.3f}};
 
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint wave = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Path spikes = new Path();
     private final RectF rect = new RectF();
     private final Path body = new Path(), leftBumper = new Path(), rightBumper = new Path(), dpad = new Path();
 
     private int held;
     private int target = -1;
     private float lx, ly, rx, ry, l2, r2;
+    // Rumble per grip, 0 = left (strong motor), 1 = right (weak motor): last non-zero level, fade state.
+    private final float[] level = new float[2], fadeFrom = new float[2];
+    private final long[] fadeAt = new long[2];
+    private final boolean[] motorOn = new boolean[2];
+    private boolean buzz = true;
 
     PadView(Context context) {
         super(context);
@@ -27,6 +40,11 @@ final class PadView extends View {
         stroke.setStrokeWidth(2);
         stroke.setStrokeJoin(Paint.Join.ROUND);
         text.setTextAlign(Paint.Align.CENTER);
+        wave.setStyle(Paint.Style.STROKE);
+        wave.setStrokeWidth(3);
+        wave.setStrokeJoin(Paint.Join.MITER);
+        wave.setStrokeCap(Paint.Cap.ROUND);
+        wave.setColor(MainActivity.ACTIVE);
 
         body.moveTo(280, 62);
         body.cubicTo(320, 62, 360, 58, 400, 56);
@@ -45,7 +63,7 @@ final class PadView extends View {
         body.close();
 
         bumper(leftBumper, 0, 1);
-        bumper(rightBumper, WIDTH, -1);
+        bumper(rightBumper, PAD, -1);
 
         dpad.moveTo(199, 172);
         dpad.rLineTo(26, 0);
@@ -73,6 +91,49 @@ final class PadView extends View {
     void setTarget(int control) {
         target = control;
         invalidate();
+    }
+
+    /** Motor levels 0..1 straight from the rumble event; 0 fades the waves out. */
+    void setRumble(float strong, float weak) {
+        long now = SystemClock.uptimeMillis();
+        buzz = Settings.Global.getFloat(getContext().getContentResolver(), Settings.Global.ANIMATOR_DURATION_SCALE, 1) != 0;
+        for (int side = 0; side < 2; side++) {
+            float next = side == 0 ? strong : weak;
+            boolean wasOn = motorOn[side];
+            if (next > 0) level[side] = next;
+            if ((next > 0) == wasOn) continue;
+            fadeFrom[side] = fade(side, now);
+            fadeAt[side] = now;
+            motorOn[side] = next > 0;
+        }
+        invalidate();
+    }
+
+    private float fade(int side, long now) {
+        float t = Math.min(1f, (now - fadeAt[side]) / (float) (motorOn[side] ? FADE_IN_MS : FADE_OUT_MS));
+        if (motorOn[side]) return fadeFrom[side] + (1 - fadeFrom[side]) * (1 - (1 - t) * (1 - t));
+        return fadeFrom[side] * (1 - t * t);
+    }
+
+    private void waves(Canvas canvas, int side, long now) {
+        float alpha = fade(side, now) * Math.min(1f, level[side] * 5);
+        if (alpha <= 0) return;
+        float amp = 9 * level[side];
+        float phase = !buzz ? 0 : (now / (side == 0 ? 70 : 40)) % 2 == 0 ? 1 : -1;
+        wave.setAlpha((int) (alpha * 255));
+        for (float[] a : AXES) {
+            float dx = a[2] - a[0], dy = a[3] - a[1], len = (float) Math.hypot(dx, dy);
+            float nx = dy / len, ny = -dx / len;
+            spikes.rewind();
+            for (int i = 0; i < 10; i++) {
+                float off = i == 0 || i == 9 ? 0 : (i % 2 == 1 ? amp : -amp);
+                float x = a[0] + dx * i / 9 + nx * off + a[4] * phase;
+                float y = a[1] + dy * i / 9 + ny * off + a[5] * phase;
+                if (i == 0) spikes.moveTo(side == 0 ? x : PAD - x, y);
+                else spikes.lineTo(side == 0 ? x : PAD - x, y);
+            }
+            canvas.drawPath(spikes, wave);
+        }
     }
 
     void setState(int held, float lx, float ly, float rx, float ry, float l2, float r2) {
@@ -182,6 +243,7 @@ final class PadView extends View {
         canvas.save();
         canvas.translate(getPaddingLeft() + (width - WIDTH * scale) / 2, getPaddingTop() + (height - HEIGHT * scale) / 2);
         canvas.scale(scale, scale);
+        canvas.translate(20, 0);
 
         trigger(canvas, MainActivity.L2_BIT, 112, l2, 96, "L2");
         trigger(canvas, MainActivity.R2_BIT, 364, r2, 464, "R2");
@@ -210,6 +272,15 @@ final class PadView extends View {
         face(canvas, MainActivity.X_BIT, 376, 128, "X");
         face(canvas, MainActivity.B_BIT, 444, 128, "B");
         face(canvas, MainActivity.A_BIT, 410, 162, "A");
+
+        long now = SystemClock.uptimeMillis();
+        waves(canvas, 0, now);
+        waves(canvas, 1, now);
         canvas.restore();
+        // Tick only while a wave is on or still fading; it stops by itself.
+        if (motorOn[0] || motorOn[1] || now - fadeAt[0] < FADE_OUT_MS && fadeFrom[0] > 0
+                || now - fadeAt[1] < FADE_OUT_MS && fadeFrom[1] > 0) {
+            postInvalidateDelayed(TICK_MS);
+        }
     }
 }

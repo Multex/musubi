@@ -263,6 +263,7 @@ public class MainActivity extends Activity {
     private int editIndex = -1;
 
     private PadView padView;
+    private float rumbleStrong, rumbleWeak;
     private TextView readout, pcDetail, soundName, soundDetail;
     private TextView earbudsName, earbudsDetail, soundReadout, soundStatus;
     private HeadphonesView headphones;
@@ -368,6 +369,7 @@ public class MainActivity extends Activity {
         capture.clear();
         inputManager.unregisterInputDeviceListener(deviceListener);
         rumble(deviceId, 0, 0, 0);
+        showRumble(0, 0, 0);
         // The app gets no key-up events while in the background.
         axisButtons = 0;
         clearInput();
@@ -634,10 +636,25 @@ public class MainActivity extends Activity {
                 onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
             } else if (length >= RUMBLE_SIZE && magic == ByteBuffer.wrap(RUMBLE_MAGIC).getInt()) {
                 // The pad's input doesn't reach the PC from the background, so neither does its rumble.
-                if (running && !backgrounded) rumble(deviceId, in.getShort() & 0xffff, in.getShort() & 0xffff, in.getShort() & 0xffff);
+                if (running && !backgrounded) {
+                    int strong = in.getShort() & 0xffff, weak = in.getShort() & 0xffff, ms = in.getShort() & 0xffff;
+                    rumble(deviceId, strong, weak, ms);
+                    handler.post(() -> showRumble(strong, weak, ms));
+                }
             }
         }
     }
+
+    /** Feeds the motor levels to the pad drawing, and zeroes them when the rumble expires. */
+    private void showRumble(int strong, int weak, int ms) {
+        handler.removeCallbacks(endRumble);
+        rumbleStrong = strong / 65535f;
+        rumbleWeak = weak / 65535f;
+        if (strong > 0 || weak > 0) handler.postDelayed(endRumble, ms > 0 ? ms : RUMBLE_CAP_MS);
+        if (padView != null) padView.setRumble(rumbleStrong, rumbleWeak);
+    }
+
+    private final Runnable endRumble = () -> showRumble(0, 0, 0);
 
     /** Drives the controller's motors; levels are 0..65535, and 0, 0 stops them. */
     private static void rumble(int id, int strong, int weak, int ms) {
@@ -941,7 +958,10 @@ public class MainActivity extends Activity {
     private void updateController() {
         int before = deviceId;
         findController();
-        if (deviceId != before) rumble(before, 0, 0, 0);
+        if (deviceId != before) {
+            rumble(before, 0, 0, 0);
+            showRumble(0, 0, 0);
+        }
         if (deviceId != before && (screen == MAIN || screen == HOME || screen == SETTINGS)) {
             render();
         }
@@ -1377,6 +1397,7 @@ public class MainActivity extends Activity {
     /** Controller drawing between the parts of a screen. Middle may be null. */
     private View withPad(int control, View top, View middle, View bottom) {
         padView = new PadView(this);
+        padView.setRumble(rumbleStrong, rumbleWeak);
         padView.setContentDescription("Controller");
         padView.setTarget(control);
         int padding = dp(8);
@@ -1471,8 +1492,9 @@ public class MainActivity extends Activity {
         controllers.addView(controllerText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         padView = new PadView(this);
         padView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        padView.setRumble(rumbleStrong, rumbleWeak);
         padView.setAlpha(deviceId != -1 ? 1 : 0.35f);
-        controllers.addView(padView, gapped(84, 52));
+        controllers.addView(padView, gapped(84, 49));
         controllers.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
         LinearLayout sound = clickableRow(() -> show(HEADPHONES), "Headphones, open");

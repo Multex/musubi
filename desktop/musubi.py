@@ -147,13 +147,14 @@ def make_pad(name='Musubi'):
 class Bridge:
     """Drives one virtual pad from the first allowed phone that talks to it."""
 
-    def __init__(self, sock, allowed, on_status, on_input=None, make_pad=make_pad, clock=time.monotonic,
+    def __init__(self, sock, allowed, on_status, on_input=None, on_rumble=None, make_pad=make_pad, clock=time.monotonic,
                  send_usb=None):
         self.sock = sock
         self.send_usb = send_usb
         self.allowed = set(allowed)
         self.on_status = on_status
         self.on_input = on_input
+        self.on_rumble = on_rumble
         self.make_pad = make_pad
         self.clock = clock
         self.pad = None
@@ -349,11 +350,14 @@ class Bridge:
                 wanted = (strong, weak, self.playing_until)
         if wanted == self.rumble_sent and not (refresh and wanted != RUMBLE_STOPPED):
             return
+        before = self.rumble_sent[:2]
         self.rumble_sent = wanted
         self.rumble_sent_at = now
         strong, weak, until = wanted
         ms = 0 if until is None else min(max(round((until - now) * 1000), 1), 0xffff)
         self.send_to_phone(rumble_message(strong, weak, ms))
+        if self.on_rumble and (strong, weak) != before:
+            self.on_rumble(round(strong / 0xffff, 2), round(weak / 0xffff, 2))
 
     def send_to_phone(self, message):
         """Send to the active phone over its link. Audio and rumble go only to a phone that said it can use them."""
@@ -489,7 +493,10 @@ def run_service():
         write_event(out, {'event': 'input', 'buttons': buttons, 'axes': axes})
         last_input[1] = None
 
-    bridge = Bridge(sock, [], send_status, on_input, send_usb=link.send if link else None)
+    def on_rumble(strong, weak):
+        write_event(out, {'event': 'rumble', 'strong': strong, 'weak': weak})
+
+    bridge = Bridge(sock, [], send_status, on_input, on_rumble, send_usb=link.send if link else None)
     sound = audio.PhoneAudio()
     sound.remove_stale()
     levels = audio.Levels()
