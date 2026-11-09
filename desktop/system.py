@@ -7,38 +7,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from musubi import PORT
+from core import CONFIG_DIR, PORT, load_config, save_config  # noqa: F401 (gui.py reads the config through here)
 
-CONFIG_DIR = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
-CONFIG_FILE = CONFIG_DIR / 'musubi' / 'config.json'
 UNIT_NAME = 'musubi-desktop.service'
 UNIT_FILE = CONFIG_DIR / 'systemd' / 'user' / UNIT_NAME
 GUI_SCRIPT = Path(__file__).resolve().parent / 'gui.py'
 UFW_RULES = Path('/etc/ufw/user.rules')
 UFW_CONF = Path('/etc/ufw/ufw.conf')
-
-
-def load_config(path=CONFIG_FILE):
-    config = {'phones': {}, 'tray': True, 'sound_enabled': True}
-    try:
-        stored = json.loads(path.read_text())
-        # shortcut: phones are identified by IP, so a phone whose IP changes asks for approval again, add pairing keys if that gets annoying.
-        config['phones'] = {str(ip): str(name) for ip, name in stored.get('phones', {}).items()}
-        config['tray'] = bool(stored.get('tray', True))
-        config['sound_enabled'] = bool(stored.get('sound_enabled', True))
-    except FileNotFoundError:
-        pass
-    except (OSError, ValueError, AttributeError):
-        # Saving over a file we couldn't read would lose it for good.
-        path.replace(path.with_suffix('.broken'))
-    return config
-
-
-def save_config(config, path=CONFIG_FILE):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(config, indent=2))
-    temporary.replace(path)
 
 
 def ufw_allowed_sources(rules_text, port=PORT):
