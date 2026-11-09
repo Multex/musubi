@@ -50,10 +50,7 @@ window, .root { background: #0D0C0A; color: #E6DEC8; font-family: Roboto, sans-s
 scrolledwindow, viewport { background: transparent; }
 .sidebar { border-right: 1px solid #332E28; padding: 22px 12px 14px 12px; background: #0D0C0A; }
 .page { padding: 22px 24px 20px 24px; background: #0D0C0A; }
-.divider { border-top: 1px solid #332E28; margin-top: 12px; padding-top: 8px; }
-.column { padding: 12px 16px; }
-.column-divider { border-right: 1px solid #332E28; }
-.header { border-bottom: 1px solid #332E28; padding: 4px 16px 4px 4px; }
+.divider { border-top: 1px solid #332E28; margin-top: 14px; padding-top: 12px; }
 .caption { font-size: 12px; color: #8F8573; }
 .tab-label { font-size: 11px; color: #8F8573; }
 .player-tab { padding: 6px 8px; border-radius: 6px 6px 0 0; border-bottom: 2px solid transparent; }
@@ -65,34 +62,37 @@ scrolledwindow, viewport { background: transparent; }
 .body { font-size: 14px; }
 .title { font-size: 24px; font-weight: 700; }
 .page-title { font-size: 18px; font-weight: 500; }
-.address { font-family: monospace; font-size: 20px; font-weight: 500; }
+.address { font-family: monospace; font-size: 28px; font-weight: 500; }
 .mono { font-family: monospace; font-size: 12px; color: #8F8573; }
+.mono-subnet { font-family: monospace; font-size: 13px; color: #8F8573; }
 .readout { font-family: monospace; font-size: 12px; color: #8F8573; }
 .readout.live { color: #FF9E1B; }
 .alert { color: #E04F3E; }
-.link-text { font-size: 15px; font-weight: 400; text-decoration: underline; }
-button { min-height: 28px; min-width: 0; padding: 4px 12px; border-radius: 6px; box-shadow: none; background: none;
+.link-text { font-size: 14px; font-weight: 400; text-decoration: underline; }
+button { min-height: 26px; min-width: 0; padding: 4px 14px; border-radius: 6px; box-shadow: none; background: none;
          background-image: none; color: #E6DEC8; border: 1px solid #6B6256; font-size: 14px; font-weight: 400; }
 button:hover { background: #171512; }
 button:active { background: #332E28; }
 button:focus-visible { outline: 2px solid #FF9E1B; outline-offset: 2px; }
-button:disabled { color: #8F8573; border-color: #332E28; }
-button.primary { min-height: 32px; background: #E6DEC8; color: #0D0C0A; border: none; font-size: 15px; font-weight: 700; }
+button:disabled { color: #8F8573; border-color: #332E28; opacity: 0.5; }
+button.primary { min-height: 32px; min-width: 112px; background: #E6DEC8; color: #0D0C0A; border: none;
+                 font-size: 15px; font-weight: 700; }
 button.primary:hover { background: #F4EDDA; }
 button.primary:active { background: #CFC7B2; }
 button.plain { border: none; }
+button.back-btn { min-height: 28px; padding: 4px 6px; border: none; border-radius: 6px; }
 button.sidebar-item { min-height: 36px; padding: 4px 8px; border: none; border-radius: 6px; }
-button.sidebar-item:disabled { color: #E6DEC8; border: none; }
+button.sidebar-item:disabled { color: #E6DEC8; border: none; opacity: 1; }
 button.sidebar-item.selected, button.plain.selected { background: #171512; }
 .mic-item { min-height: 36px; padding: 4px 8px; }
 button.overview-row { min-height: 68px; padding: 8px 0; border: none; border-radius: 6px; }
 .overview-static { min-height: 68px; padding: 8px 0; }
 .hairline { background: #332E28; min-height: 1px; }
-button.row { padding: 8px 0; border: none; border-radius: 0; }
+button.row { padding: 6px 0; border: none; border-radius: 6px; }
 button.row:hover, button.row:active { background: none; }
-button.row:hover .link-text, button.row:hover .row-title { color: #FFFFFF; }
+button.row:hover .link-text, button.row:hover .row-title { color: #F4EDDA; }
 button.row:active .link-text, button.row:active .row-title { color: #FF9E1B; }
-entry { min-height: 44px; background: #171512; color: #E6DEC8; border: 1px solid #6B6256; border-radius: 6px; }
+entry { min-height: 36px; background: #171512; color: #E6DEC8; border: 1px solid #6B6256; border-radius: 6px; }
 switch { min-width: 44px; min-height: 22px; background: none; border: 1px solid #6B6256; border-radius: 12px; }
 /* Sized here because some themes, like Breeze, draw the knob bigger than the track. */
 switch slider { min-width: 18px; min-height: 18px; margin: 2px; background: #8F8573; border: none; border-radius: 9px; box-shadow: none; }
@@ -280,18 +280,23 @@ def text(value, css=None, wrap=False, ellipsize=False):
     if wrap:
         label.set_wrap(True)
         label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        # Larger text fits fewer characters in the same panel.
-        label.set_max_width_chars(14 if css == 'title' else 20)
+        label.set_max_width_chars(34 if css == 'title' else 58)
     if ellipsize:
         label.set_ellipsize(Pango.EllipsizeMode.END)
         label.set_max_width_chars(15)
     return label
 
 
-def button(value, on_click, css=None):
+def button(value, on_click, css=None, align=Gtk.Align.START):
     widget = Gtk.Button(label=value)
+    if align is not None:
+        widget.set_halign(align)
     if css:
         widget.add_css_class(css)
+    if css == 'primary':
+        widget.set_size_request(140, 40)
+    else:
+        widget.set_size_request(-1, 36)
     widget.connect('clicked', lambda _: on_click())
     return widget
 
@@ -313,15 +318,8 @@ def hairline():
     return line
 
 
-def pair(first, second):
-    row = Gtk.Box(spacing=8, homogeneous=True)
-    row.append(first)
-    row.append(second)
-    return row
-
-
 def block(caption, value, detail=None, detail_css='detail', divided=False):
-    box = column(css='divider' if divided else None)
+    box = column(2, 'divider' if divided else None)
     box.append(text(caption, 'caption', ellipsize=True))
     box.append(text(value, 'value', wrap=True))
     if detail is not None:
@@ -466,23 +464,25 @@ class HeadphonesArea(Gtk.DrawingArea):
 
 
 class Chevron(Gtk.DrawingArea):
-    """An 18px MUTED right chevron at the end of an Overview row."""
+    """An 18px MUTED right chevron for rows, or a 20px TEXT left chevron for back buttons."""
 
-    def __init__(self):
+    def __init__(self, left=False):
         super().__init__(valign=Gtk.Align.CENTER)
-        self.set_size_request(18, 18)
+        self.left = left
+        size = 20 if left else 18
+        self.set_size_request(size, size)
         self.set_draw_func(self.draw)
 
-    @staticmethod
-    def draw(_area, cr, width, height, _data=None):
+    def draw(self, _area, cr, width, height, _data=None):
         cx, cy = width / 2.0, height / 2.0
-        cr.set_source_rgb(*MUTED)
+        sign = -1 if self.left else 1
+        cr.set_source_rgb(*(TEXT if self.left else MUTED))
         cr.set_line_width(1.8)
         cr.set_line_cap(1)
         cr.set_line_join(1)
-        cr.move_to(cx - 2.5, cy - 5.0)
-        cr.line_to(cx + 2.5, cy)
-        cr.line_to(cx - 2.5, cy + 5.0)
+        cr.move_to(cx - 2.5 * sign, cy - 5.0)
+        cr.line_to(cx + 2.5 * sign, cy)
+        cr.line_to(cx - 2.5 * sign, cy + 5.0)
         cr.stroke()
 
 
@@ -731,6 +731,8 @@ class App(Gtk.Application):
         self.overview_panel = None
         self.controllers_panel = None
         self.sound_panel = None
+        self.settings_panel = None
+        self.phones_panel = None
         self.local_ip, self.network = None, None
 
     def do_activate(self):
@@ -896,9 +898,22 @@ class App(Gtk.Application):
         self.pages.add_named(sound_scroller, 'sound')
 
         state_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
-        self.panel = column()
+        self.panel = column(0)
+        self.panel.set_vexpand(True)
         state_scroller.set_child(self.panel)
         self.pages.add_named(state_scroller, 'state')
+
+        settings_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
+        self.settings_panel = column(0)
+        self.settings_panel.set_vexpand(True)
+        settings_scroller.set_child(self.settings_panel)
+        self.pages.add_named(settings_scroller, 'settings')
+
+        phones_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
+        self.phones_panel = column(0)
+        self.phones_panel.set_vexpand(True)
+        phones_scroller.set_child(self.phones_panel)
+        self.pages.add_named(phones_scroller, 'phones')
 
         self.pages.connect('notify::visible-child-name', lambda *_: self.sync_watch())
         shell.append(self.pages)
@@ -1452,47 +1467,78 @@ class App(Gtk.Application):
         self.sound_panel.append(spacer())
 
     def panel_error(self):
+        self.panel.append(spacer())
+        content = column(10)
         heading = text("Musubi can't run", 'title', wrap=True)
         heading.add_css_class('alert')
-        self.panel.append(heading)
+        content.append(heading)
         message = self.error
         if 'in use' in message:
-            message = 'Another program is using UDP port 9999. It may be musubi.py running in a terminal.'
-        self.panel.append(text(message, 'body', wrap=True))
+            message = f'Another program is using UDP port {system.PORT}. It may be musubi.py running in a terminal.'
+        content.append(text(message, 'body', wrap=True))
+        try_again = button('Try again', self.on_start, 'primary')
+        try_again.set_margin_top(6)
+        content.append(try_again)
+        self.panel.append(content)
         self.panel.append(spacer())
-        self.panel.append(button('Try again', self.on_start, 'primary'))
 
     def panel_stopped(self):
         self.panel.append(spacer())
+        content = column(10)
+        content.set_halign(Gtk.Align.CENTER)
         for line in (text('Musubi is stopped', 'title', wrap=True),
                      text("Phones can't connect until you start it again.", 'body', wrap=True)):
             line.set_xalign(0.5)
             line.set_justify(Gtk.Justification.CENTER)
-            self.panel.append(line)
+            line.set_halign(Gtk.Align.CENTER)
+            content.append(line)
+        start = button('Start', self.on_start, 'primary', align=Gtk.Align.CENTER)
+        start.set_margin_top(6)
+        content.append(start)
+        self.panel.append(content)
         self.panel.append(spacer())
-        self.panel.set_spacing(8)
-        self.panel.append(button('Start', self.on_start, 'primary'))
 
     def panel_waiting(self):
-        self.panel.append(text('Waiting for a phone', 'title', wrap=True))
+        self.panel.append(spacer())
+        content = column(8)
+        content.append(text('Waiting for a phone', 'title', wrap=True))
         if self.local_ip:
-            self.panel.append(text("Open Musubi on your phone and enter this PC's address:", 'body', wrap=True))
-            self.panel.append(text(self.local_ip, 'address'))
+            content.append(text("Open Musubi on your phone and enter this PC's address:", 'body', wrap=True))
+            addr = text(self.local_ip, 'address', ellipsize=True)
+            addr.set_single_line_mode(True)
+            addr.set_max_width_chars(24)
+            content.append(addr)
         else:
-            self.panel.append(text('This PC has no local network right now. Connect it to the same network as your phone.',
-                                   'body', wrap=True))
+            content.append(text('This PC has no local network right now. Connect it to the same network as your phone.',
+                                'body', wrap=True))
         if self.status.get('cable_error'):
-            usb = block('USB cable', "Can't use it", self.status['cable_error'], divided=True)
+            usb = block('Or use a USB cable', "Can't use it", self.status['cable_error'], divided=True)
             usb.get_last_child().add_css_class('alert')
-            self.panel.append(usb)
+            content.append(usb)
         else:
-            self.panel.append(block('USB cable', 'Plug in your phone', 'Set its USB mode to File transfer', divided=True))
-        self.panel.append(block('Virtual controller', 'Off', 'Turns on when a controller connects', divided=True))
+            content.append(block('Or use a USB cable', 'Plug in your phone',
+                                 'Set its USB mode to File transfer. Musubi connects by itself.', divided=True))
         ignored = self.ignored_phones()
         if ignored:
             phone = ignored[0]
-            self.panel.append(block('Ignored phone', phone['name'] or 'Unknown model', f"Wi-Fi · {phone['ip']}", 'mono', divided=True))
-            self.panel.append(button('Allow', lambda: self.allow(phone)))
+            ignored_box = column(2, 'divider')
+            ignored_box.append(text('Ignored phone', 'caption', ellipsize=True))
+            name = text(phone['name'] or 'Unknown model', 'value', ellipsize=True)
+            name.set_single_line_mode(True)
+            name.set_max_width_chars(32)
+            ignored_box.append(name)
+            wifi_line = text('Wi-Fi', 'mono', ellipsize=True)
+            wifi_line.set_single_line_mode(True)
+            ignored_box.append(wifi_line)
+            ip_line = text(phone['ip'], 'mono', ellipsize=True)
+            ip_line.set_single_line_mode(True)
+            ignored_box.append(ip_line)
+            allow_btn = button('Allow', lambda: self.allow(phone))
+            allow_btn.set_margin_top(4)
+            ignored_box.append(allow_btn)
+            content.append(ignored_box)
+        self.panel.append(content)
+        self.panel.append(spacer())
 
     def panel_controllers(self, phone):
         controller_on = bool(phone['controller'] is not None or self.status['pad'])
@@ -1559,36 +1605,72 @@ class App(Gtk.Application):
         self.controllers_panel.append(bottom_line)
 
     def panel_approve(self, phone):
-        self.panel.append(text('Allow this phone?', 'title', wrap=True))
-        self.panel.append(block('New phone', phone['name'] or 'Unknown model', f"Wi-Fi · {phone['ip']}", 'mono', divided=True))
-        self.panel.append(text('It will be able to press buttons in your games. Only allow phones you recognize.',
-                               'body', wrap=True))
         self.panel.append(spacer())
-        self.panel.set_spacing(8)
-        self.panel.append(button('Allow', lambda: self.allow(phone), 'primary'))
-        self.panel.append(button('Ignore', lambda: self.ignore(phone)))
+        content = column(12)
+        content.append(text('Allow this phone?', 'title', wrap=True))
+
+        phone_box = column(2, 'divider')
+        phone_box.append(text('New phone', 'caption', ellipsize=True))
+        name = text(phone['name'] or 'Unknown model', 'value', ellipsize=True)
+        name.set_single_line_mode(True)
+        name.set_max_width_chars(32)
+        phone_box.append(name)
+        wifi_line = text('Wi-Fi', 'mono', ellipsize=True)
+        wifi_line.set_single_line_mode(True)
+        phone_box.append(wifi_line)
+        ip_line = text(phone['ip'], 'mono', ellipsize=True)
+        ip_line.set_single_line_mode(True)
+        phone_box.append(ip_line)
+        content.append(phone_box)
+
+        content.append(text("It will be able to press buttons in your games and play this PC's sound. "
+                            "Only allow phones you recognize.", 'body', wrap=True))
+
+        actions = Gtk.Box(spacing=10, halign=Gtk.Align.START)
+        actions.set_margin_top(4)
+        actions.append(button('Allow', lambda: self.allow(phone), 'primary'))
+        ignore_btn = button('Ignore', lambda: self.ignore(phone))
+        ignore_btn.set_size_request(96, 40)
+        actions.append(ignore_btn)
+        content.append(actions)
+
+        self.panel.append(content)
+        self.panel.append(spacer())
 
     def panel_firewall(self):
+        self.panel.append(spacer())
+        content = column(8)
         heading = text('Your firewall is blocking phones', 'title', wrap=True)
         heading.add_css_class('alert')
-        self.panel.append(heading)
-        self.panel.set_spacing(8)
+        content.append(heading)
         if self.network:
-            self.panel.append(text(f'Musubi can open UDP port {system.PORT} for devices on your network. '
-                                   'Your PC will ask for your password once.', 'body', wrap=True))
-            self.panel.append(text(self.network, 'mono', wrap=True))
-            self.panel.append(text('New phones still need your approval here.', 'detail', wrap=True))
+            content.append(text(f'Musubi can open UDP port {system.PORT} for devices on your network. '
+                                'Your PC will ask for your password once.', 'body', wrap=True))
+            subnet = text(self.network, 'mono-subnet', ellipsize=True)
+            subnet.set_single_line_mode(True)
+            subnet.set_max_width_chars(32)
+            content.append(subnet)
+            content.append(text('New phones still need your approval here.', 'detail', wrap=True))
         else:
-            self.panel.append(text("Musubi can't tell which network to open. Check your connection.", 'body', wrap=True))
-        self.append_firewall_message(self.panel)
-        self.panel.append(spacer())
-        if self.network:
-            self.panel.append(button('Open the port', self.open_port, 'primary'))
-        self.panel.append(button('Not now', self.dismiss_firewall))
+            content.append(text("Musubi can't tell which network to open. Check your connection.", 'body', wrap=True))
+        self.append_firewall_message(content)
 
-    def append_firewall_message(self, parent):
+        actions = Gtk.Box(spacing=10, halign=Gtk.Align.START)
+        actions.set_margin_top(6)
+        if self.network:
+            actions.append(button('Open the port', self.open_port, 'primary'))
+        not_now = button('Not now', self.dismiss_firewall)
+        not_now.set_size_request(96, 40 if self.network else 36)
+        actions.append(not_now)
+        content.append(actions)
+
+        self.panel.append(content)
+        self.panel.append(spacer())
+
+    def append_firewall_message(self, parent, width_chars=58):
         if self.firewall_message:
             message = text(self.firewall_message, 'detail', wrap=True)
+            message.set_max_width_chars(width_chars)
             message.add_css_class('alert')
             parent.append(message)
             parent.append(button('Copy the command', self.copy_port_command))
@@ -1696,34 +1778,16 @@ class App(Gtk.Application):
         self.pages.set_visible_child_name(self.main_page_name())
         self.update_selection()
 
-    def page(self, name, title, on_back, body):
-        old = self.pages.get_child_by_name(name)
-        showing = old is not None and self.pages.get_visible_child() is old
-        if old is not None:
-            self.pages.remove(old)
-        root = column(0)
-        header = Gtk.Box(spacing=4)
-        header.add_css_class('header')
-        back = Gtk.Button(icon_name='go-previous-symbolic')
-        back.add_css_class('plain')
-        back.update_property([Gtk.AccessibleProperty.LABEL], ['Back'])
-        back.connect('clicked', lambda _: on_back())
-        header.append(back)
-        header.append(text(title, 'page-title'))
-        root.append(header)
-        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
-        scroller.set_child(body)
-        root.append(scroller)
-        self.pages.add_named(root, name)
-        if showing:
-            self.pages.set_visible_child_name(name)
-
     def setting_switch(self, title, detail, active, on_change):
         row = Gtk.Box(spacing=12)
-        labels = column()
+        labels = column(2)
         labels.set_hexpand(True)
-        labels.append(text(title, 'row-title', wrap=True))
-        labels.append(text(detail, 'caption', wrap=True))
+        title_label = text(title, 'row-title', wrap=True)
+        title_label.set_max_width_chars(24)
+        detail_label = text(detail, 'caption', wrap=True)
+        detail_label.set_max_width_chars(28)
+        labels.append(title_label)
+        labels.append(detail_label)
         row.append(labels)
         switch = Gtk.Switch(active=active, valign=Gtk.Align.CENTER)
         switch.update_property([Gtk.AccessibleProperty.LABEL], [title])
@@ -1732,80 +1796,106 @@ class App(Gtk.Application):
         return row
 
     def refresh_settings(self):
-        left = column(8, 'column')
+        self.clear_box(self.settings_panel)
+        heading = text('Settings', 'page-title')
+        heading.set_margin_bottom(16)
+        self.settings_panel.append(heading)
+
+        left = column(10)
         left.set_hexpand(True)
-        left.add_css_class('column-divider')
-        left.append(text('Startup', 'caption'))
-        hidden_note = 'Opens hidden in the tray' if self.has_tray else 'Opens this window when you log in'
-        left.append(self.setting_switch('Start with my PC', hidden_note, system.autostart_enabled(), self.on_autostart))
+        left.append(text('Startup', 'caption', ellipsize=True))
+        left.append(self.setting_switch('Start with my PC', 'Opens hidden in the tray',
+                                        system.autostart_enabled(), self.on_autostart))
         if self.autostart_message:
             message = text(self.autostart_message, 'detail', wrap=True)
+            message.set_max_width_chars(28)
             message.add_css_class('alert')
             left.append(message)
-        if self.has_tray:
-            left.append(self.setting_switch('Keep running in the tray', 'Closing the window keeps Musubi on',
-                                            self.config['tray'], self.on_tray_setting))
-        divider = text('Firewall', 'caption')
-        divider.add_css_class('divider')
-        left.append(divider)
-        self.append_firewall_status(left)
+        left.append(self.setting_switch('Keep running in the tray', 'Closing the window keeps Musubi on',
+                                        self.config['tray'], self.on_tray_setting))
 
-        right = column(8, 'column')
+        firewall_box = column(6, 'divider')
+        firewall_box.append(text('Firewall', 'caption', ellipsize=True))
+        self.append_firewall_status(firewall_box)
+        left.append(firewall_box)
+
+        right = column(10)
         right.set_hexpand(True)
-        right.append(text('Phones', 'caption'))
+        right.append(text('Phones', 'caption', ellipsize=True))
         count = len(self.config['phones'])
         manage = Gtk.Button()
         manage.add_css_class('row')
         manage.update_property([Gtk.AccessibleProperty.LABEL], [f'Manage phones, {count} allowed'])
         manage_row = Gtk.Box(spacing=12)
-        labels = column()
+        labels = column(2)
         labels.set_hexpand(True)
-        labels.append(text('Manage phones', 'row-title', wrap=True))
-        labels.append(text(f'{count} allowed', 'caption', wrap=True))
+        labels.append(text('Manage phones', 'row-title', ellipsize=True))
+        labels.append(text(f'{count} allowed', 'caption', ellipsize=True))
         manage_row.append(labels)
-        manage_row.append(Gtk.Image(icon_name='go-next-symbolic'))
+        manage_row.append(Chevron())
         manage.set_child(manage_row)
         manage.connect('clicked', lambda _: self.open_phones())
         right.append(manage)
-        divider = text('About', 'caption')
-        divider.add_css_class('divider')
-        right.append(divider)
-        right.append(self.link('Setup guide', f'{REPO}#setup'))
-        right.append(self.link('Source code', REPO))
-        right.append(spacer())
-        right.append(text(f'Musubi {VERSION} · MIT license', 'mono', wrap=True))
 
-        body = Gtk.Box(homogeneous=True)
-        body.append(left)
-        body.append(right)
-        self.page('settings', 'Settings', self.go_main, body)
+        about_box = column(6, 'divider')
+        about_box.append(text('About', 'caption', ellipsize=True))
+        about_box.append(self.link('Setup guide', f'{REPO}#setup'))
+        about_box.append(self.link('Source code', REPO))
+        right.append(about_box)
+        right.append(spacer())
+        version_line = text(f'Musubi {VERSION} · MIT license', 'mono', ellipsize=True)
+        version_line.set_single_line_mode(True)
+        version_line.set_max_width_chars(28)
+        right.append(version_line)
+
+        columns = Gtk.Box(spacing=28, homogeneous=True, vexpand=True)
+        columns.append(left)
+        columns.append(right)
+        self.settings_panel.append(columns)
 
     def append_firewall_status(self, parent):
         kind, sources = system.firewall_status()
         if kind == 'none':
-            parent.append(text("ufw isn't on", 'row-title', wrap=True))
-            parent.append(text(f'Musubi has nothing to open. If you use another firewall, allow UDP port {system.PORT}.',
-                               'caption', wrap=True))
+            title = text("ufw isn't on", 'row-title', wrap=True)
+            title.set_max_width_chars(26)
+            detail = text(f'Musubi has nothing to open. If you use another firewall, allow UDP port {system.PORT}.',
+                          'caption', wrap=True)
+            detail.set_max_width_chars(28)
+            parent.append(title)
+            parent.append(detail)
             return
         if kind == 'unknown':
-            parent.append(text("Can't read the firewall rules", 'row-title', wrap=True))
-            parent.append(text(f'If phones can\'t connect, allow UDP port {system.PORT}.', 'caption', wrap=True))
+            title = text("Can't read the firewall rules", 'row-title', wrap=True)
+            title.set_max_width_chars(26)
+            detail = text(f"If phones can't connect, allow UDP port {system.PORT}.", 'caption', wrap=True)
+            detail.set_max_width_chars(28)
+            parent.append(title)
+            parent.append(detail)
             return
         if self.network is not None and system.covers(sources, self.network):
-            parent.append(text('Port open', 'row-title', wrap=True))
-            parent.append(text(f'UDP {system.PORT} · {self.network}', 'mono', wrap=True))
+            parent.append(text('Port open', 'row-title', ellipsize=True))
+            mono = text(f'UDP {system.PORT} · {self.network}', 'mono', ellipsize=True)
+            mono.set_single_line_mode(True)
+            mono.set_max_width_chars(28)
+            parent.append(mono)
             return
         phones = len(sources)
         if phones:
-            parent.append(text(f'Open for {phones} address{"" if phones == 1 else "es"}', 'row-title', wrap=True))
-            parent.append(text('Those phones connect fine. Others on your network are blocked until you open it.',
-                               'caption', wrap=True))
+            title = text(f'Open for {phones} address{"" if phones == 1 else "es"}', 'row-title', wrap=True)
+            title.set_max_width_chars(26)
+            detail = text('Those phones connect fine. Others on your network are blocked until you open it.',
+                          'caption', wrap=True)
+            detail.set_max_width_chars(28)
         else:
-            parent.append(text('Port closed', 'row-title', wrap=True))
-            parent.append(text(f'UDP {system.PORT} is blocked, so phones can\'t connect.', 'caption', wrap=True))
+            title = text('Port closed', 'row-title', wrap=True)
+            title.set_max_width_chars(26)
+            detail = text(f"UDP {system.PORT} is blocked, so phones can't connect.", 'caption', wrap=True)
+            detail.set_max_width_chars(28)
+        parent.append(title)
+        parent.append(detail)
         if self.network:
             parent.append(button('Open for my network', self.open_port))
-        self.append_firewall_message(parent)
+        self.append_firewall_message(parent, 28)
 
     def on_autostart(self, enabled):
         # systemctl takes long enough to stall the switch's animation on the main thread.
@@ -1828,7 +1918,7 @@ class App(Gtk.Application):
         self.save_config()
 
     def link(self, title, url):
-        widget = Gtk.Button(child=text(title, 'link-text'))
+        widget = Gtk.Button(child=text(title, 'link-text'), halign=Gtk.Align.START)
         widget.add_css_class('row')
         widget.connect('clicked', lambda _: Gtk.UriLauncher(uri=url).launch(self.window, None, None))
         return widget
@@ -1836,35 +1926,67 @@ class App(Gtk.Application):
     def open_phones(self):
         self.refresh_phones()
         self.pages.set_visible_child_name('phones')
+        self.update_selection()
 
     def refresh_phones(self):
-        body = column(0, 'column')
+        self.clear_box(self.phones_panel)
+        header = Gtk.Box(spacing=6)
+        header.set_margin_bottom(12)
+        back = Gtk.Button(child=Chevron(left=True), valign=Gtk.Align.CENTER)
+        back.add_css_class('back-btn')
+        back.update_property([Gtk.AccessibleProperty.LABEL], ['Back to Settings'])
+        back.connect('clicked', lambda _: self.open_settings())
+        header.append(back)
+        title = text('Phones', 'page-title')
+        title.set_valign(Gtk.Align.CENTER)
+        header.append(title)
+        self.phones_panel.append(header)
+        self.phones_panel.append(hairline())
+
         if not self.config['phones']:
-            body.append(text('No phones allowed yet', 'row-title', wrap=True))
-            body.append(text('When a phone connects, Musubi asks you here first.', 'caption', wrap=True))
+            empty = column(4)
+            empty.set_margin_top(16)
+            empty.append(text('No phones allowed yet', 'row-title', wrap=True))
+            empty.append(text('When a phone connects, Musubi asks you here first.', 'caption', wrap=True))
+            self.phones_panel.append(empty)
+            return
+
         active = self.status['phone'] and self.status['phone']['ip']
         for ip, name in self.config['phones'].items():
             row = Gtk.Box(spacing=12)
-            row.set_margin_top(10)
-            row.set_margin_bottom(10)
-            labels = column()
+            row.set_margin_top(12)
+            row.set_margin_bottom(12)
+            labels = column(2)
             labels.set_hexpand(True)
+            labels.set_valign(Gtk.Align.CENTER)
             if self.renaming == ip:
-                entry = Gtk.Entry(text=name)
+                entry = Gtk.Entry(text=name, hexpand=True, valign=Gtk.Align.CENTER)
                 entry.update_property([Gtk.AccessibleProperty.LABEL], [f'New name for {name}'])
                 entry.connect('activate', lambda widget, phone=ip: self.save_rename(phone, widget.get_text()))
                 labels.append(entry)
                 row.append(labels)
-                row.append(button('Save', lambda phone=ip, widget=entry: self.save_rename(phone, widget.get_text())))
+                save_btn = button('Save', lambda phone=ip, widget=entry: self.save_rename(phone, widget.get_text()),
+                                  align=None)
+                save_btn.set_valign(Gtk.Align.CENTER)
+                row.append(save_btn)
             else:
-                labels.append(text(name, 'row-title', ellipsize=True))
-                labels.append(text(f"{ip} · {'Connected' if ip == active else 'Allowed'}", 'mono', ellipsize=True))
+                name_label = text(name, 'row-title', ellipsize=True)
+                name_label.set_single_line_mode(True)
+                name_label.set_max_width_chars(30)
+                labels.append(name_label)
+                status_label = text('Connected' if ip == active else 'Allowed', 'mono', ellipsize=True)
+                status_label.set_single_line_mode(True)
+                labels.append(status_label)
+                ip_label = text(ip, 'mono', ellipsize=True)
+                ip_label.set_single_line_mode(True)
+                labels.append(ip_label)
                 row.append(labels)
-                row.append(button('Rename', lambda phone=ip: self.start_rename(phone)))
-                row.append(button('Remove', lambda phone=ip: self.remove_phone(phone)))
-            body.append(row)
-        self.page('phones', 'Phones', self.open_settings, body)
-        self.pages.set_visible_child_name('phones')
+                actions = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
+                actions.append(button('Rename', lambda phone=ip: self.start_rename(phone), align=None))
+                actions.append(button('Remove', lambda phone=ip: self.remove_phone(phone), align=None))
+                row.append(actions)
+            self.phones_panel.append(row)
+            self.phones_panel.append(hairline())
 
     def start_rename(self, ip):
         self.renaming = ip
@@ -1878,6 +2000,9 @@ class App(Gtk.Application):
             self.save_config()
         self.refresh_phones()
         self.refresh()
+        # Typing the name turned on GTK's keyboard focus ring, and the rebuilt list hands focus to the back arrow.
+        self.window.set_focus(None)
+        self.window.set_focus_visible(False)
 
     def remove_phone(self, ip):
         del self.config['phones'][ip]
