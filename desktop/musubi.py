@@ -34,7 +34,7 @@ PACKET = struct.Struct('!I8h')
 NEUTRAL = PACKET.pack(0, *[0] * 8)
 # The app times the echo of these to tell whether the PC is answering.
 PING_SIZE = 8
-# Magic, controller connected, ping in ms, then "phone name\0controller name\0" and a features byte. Sent once a second.
+# Magic, controller connected, ping in ms, then "phone name\0controller name\0" a features byte and a 16-bit sound delay in ms (0 = none). Sent once a second.
 HELLO = struct.Struct('!4sBH')
 HELLO_MAGIC = b'PBHI'
 # Feature bits stay below 0x20: 0.5.x desktops read the byte as part of the controller name and drop it as a control character.
@@ -78,19 +78,21 @@ def clean_name(raw):
 
 
 def decode_hello(data):
-    """Return {name, controller, controller_connected, rtt}, or None if this isn't a hello."""
+    """Return {name, controller, controller_connected, rtt, audio, delay}, or None if this isn't a hello."""
     if len(data) < HELLO.size or data[:4] != HELLO_MAGIC:
         return None
     _, connected, rtt = HELLO.unpack_from(data)
     phone, _, rest = data[HELLO.size:].partition(b'\0')
     controller, _, features = rest.partition(b'\0')
     flags = features[0] if features else 0
+    delay = int.from_bytes(features[1:3], 'big') if len(features) >= 3 else 0
     return {
         'name': clean_name(phone),
         'controller': clean_name(controller),
         'controller_connected': bool(connected),
         'rtt': rtt,
         'audio': bool(flags & FEATURE_AUDIO),
+        'delay': delay or None,
     }
 
 
@@ -148,6 +150,7 @@ class Bridge:
                 'controller_known': self.hello is not None,
                 'rtt': hello.get('rtt'),
                 'audio': hello.get('audio', False),
+                'delay': hello.get('delay'),
             }
         return {
             'phone': phone,

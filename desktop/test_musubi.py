@@ -29,17 +29,19 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(axes, [0] * 8)
 
 
-def hello(phone=b'LM-X430', controller=b'Xbox Wireless Controller', connected=True, rtt=9, features=None):
+def hello(phone=b'LM-X430', controller=b'Xbox Wireless Controller', connected=True, rtt=9, features=None, delay=None):
     """Without features, this is the hello of a 0.5.x app."""
     packet = HELLO.pack(HELLO_MAGIC, connected, rtt) + phone + b'\0' + controller
-    return packet if features is None else packet + b'\0' + bytes([features])
+    if features is None:
+        return packet
+    return packet + b'\0' + bytes([features]) + (b'' if delay is None else delay.to_bytes(2, 'big'))
 
 
 class HelloTest(unittest.TestCase):
     def test_reads_every_field(self):
         self.assertEqual(decode_hello(hello()), {
             'name': 'LM-X430', 'controller': 'Xbox Wireless Controller',
-            'controller_connected': True, 'rtt': 9, 'audio': False,
+            'controller_connected': True, 'rtt': 9, 'audio': False, 'delay': None,
         })
 
     def test_reads_the_features_after_the_names(self):
@@ -47,6 +49,14 @@ class HelloTest(unittest.TestCase):
         self.assertEqual(parsed['controller'], 'Xbox Wireless Controller')
         self.assertTrue(parsed['audio'])
         self.assertFalse(decode_hello(hello(controller=b'', features=0))['audio'])
+
+    def test_reads_the_delay_when_present(self):
+        parsed = decode_hello(hello(features=musubi.FEATURE_AUDIO, delay=130))
+        self.assertEqual((parsed['controller'], parsed['audio'], parsed['delay']),
+                         ('Xbox Wireless Controller', True, 130))
+        self.assertIsNone(decode_hello(hello(features=musubi.FEATURE_AUDIO, delay=0))['delay'])
+        self.assertIsNone(decode_hello(hello(features=musubi.FEATURE_AUDIO))['delay'])
+        self.assertIsNone(decode_hello(hello())['delay'])
 
     def test_older_desktops_dont_show_the_features_in_the_controller_name(self):
         # 0.5.x took everything after the first \0 as the controller name.

@@ -84,6 +84,9 @@ button.sidebar-item { min-height: 36px; padding: 4px 8px; border: none; border-r
 button.sidebar-item:disabled { color: #E6DEC8; border: none; }
 button.sidebar-item.selected, button.plain.selected { background: #171512; }
 .mic-item { min-height: 36px; padding: 4px 8px; }
+button.overview-row { min-height: 68px; padding: 8px 0; border: none; border-radius: 6px; }
+.overview-static { min-height: 68px; padding: 8px 0; }
+.hairline { background: #332E28; min-height: 1px; }
 button.row { padding: 8px 0; border: none; border-radius: 0; }
 button.row:hover, button.row:active { background: none; }
 button.row:hover .link-text, button.row:hover .row-title { color: #FFFFFF; }
@@ -104,8 +107,13 @@ class PadArea(Gtk.DrawingArea):
     WIDTH, HEIGHT = 560, 348
     ART_X, ART_Y, ART_WIDTH, ART_HEIGHT = 18, 3, 524, 338
 
-    def __init__(self):
-        super().__init__(hexpand=True, vexpand=True)
+    def __init__(self, width=None):
+        compact = width is not None
+        super().__init__(hexpand=not compact, vexpand=not compact,
+                         valign=Gtk.Align.CENTER if compact else Gtk.Align.FILL)
+        if compact:
+            self.set_size_request(width, round(width * self.HEIGHT / self.WIDTH))
+        self.compact = compact
         self.buttons = 0
         self.axes = [0] * 8
         self.update_property([Gtk.AccessibleProperty.LABEL], ['Controller'])
@@ -152,8 +160,9 @@ class PadArea(Gtk.DrawingArea):
             cr.curve_to(*curve) if len(curve) == 6 else cr.line_to(*curve)
         cr.close_path()
 
-    def trigger(self, cr, x, amount, label_x, name):
-        self.label(cr, name, label_x, 17, 12, MUTED)
+    def trigger(self, cr, x, amount, label_x, name, show_label=True):
+        if show_label:
+            self.label(cr, name, label_x, 17, 12, MUTED)
         self.rounded(cr, x, 4, 84, 26, 8)
         self.shape(cr, SURFACE, ACTIVE if amount > 0 else IDLE)
         if amount > 0:
@@ -186,9 +195,11 @@ class PadArea(Gtk.DrawingArea):
         self.shape(cr, ACTIVE if on else BACKGROUND, ACTIVE if on else IDLE)
 
     def draw(self, _area, cr, width, height, _data=None):
-        cr.set_source_rgb(*BACKGROUND)
-        cr.paint()
-        scale = min((width - 16) / self.ART_WIDTH, (height - 16) / self.ART_HEIGHT)
+        if not self.compact:
+            cr.set_source_rgb(*BACKGROUND)
+            cr.paint()
+        margin = 0 if self.compact else 16
+        scale = min((width - margin) / self.ART_WIDTH, (height - margin) / self.ART_HEIGHT)
         cr.translate((width - self.ART_WIDTH * scale) / 2 - self.ART_X * scale,
                      (height - self.ART_HEIGHT * scale) / 2 - self.ART_Y * scale)
         cr.scale(scale, scale)
@@ -196,8 +207,8 @@ class PadArea(Gtk.DrawingArea):
         cr.set_line_join(1)
         axes = self.axes
 
-        self.trigger(cr, 112, axes[4] / TRIGGER_MAX, 96, 'L2')
-        self.trigger(cr, 364, axes[5] / TRIGGER_MAX, 464, 'R2')
+        self.trigger(cr, 112, axes[4] / TRIGGER_MAX, 96, 'L2', not self.compact)
+        self.trigger(cr, 364, axes[5] / TRIGGER_MAX, 464, 'R2', not self.compact)
 
         for bit, side in ((L1, 1), (R1, -1)):
             origin = 0 if side == 1 else self.WIDTH
@@ -293,6 +304,12 @@ def spacer():
     return Gtk.Box(vexpand=True)
 
 
+def hairline():
+    line = Gtk.Box()
+    line.add_css_class('hairline')
+    return line
+
+
 def pair(first, second):
     row = Gtk.Box(spacing=8, homogeneous=True)
     row.append(first)
@@ -309,6 +326,157 @@ def block(caption, value, detail=None, detail_css='detail', divided=False):
     return box
 
 
+class HeadphonesArea(Gtk.DrawingArea):
+    """Flat headphones drawing from the 300 x 266 coordinates in Headphones-Solid.dc.html."""
+    WIDTH, HEIGHT = 300, 266
+
+    def __init__(self, width=80, mode='off'):
+        super().__init__(valign=Gtk.Align.CENTER)
+        self.set_size_request(width, round(width * self.HEIGHT / self.WIDTH))
+        self.mode = mode
+        self.left = 0.0
+        self.right = 0.0
+        self.timer_id = None
+        self.set_opacity(0.4 if mode == 'none' else 1.0)
+        self.sync_accessible()
+        self.set_draw_func(self.draw)
+
+    def sync_accessible(self):
+        if self.mode == 'none':
+            label = 'Headphones, no earbuds connected'
+        elif self.mode == 'off':
+            label = 'Headphones, sound off'
+        elif self.left > 0 or self.right > 0:
+            label = 'Headphones, sound arriving'
+        else:
+            label = 'Headphones, nothing playing'
+        self.update_property([Gtk.AccessibleProperty.LABEL], [label])
+
+    def set_mode(self, mode):
+        if mode != self.mode:
+            self.mode = mode
+            if mode != 'on':
+                self.left = 0.0
+                self.right = 0.0
+            self.set_opacity(0.4 if mode == 'none' else 1.0)
+            self.sync_accessible()
+            self.queue_draw()
+
+    def set_levels(self, left, right):
+        if self.mode != 'on':
+            return
+        self.left = max(min(max(left, 0.0), 1.0), self.left)
+        self.right = max(min(max(right, 0.0), 1.0), self.right)
+        if (self.left > 0 or self.right > 0) and self.timer_id is None:
+            self.timer_id = GLib.timeout_add(33, self.tick)
+        self.sync_accessible()
+        self.queue_draw()
+
+    def tick(self):
+        self.left = self.left * 0.85 if self.left * 0.85 >= 0.005 else 0.0
+        self.right = self.right * 0.85 if self.right * 0.85 >= 0.005 else 0.0
+        self.sync_accessible()
+        self.queue_draw()
+        if (self.left == 0.0 and self.right == 0.0) or self.mode != 'on' or not self.get_mapped():
+            self.timer_id = None
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    @staticmethod
+    def rounded(cr, x, y, w, h, r):
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+        cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+        cr.arc(x + r, y + r, r, math.pi, 1.5 * math.pi)
+        cr.close_path()
+
+    @staticmethod
+    def label(cr, value, x, y, size, color):
+        cr.select_font_face('Roboto', 0, 1)
+        cr.set_font_size(size)
+        extents = cr.text_extents(value)
+        cr.set_source_rgb(*color)
+        cr.move_to(x - extents.width / 2 - extents.x_bearing, y - extents.height / 2 - extents.y_bearing)
+        cr.show_text(value)
+
+    def draw(self, _area, cr, width, height, _data=None):
+        scale = min(width / self.WIDTH, height / self.HEIGHT)
+        cr.translate((width - self.WIDTH * scale) / 2, (height - self.HEIGHT * scale) / 2)
+        cr.scale(scale, scale)
+
+        shell = LATER if self.mode == 'off' else IDLE
+        pad = THUMB if self.mode == 'off' else LATER
+        left = self.left if self.mode == 'on' else 0.0
+        right = self.right if self.mode == 'on' else 0.0
+
+        cr.new_sub_path()
+        cr.move_to(32, 156)
+        cr.line_to(32, 140)
+        cr.arc(150, 140, 118, math.pi, 2 * math.pi)
+        cr.line_to(268, 156)
+        cr.line_to(246, 156)
+        cr.line_to(246, 140)
+        cr.arc_negative(150, 140, 96, 2 * math.pi, math.pi)
+        cr.line_to(54, 156)
+        cr.close_path()
+        cr.set_source_rgb(*shell)
+        cr.fill()
+
+        for shell_x, pad_x, level in ((22, 56, left), (240, 218, right)):
+            self.rounded(cr, shell_x, 146, 38, 92, 15)
+            cr.set_source_rgb(*shell)
+            cr.fill()
+            if level > 0:
+                h = 92 * level
+                self.rounded(cr, shell_x, 238 - h, 38, h, min(15, h / 2))
+                cr.set_source_rgb(*ACTIVE)
+                cr.fill()
+            self.rounded(cr, pad_x, 132, 26, 120, 12)
+            cr.set_source_rgb(*pad)
+            cr.fill()
+
+        if left > 0 or right > 0:
+            cr.new_sub_path()
+            for x in range(96, 205, 2):
+                t = (x - 96) / 108
+                amp = 20 * (left + (right - left) * t) * math.sin(math.pi * t)
+                y = 192 - amp * math.sin(2 * math.pi * (x - 96) / 18)
+                if x == 96:
+                    cr.move_to(x, y)
+                else:
+                    cr.line_to(x, y)
+            cr.set_source_rgb(*ACTIVE)
+            cr.set_line_width(3)
+            cr.set_line_cap(1)
+            cr.set_line_join(1)
+            cr.stroke()
+
+        self.label(cr, 'L', 41, 254, 13, TEXT if left > 0 else MUTED)
+        self.label(cr, 'R', 259, 254, 13, TEXT if right > 0 else MUTED)
+
+
+class Chevron(Gtk.DrawingArea):
+    """An 18px MUTED right chevron at the end of an Overview row."""
+
+    def __init__(self):
+        super().__init__(valign=Gtk.Align.CENTER)
+        self.set_size_request(18, 18)
+        self.set_draw_func(self.draw)
+
+    @staticmethod
+    def draw(_area, cr, width, height, _data=None):
+        cx, cy = width / 2.0, height / 2.0
+        cr.set_source_rgb(*MUTED)
+        cr.set_line_width(1.8)
+        cr.set_line_cap(1)
+        cr.set_line_join(1)
+        cr.move_to(cx - 2.5, cy - 5.0)
+        cr.line_to(cx + 2.5, cy)
+        cr.line_to(cx - 2.5, cy + 5.0)
+        cr.stroke()
+
+
 class CordSource(Gtk.DrawingArea):
     """The 12px phone dot at the top of the 24px cord column, with the 2px line below it."""
 
@@ -317,15 +485,40 @@ class CordSource(Gtk.DrawingArea):
         self.set_size_request(24, -1)
         self.dot = 'idle'
         self.line_active = False
+        self.spin = False
+        self.tick_id = 0
+        self.angle = 0.0
+        self.last_time = 0
         self.set_draw_func(self.draw)
+        self.connect('map', lambda _: self.sync_spin())
+        self.connect('unmap', lambda _: self.sync_spin())
 
-    def set_state(self, dot, line_active):
-        if (dot, line_active) != (self.dot, self.line_active):
-            self.dot, self.line_active = dot, line_active
+    def set_state(self, dot, line_active, spin=False):
+        if (dot, line_active, spin) != (self.dot, self.line_active, self.spin):
+            self.dot, self.line_active, self.spin = dot, line_active, spin
+            self.sync_spin()
             self.queue_draw()
 
+    def sync_spin(self):
+        # Ticks run only while the ring waits and the widget is on screen.
+        want = self.spin and self.get_mapped()
+        if want and not self.tick_id:
+            self.last_time = 0
+            self.tick_id = self.add_tick_callback(self.on_tick)
+        elif not want and self.tick_id:
+            self.remove_tick_callback(self.tick_id)
+            self.tick_id = 0
+
+    def on_tick(self, _widget, clock):
+        now = clock.get_frame_time()
+        if self.last_time:
+            self.angle = (self.angle + (now - self.last_time) * 2 * math.pi / 2.5e6) % (2 * math.pi)
+        self.last_time = now
+        self.queue_draw()
+        return GLib.SOURCE_CONTINUE
+
     def draw(self, _area, cr, _width, height, _data=None):
-        cx, cy = 12.0, 10.0
+        cx, cy = 12.0, 14.0
         cr.set_line_width(2)
         cr.set_source_rgb(*(ACTIVE if self.line_active else BORDER))
         cr.move_to(cx, cy + 6)
@@ -336,7 +529,9 @@ class CordSource(Gtk.DrawingArea):
             cr.set_source_rgb(*ACTIVE)
             cr.fill()
         else:
-            cr.arc(cx, cy, 5, 0, 2 * math.pi)
+            cr.translate(cx, cy)
+            cr.rotate(self.angle)
+            cr.arc(0, 0, 5, 0, 2 * math.pi)
             cr.set_source_rgb(*BACKGROUND)
             cr.fill_preserve()
             if self.dot == 'alert':
@@ -448,6 +643,9 @@ class App(Gtk.Application):
         self.has_tray = False
         self.panel_key = None
         self.phone_detail = None
+        self.overview_link = None
+        self.overview_delay = None
+        self.overview_pad = None
         self.readout = None
         self.blocked = set()
         self.firewall_dismissed = False
@@ -455,8 +653,9 @@ class App(Gtk.Application):
         self.autostart_message = None
         self.autostart_lock = threading.Lock()
         self.renaming = None
-        self.selected_item = 'sound'
+        self.selected_item = 'overview'
         self.source_cord = None
+        self.header_btn = None
         self.header_name = None
         self.header_status = None
         self.items_box = None
@@ -473,6 +672,7 @@ class App(Gtk.Application):
         self.pad = None
         self.pages = None
         self.panel = None
+        self.overview_panel = None
         self.connected_panel = None
         self.sound_panel = None
         self.local_ip, self.network = None, None
@@ -510,10 +710,18 @@ class App(Gtk.Application):
 
         header_row = Gtk.Box(spacing=6)
         self.source_cord = CordSource()
+        cord_click = Gtk.GestureClick()
+        cord_click.connect('released', lambda *_: self.header_btn.get_sensitive() and self.select_item('overview'))
+        self.source_cord.add_controller(cord_click)
         header_row.append(self.source_cord)
+        self.header_btn = Gtk.Button(hexpand=True)
+        self.header_btn.add_css_class('plain')
+        self.header_btn.add_css_class('sidebar-item')
+        self.header_btn.set_margin_bottom(10)
+        self.header_btn.set_valign(Gtk.Align.START)
         header_labels = column(2)
+        header_labels.set_valign(Gtk.Align.CENTER)
         header_labels.set_hexpand(True)
-        header_labels.set_margin_bottom(10)
         self.header_name = text('No phone yet', 'value', ellipsize=True)
         self.header_status = text('Waiting', 'mono', ellipsize=True)
         self.header_status.set_single_line_mode(True)
@@ -521,7 +729,9 @@ class App(Gtk.Application):
         self.header_status.set_max_width_chars(16)
         header_labels.append(self.header_name)
         header_labels.append(self.header_status)
-        header_row.append(header_labels)
+        self.header_btn.set_child(header_labels)
+        self.header_btn.connect('clicked', lambda _: self.select_item('overview'))
+        header_row.append(self.header_btn)
         sidebar.append(header_row)
 
         self.items_box = column(0)
@@ -609,6 +819,12 @@ class App(Gtk.Application):
         self.pages = Gtk.Stack(transition_type=Gtk.StackTransitionType.NONE, hexpand=True, vexpand=True,
                                hhomogeneous=False, vhomogeneous=False)
         self.pages.add_css_class('page')
+
+        overview_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
+        self.overview_panel = column(0)
+        self.overview_panel.set_vexpand(True)
+        overview_scroller.set_child(self.overview_panel)
+        self.pages.add_named(overview_scroller, 'overview')
 
         controllers = Gtk.Box(spacing=24)
         self.pad = PadArea()
@@ -712,6 +928,8 @@ class App(Gtk.Application):
         kind = event['event']
         if kind == 'input':
             self.pad.set_state(event['buttons'], event['axes'])
+            if self.overview_pad is not None:
+                self.overview_pad.set_state(event['buttons'], event['axes'])
             if self.readout is not None:
                 description = describe_input(event['buttons'], event['axes'])
                 self.readout.set_label(description or 'Press a button to test')
@@ -753,11 +971,11 @@ class App(Gtk.Application):
 
     def update_selection(self):
         visible = self.pages.get_visible_child_name()
-        in_settings = visible in ('settings', 'phones')
         for widget, active in (
-            (self.ctrl_btn, not in_settings and self.selected_item == 'controllers'),
-            (self.sound_btn, not in_settings and self.selected_item == 'sound'),
-            (self.settings_btn, in_settings),
+            (self.header_btn, visible == 'overview'),
+            (self.ctrl_btn, visible == 'controllers'),
+            (self.sound_btn, visible == 'sound'),
+            (self.settings_btn, visible in ('settings', 'phones')),
         ):
             if active:
                 widget.add_css_class('selected')
@@ -789,7 +1007,7 @@ class App(Gtk.Application):
         seg1 = has_phone and (controller_on or sound_on)
         seg2 = has_phone and sound_on
 
-        self.source_cord.set_state(dot, seg1)
+        self.source_cord.set_state(dot, seg1, state == 'waiting')
         self.ctrl_node.set_state('live' if controller_on else 'idle', seg1, seg2)
         self.sound_node.set_state('live' if sound_on else 'idle', seg2, False)
         self.mic_node.set_state('later', False, False)
@@ -799,6 +1017,7 @@ class App(Gtk.Application):
         self.sound_caption.set_label(('Playing' if sound_on else 'Off') if has_phone else 'Needs a phone')
 
         self.items_box.set_opacity(1.0 if has_phone else 0.45)
+        self.header_btn.set_sensitive(has_phone)
         self.ctrl_btn.set_sensitive(has_phone)
         self.sound_btn.set_sensitive(has_phone)
         self.stop_btn.set_visible(not self.error and not self.stopped)
@@ -806,8 +1025,12 @@ class App(Gtk.Application):
 
     def refresh(self):
         phone = self.status['phone']
+        if phone is None:
+            self.selected_item = 'overview'
         if not self.status['pad']:
             self.pad.set_state(0, [0] * 8)
+            if self.overview_pad is not None:
+                self.overview_pad.set_state(0, [0] * 8)
         pending = self.pending_phones()
         firewall = bool(self.blocked) and not self.firewall_dismissed and phone is None
         state = self.current_state(pending, firewall)
@@ -822,8 +1045,19 @@ class App(Gtk.Application):
         self.update_sidebar(state, phone, pending)
         if self.phone_detail is not None and phone:
             self.phone_detail.set_label(self.phone_line(phone))
+        if self.overview_link is not None and phone:
+            self.overview_link.set_label(self.link_line(phone))
+        if self.overview_delay is not None and phone:
+            self.update_overview_delay(phone)
         if self.tray:
             self.tray.set_status(self.tray_text())
+
+    def update_overview_delay(self, phone):
+        delay = phone.get('delay')
+        has_delay = bool(phone.get('audio')) and isinstance(delay, (int, float)) and not isinstance(delay, bool)
+        self.overview_delay.set_visible(has_delay)
+        if has_delay:
+            self.overview_delay.set_label(f'Delay ≈ {int(delay)} ms')
 
     def tray_text(self):
         phone = self.status['phone']
@@ -852,8 +1086,12 @@ class App(Gtk.Application):
 
     def clear_panel(self):
         self.phone_detail = None
+        self.overview_link = None
+        self.overview_delay = None
+        self.overview_pad = None
         self.readout = None
         self.clear_box(self.panel)
+        self.clear_box(self.overview_panel)
         self.clear_box(self.connected_panel)
         self.clear_box(self.sound_panel)
 
@@ -877,12 +1115,116 @@ class App(Gtk.Application):
             self.panel_firewall()
         elif state == 'connected':
             phone = self.status['phone']
+            self.panel_overview(phone)
             self.panel_connected(phone)
             self.panel_sound(phone)
         else:
             self.panel_waiting()
         if not in_settings:
             self.pages.set_visible_child_name(self.selected_item if state == 'connected' else 'state')
+
+    @staticmethod
+    def overview_row(labels, drawing, on_click, accessible_label):
+        row = Gtk.Button()
+        row.add_css_class('plain')
+        row.add_css_class('overview-row')
+        row.set_size_request(-1, 84)
+        row.update_property([Gtk.AccessibleProperty.LABEL], [accessible_label])
+        box = Gtk.Box(spacing=12)
+        box.set_valign(Gtk.Align.CENTER)
+        box.append(labels)
+        box.append(drawing)
+        box.append(Chevron())
+        row.set_child(box)
+        row.connect('clicked', lambda _: on_click())
+        return row
+
+    def panel_overview(self, phone):
+        top = column(2)
+        top.append(text('Phone', 'caption', ellipsize=True))
+        name = text(self.phone_name(phone), 'title', ellipsize=True)
+        name.set_max_width_chars(24)
+        top.append(name)
+        self.overview_link = text(self.link_line(phone), 'mono', ellipsize=True)
+        self.overview_link.set_single_line_mode(True)
+        top.append(self.overview_link)
+        if phone['ip'] != 'usb':
+            ip_label = text(phone['ip'], 'mono', ellipsize=True)
+            ip_label.set_single_line_mode(True)
+            top.append(ip_label)
+        self.overview_panel.append(top)
+
+        self.overview_panel.append(spacer())
+
+        rows = column(0)
+        controller_on = bool(phone['controller'] is not None or self.status['pad'])
+        players = 1 if controller_on else 0
+        ctrl_labels = column(2)
+        ctrl_labels.set_hexpand(True)
+        ctrl_labels.set_valign(Gtk.Align.CENTER)
+        ctrl_labels.append(text('Controllers · to this PC', 'caption', ellipsize=True))
+        ctrl_labels.append(text(f'{players} of 4 players', 'value', ellipsize=True))
+        ctrl_detail = (phone['controller'] or 'Connected') if controller_on else 'No controller yet'
+        ctrl_labels.append(text(ctrl_detail, 'detail', ellipsize=True))
+        ctrl_sub = ('Games see Xbox 360 controller 1' if controller_on
+                    else 'Turn one on that is paired with the phone')
+        ctrl_sub_label = text(ctrl_sub, 'detail', wrap=True)
+        ctrl_sub_label.set_max_width_chars(36)
+        ctrl_labels.append(ctrl_sub_label)
+
+        self.overview_pad = PadArea(width=128)
+        if controller_on:
+            self.overview_pad.set_state(self.pad.buttons, self.pad.axes)
+        self.overview_pad.set_opacity(1.0 if controller_on else 0.35)
+
+        rows.append(self.overview_row(
+            ctrl_labels,
+            self.overview_pad,
+            lambda: self.select_item('controllers'),
+            f'Controllers · to this PC, {players} of 4 players',
+        ))
+        rows.append(hairline())
+
+        sound_on = bool(phone.get('audio'))
+        sound_value = 'Playing' if sound_on else 'Off on the phone'
+        sound_detail = ('Through the "Musubi" output' if sound_on
+                        else 'Turn on Play PC sound on the phone')
+        sound_labels = column(2)
+        sound_labels.set_hexpand(True)
+        sound_labels.set_valign(Gtk.Align.CENTER)
+        sound_labels.append(text('Sound · to the phone', 'caption', ellipsize=True))
+        sound_labels.append(text(sound_value, 'value', ellipsize=True))
+        sound_detail_label = text(sound_detail, 'detail', wrap=True)
+        sound_detail_label.set_max_width_chars(36)
+        sound_labels.append(sound_detail_label)
+        self.overview_delay = text('', 'mono', ellipsize=True)
+        self.overview_delay.set_single_line_mode(True)
+        self.update_overview_delay(phone)
+        sound_labels.append(self.overview_delay)
+
+        rows.append(self.overview_row(
+            sound_labels,
+            HeadphonesArea(width=80, mode='on' if sound_on else 'off'),
+            lambda: self.select_item('sound'),
+            f'Sound · to the phone, {sound_value}',
+        ))
+        rows.append(hairline())
+
+        mic_row = Gtk.Box(spacing=12)
+        mic_row.add_css_class('overview-static')
+        mic_row.set_size_request(-1, 84)
+        mic_labels = column(2)
+        mic_labels.set_hexpand(True)
+        mic_labels.set_valign(Gtk.Align.CENTER)
+        mic_labels.append(text('Mic · to this PC', 'caption', ellipsize=True))
+        mic_value = text('Coming later', 'value', ellipsize=True)
+        mic_value.add_css_class('muted')
+        mic_labels.append(mic_value)
+        mic_row.append(mic_labels)
+        rows.append(mic_row)
+
+        self.overview_panel.append(rows)
+        self.overview_panel.append(spacer())
 
     def panel_sound(self, phone):
         self.sound_panel.append(text('Sound on phone', 'page-title'))

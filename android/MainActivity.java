@@ -578,13 +578,16 @@ public class MainActivity extends Activity {
         String controller = deviceName;
         byte[] names = (shorten(Build.MODEL) + "\0" + shorten(controller != null ? controller : ""))
             .getBytes(StandardCharsets.UTF_8);
-        ByteBuffer out = ByteBuffer.allocate(HELLO_MAGIC.length + 3 + names.length + 2);
+        ByteBuffer out = ByteBuffer.allocate(HELLO_MAGIC.length + 3 + names.length + 4);
         out.put(HELLO_MAGIC);
         out.put((byte) (controller != null ? 1 : 0));
         out.putShort((short) Math.min(rttMs, 65535));
         out.put(names);
         out.put((byte) 0);
         out.put(soundOn ? FEATURE_AUDIO : 0);
+        // Same figure as the Headphones page; 0 means no reading.
+        int delay = soundOn && delayMs >= 0 ? Math.round((rttMs / 2 + delayMs) / 10f) * 10 : 0;
+        out.putShort((short) Math.min(delay, 65535));
         return out.array();
     }
 
