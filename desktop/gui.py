@@ -32,7 +32,6 @@ TRIGGER_MAX = 255
 DEAD_ZONE = 0.05
 WINDOW_WIDTH, WINDOW_HEIGHT = 760, 480
 SIDEBAR_WIDTH = 230
-PANEL_WIDTH = 210
 FIREWALL_CHECK_SECONDS = 3
 LOG_WINDOW = '-15s'
 
@@ -51,12 +50,14 @@ window, .root { background: #0D0C0A; color: #E6DEC8; font-family: Roboto, sans-s
 scrolledwindow, viewport { background: transparent; }
 .sidebar { border-right: 1px solid #332E28; padding: 22px 12px 14px 12px; background: #0D0C0A; }
 .page { padding: 22px 24px 20px 24px; background: #0D0C0A; }
-.side { border-left: 1px solid #332E28; padding: 0 0 0 16px; background: #0D0C0A; }
 .divider { border-top: 1px solid #332E28; margin-top: 12px; padding-top: 8px; }
 .column { padding: 12px 16px; }
 .column-divider { border-right: 1px solid #332E28; }
 .header { border-bottom: 1px solid #332E28; padding: 4px 16px 4px 4px; }
 .caption { font-size: 12px; color: #8F8573; }
+.tab-label { font-size: 11px; color: #8F8573; }
+.player-tab { padding: 6px 8px; border-radius: 6px 6px 0 0; border-bottom: 2px solid transparent; }
+.player-tab.selected { background: #171512; border-bottom: 2px solid #E6DEC8; }
 .detail { font-size: 13px; color: #8F8573; }
 .muted { color: #8F8573; }
 .value { font-size: 16px; font-weight: 500; }
@@ -108,12 +109,14 @@ class PadArea(Gtk.DrawingArea):
     ART_X, ART_Y, ART_WIDTH, ART_HEIGHT = 18, 3, 524, 338
 
     def __init__(self, width=None):
-        compact = width is not None
-        super().__init__(hexpand=not compact, vexpand=not compact,
+        compact = width is not None and width < 200
+        super().__init__(hexpand=width is None, vexpand=not compact,
+                         halign=Gtk.Align.FILL if width is None else Gtk.Align.CENTER,
                          valign=Gtk.Align.CENTER if compact else Gtk.Align.FILL)
-        if compact:
+        if width is not None:
             self.set_size_request(width, round(width * self.HEIGHT / self.WIDTH))
         self.compact = compact
+        self.fixed_width = width is not None
         self.buttons = 0
         self.axes = [0] * 8
         self.update_property([Gtk.AccessibleProperty.LABEL], ['Controller'])
@@ -198,7 +201,7 @@ class PadArea(Gtk.DrawingArea):
         if not self.compact:
             cr.set_source_rgb(*BACKGROUND)
             cr.paint()
-        margin = 0 if self.compact else 16
+        margin = 0 if self.fixed_width else 16
         scale = min((width - margin) / self.ART_WIDTH, (height - margin) / self.ART_HEIGHT)
         cr.translate((width - self.ART_WIDTH * scale) / 2 - self.ART_X * scale,
                      (height - self.ART_HEIGHT * scale) / 2 - self.ART_Y * scale)
@@ -626,6 +629,43 @@ class PlayerDots(Gtk.DrawingArea):
             cr.fill()
 
 
+class PlayerNumber(Gtk.DrawingArea):
+    """A 24px player number badge for the Controllers tab strip."""
+
+    def __init__(self, number, state='free'):
+        super().__init__(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        self.set_size_request(24, 24)
+        self.number = str(number)
+        self.state = state
+        self.set_draw_func(self.draw)
+
+    def draw(self, _area, cr, width, height, _data=None):
+        cx, cy = width / 2.0, height / 2.0
+        if self.state == 'on':
+            cr.arc(cx, cy, 12, 0, 2 * math.pi)
+            cr.set_source_rgb(*ACTIVE)
+            cr.fill()
+            color = BACKGROUND
+        else:
+            cr.arc(cx, cy, 11, 0, 2 * math.pi)
+            cr.set_line_width(2)
+            if self.state == 'lost':
+                cr.set_source_rgb(*ALERT)
+                color = ALERT
+            else:
+                cr.set_dash([3, 2])
+                cr.set_source_rgb(*IDLE)
+                color = MUTED
+            cr.stroke()
+            cr.set_dash([])
+        cr.select_font_face('Roboto', 0, 1)
+        cr.set_font_size(13)
+        extents = cr.text_extents(self.number)
+        cr.set_source_rgb(*color)
+        cr.move_to(cx - extents.width / 2 - extents.x_bearing, cy - extents.height / 2 - extents.y_bearing)
+        cr.show_text(self.number)
+
+
 class App(Gtk.Application):
     def __init__(self, hidden):
         super().__init__(application_id='io.github.multex.musubi')
@@ -642,7 +682,6 @@ class App(Gtk.Application):
         self.tray = None
         self.has_tray = False
         self.panel_key = None
-        self.phone_detail = None
         self.overview_link = None
         self.overview_delay = None
         self.overview_pad = None
@@ -673,7 +712,7 @@ class App(Gtk.Application):
         self.pages = None
         self.panel = None
         self.overview_panel = None
-        self.connected_panel = None
+        self.controllers_panel = None
         self.sound_panel = None
         self.local_ip, self.network = None, None
 
@@ -826,16 +865,12 @@ class App(Gtk.Application):
         overview_scroller.set_child(self.overview_panel)
         self.pages.add_named(overview_scroller, 'overview')
 
-        controllers = Gtk.Box(spacing=24)
-        self.pad = PadArea()
-        controllers.append(self.pad)
-        # A fixed width keeps the drawing from jumping when the panel's text changes.
-        connected_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=False)
-        connected_scroller.set_size_request(PANEL_WIDTH, -1)
-        self.connected_panel = column(css='side')
-        connected_scroller.set_child(self.connected_panel)
-        controllers.append(connected_scroller)
-        self.pages.add_named(controllers, 'controllers')
+        self.pad = PadArea(width=360)
+        controllers_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
+        self.controllers_panel = column(0)
+        self.controllers_panel.set_vexpand(True)
+        controllers_scroller.set_child(self.controllers_panel)
+        self.pages.add_named(controllers_scroller, 'controllers')
 
         sound_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
         self.sound_panel = column(8)
@@ -1043,8 +1078,6 @@ class App(Gtk.Application):
             self.panel_key = key
             self.build_panel(state, pending)
         self.update_sidebar(state, phone, pending)
-        if self.phone_detail is not None and phone:
-            self.phone_detail.set_label(self.phone_line(phone))
         if self.overview_link is not None and phone:
             self.overview_link.set_label(self.link_line(phone))
         if self.overview_delay is not None and phone:
@@ -1075,24 +1108,18 @@ class App(Gtk.Application):
         return f"{link} · {phone['rtt']} ms" if phone['rtt'] is not None else link
 
     @staticmethod
-    def phone_line(phone):
-        # The address gets its own line so a growing ping never rewraps the panel.
-        return App.link_line(phone) if phone['ip'] == 'usb' else f"{App.link_line(phone)}\n{phone['ip']}"
-
-    @staticmethod
     def clear_box(box):
         while (child := box.get_first_child()) is not None:
             box.remove(child)
 
     def clear_panel(self):
-        self.phone_detail = None
         self.overview_link = None
         self.overview_delay = None
         self.overview_pad = None
         self.readout = None
         self.clear_box(self.panel)
         self.clear_box(self.overview_panel)
-        self.clear_box(self.connected_panel)
+        self.clear_box(self.controllers_panel)
         self.clear_box(self.sound_panel)
 
     def main_page_name(self):
@@ -1116,7 +1143,7 @@ class App(Gtk.Application):
         elif state == 'connected':
             phone = self.status['phone']
             self.panel_overview(phone)
-            self.panel_connected(phone)
+            self.panel_controllers(phone)
             self.panel_sound(phone)
         else:
             self.panel_waiting()
@@ -1276,32 +1303,69 @@ class App(Gtk.Application):
             self.panel.append(block('Ignored phone', phone['name'] or 'Unknown model', f"Wi-Fi · {phone['ip']}", 'mono', divided=True))
             self.panel.append(button('Allow', lambda: self.allow(phone)))
 
-    def panel_connected(self, phone):
-        details = block('Phone', self.phone_name(phone), self.phone_line(phone), 'mono')
-        self.phone_detail = details.get_last_child()
-        self.connected_panel.append(details)
-        if not phone['controller_known']:
-            controller = block('Controller', 'Unknown', 'Update the phone app to see it here', divided=True)
-        elif phone['controller'] is not None:
-            controller = block('Controller', phone['controller'] or 'Connected', 'Connected to the phone', divided=True)
-        else:
-            controller = block('Controller', 'Not connected', "Turn it on, or pair it in the phone's Bluetooth settings.",
-                               divided=True)
-        self.connected_panel.append(controller)
+    def panel_controllers(self, phone):
+        controller_on = bool(phone['controller'] is not None or self.status['pad'])
+        ctrl_name = phone['controller'] or 'Connected'
+
+        strip = Gtk.Box(spacing=4, homogeneous=True)
+        for player in range(1, 5):
+            tab = column(3, 'player-tab')
+            if player == 1:
+                tab.add_css_class('selected')
+                num_state = 'on' if controller_on else 'free'
+                tab_text = 'Connected' if controller_on else 'Free'
+                accessible = f"Player 1, {ctrl_name if controller_on else 'free'}"
+            else:
+                num_state = 'free'
+                tab_text = 'Later'
+                accessible = f'Player {player}, later'
+            tab.update_property([Gtk.AccessibleProperty.LABEL], [accessible])
+            tab.append(PlayerNumber(player, num_state))
+            label = text(tab_text, 'tab-label', ellipsize=True)
+            label.set_xalign(0.5)
+            label.set_halign(Gtk.Align.CENTER)
+            label.set_single_line_mode(True)
+            tab.append(label)
+            strip.append(tab)
+        self.controllers_panel.append(strip)
+        self.controllers_panel.append(hairline())
+
+        header = column(2)
+        header.set_margin_top(14)
+        value_label = text(ctrl_name if controller_on else 'Player 1 is free', 'value', ellipsize=True)
+        value_label.set_single_line_mode(True)
+        value_label.set_max_width_chars(40)
+        header.append(value_label)
+
         if self.status['pad_error']:
-            virtual = block('Virtual controller', "Can't turn on", self.status['pad_error'], divided=True)
-            virtual.get_last_child().add_css_class('alert')
-        elif self.status['pad']:
-            virtual = block('Virtual controller', 'Live', 'Games see an Xbox 360 controller', divided=True)
+            detail_label = text(self.status['pad_error'], 'detail', wrap=True)
+            detail_label.add_css_class('alert')
+        elif controller_on:
+            detail_label = text('Player 1 · games see Xbox 360 controller 1', 'detail', wrap=True)
         else:
-            virtual = block('Virtual controller', 'Off', 'Turns on when a controller connects', divided=True)
-        self.connected_panel.append(virtual)
-        if self.status['pad']:
-            self.readout = text('Press a button to test', 'readout', wrap=True)
-            self.readout.set_xalign(0.5)
-            self.readout.set_justify(Gtk.Justification.CENTER)
-            self.readout.set_vexpand(True)
-            self.connected_panel.append(self.readout)
+            detail_label = text("Turn on a controller that's paired with the phone, or pair one in the phone's "
+                                "Bluetooth settings. Games see it as Xbox 360 controller 1.", 'detail', wrap=True)
+        detail_label.set_max_width_chars(62)
+        header.append(detail_label)
+        self.controllers_panel.append(header)
+
+        self.pad.set_opacity(1.0 if controller_on else 0.35)
+        self.controllers_panel.append(self.pad)
+
+        if controller_on:
+            description = describe_input(self.pad.buttons, self.pad.axes)
+            self.readout = text(description or 'Press a button to test', 'readout', ellipsize=True)
+            if description:
+                self.readout.add_css_class('live')
+            bottom_line = self.readout
+        else:
+            bottom_line = text('Waiting for a controller', 'readout', ellipsize=True)
+        bottom_line.set_single_line_mode(True)
+        bottom_line.set_max_width_chars(56)
+        bottom_line.set_xalign(0.5)
+        bottom_line.set_justify(Gtk.Justification.CENTER)
+        bottom_line.set_halign(Gtk.Align.FILL)
+        self.controllers_panel.append(bottom_line)
 
     def panel_approve(self, phone):
         self.panel.append(text('Allow this phone?', 'title', wrap=True))
