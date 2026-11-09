@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import io
+import struct
 import subprocess
 import unittest
 from unittest import mock
@@ -339,6 +340,57 @@ class BridgeTest(unittest.TestCase):
         bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status, make_pad=denied, clock=lambda: self.now)
         bridge.on_datagram(hello(), self.PHONE)
         self.assertIn('uinput', bridge.status()['pad_error'])
+
+
+def pcm(left, right, frames=240):
+    return struct.pack('<2h', left, right) * frames
+
+
+class LevelsTest(unittest.TestCase):
+    def test_peaks_on_known_pcm(self):
+        levels = audio.Levels()
+        levels.add(pcm(0, 0))
+        self.assertIsNone(levels.poll(1.0))
+        levels.add(pcm(32767, -32768))
+        self.assertEqual(levels.poll(2.0), (1.0, 1.0))
+        levels.add(pcm(16384, 0))
+        self.assertEqual(levels.poll(3.0), (0.5, 0.0))
+
+    def test_left_only_leaves_right_at_zero(self):
+        levels = audio.Levels()
+        levels.add(pcm(-30000, 0))
+        left, right = levels.poll(1.0)
+        self.assertGreater(left, 0.9)
+        self.assertEqual(right, 0)
+
+    def test_rate_limited_and_peak_kept_between_polls(self):
+        levels = audio.Levels(interval=0.04)
+        levels.add(pcm(8000, 8000))
+        self.assertIsNotNone(levels.poll(1.0))
+        levels.add(pcm(20000, 0))
+        self.assertIsNone(levels.poll(1.02))
+        levels.add(pcm(1000, 0))
+        self.assertEqual(levels.poll(1.05)[0], round(20000 / 32767, 2))
+
+    def test_one_zero_when_the_sound_stops(self):
+        levels = audio.Levels()
+        levels.add(pcm(5000, 5000))
+        levels.poll(1.0)
+        self.assertEqual(levels.poll(2.0), (0.0, 0.0))
+        self.assertIsNone(levels.poll(3.0))
+
+
+class SoundSwitchTest(unittest.TestCase):
+    def test_off_never_creates_the_sink_and_removes_an_existing_one(self):
+        pactl = FakePactl()
+        sound = audio.PhoneAudio(run=pactl, popen=mock.Mock())
+        musubi.sync_sound(sound, False)
+        self.assertEqual(pactl.calls, [])
+        musubi.sync_sound(sound, True)
+        musubi.sync_sound(sound, True)
+        self.assertEqual(pactl.calls, [audio.LOAD])
+        musubi.sync_sound(sound, False)
+        self.assertEqual(pactl.calls, [audio.LOAD, ['pactl', 'unload-module', '42']])
 
 
 class FakePactl:

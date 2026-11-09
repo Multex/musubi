@@ -19,12 +19,13 @@ UFW_CONF = Path('/etc/ufw/ufw.conf')
 
 
 def load_config(path=CONFIG_FILE):
-    config = {'phones': {}, 'tray': True}
+    config = {'phones': {}, 'tray': True, 'sound_enabled': True}
     try:
         stored = json.loads(path.read_text())
         # shortcut: phones are identified by IP, so a phone whose IP changes asks for approval again, add pairing keys if that gets annoying.
         config['phones'] = {str(ip): str(name) for ip, name in stored.get('phones', {}).items()}
         config['tray'] = bool(stored.get('tray', True))
+        config['sound_enabled'] = bool(stored.get('sound_enabled', True))
     except FileNotFoundError:
         pass
     except (OSError, ValueError, AttributeError):

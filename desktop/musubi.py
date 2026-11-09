@@ -348,6 +348,14 @@ def write_event(fd, event):
         pass
 
 
+def sync_sound(sound, wanted):
+    """The Musubi sink exists only while a phone wants sound and this PC allows it."""
+    if wanted:
+        sound.start()
+    else:
+        sound.stop()
+
+
 def run_service():
     """Backend for gui.py: commands on stdin, one JSON event per line on stdout."""
     out = sys.stdout.fileno()
@@ -363,10 +371,12 @@ def run_service():
     sources = [sock, stdin] + ([link.reader] if link else [])
     watching = [False]
     last_input = [0.0, None]
+    sound_enabled = [True]
 
     def send_status():
         cable_error = link.error if link else 'Install python-pyusb to connect phones with a cable.'
-        write_event(out, {'event': 'status', **bridge.status(), 'cable_error': cable_error})
+        write_event(out, {'event': 'status', **bridge.status(), 'cable_error': cable_error,
+                           'sound_enabled': sound_enabled[0]})
 
     def on_input(state):
         last_input[1] = state
@@ -383,6 +393,7 @@ def run_service():
     bridge = Bridge(sock, [], send_status, on_input, send_usb=link.send if link else None)
     sound = audio.PhoneAudio()
     sound.remove_stale()
+    levels = audio.Levels()
     # SystemExit runs the finally below, so a terminated service doesn't leave its sink behind.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     buffered = b''
@@ -394,6 +405,8 @@ def run_service():
                 for seq, pcm in sound.read():
                     if bridge.wants_audio():
                         bridge.send_to_phone(audio_message(seq, pcm))
+                        if watching[0]:
+                            levels.add(pcm)
             if sock in readable:
                 bridge.on_datagram(*sock.recvfrom(MAX_DATAGRAM))
             if link and link.reader in readable:
@@ -410,12 +423,16 @@ def run_service():
                         bridge.set_allowed(command['allow'])
                     if 'watch' in command:
                         watching[0] = bool(command['watch'])
+                    if 'sound' in command:
+                        sound_enabled[0] = bool(command['sound'])
+                        send_status()
             bridge.on_tick()
-            if bridge.wants_audio():
-                sound.start()
-            else:
-                sound.stop()
+            sync_sound(sound, sound_enabled[0] and bridge.wants_audio())
             now = time.monotonic()
+            if watching[0]:
+                pair = levels.poll(now)
+                if pair:
+                    write_event(out, {'event': 'levels', 'l': pair[0], 'r': pair[1]})
             # Trailing input after a throttled burst, so the drawing ends on the true state.
             if watching[0] and last_input[1] is not None and now - last_input[0] >= 1 / 30:
                 flush_input(now)

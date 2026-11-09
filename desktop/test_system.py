@@ -77,17 +77,17 @@ class ConfigTest(unittest.TestCase):
         self.path = Path(self.folder.name) / 'musubi' / 'config.json'
 
     def test_defaults_without_a_file(self):
-        self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True})
+        self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True, 'sound_enabled': True})
 
     def test_survives_saving(self):
-        config = {'phones': {'192.168.1.10': 'LG K40S'}, 'tray': False}
+        config = {'phones': {'192.168.1.10': 'LG K40S'}, 'tray': False, 'sound_enabled': False}
         save_config(config, self.path)
         self.assertEqual(load_config(self.path), config)
 
     def test_a_broken_file_is_kept_aside_not_overwritten(self):
         self.path.parent.mkdir(parents=True)
         self.path.write_text('{ not json')
-        self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True})
+        self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True, 'sound_enabled': True})
         self.assertEqual(self.path.with_suffix('.broken').read_text(), '{ not json')
 
 

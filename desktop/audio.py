@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+from array import array
 
 SINK = 'musubi'
 RATE = 48000
@@ -23,6 +24,40 @@ def split_chunks(buffered):
     """Return (whole chunks, leftover bytes)."""
     end = len(buffered) - len(buffered) % CHUNK
     return [buffered[i:i + CHUNK] for i in range(0, end, CHUNK)], buffered[end:]
+
+
+class Levels:
+    """Left and right peaks of the PCM sent, 0..1, at most `interval` apart.
+
+    Peak because max() and min() over array slices run in C, so a 5 ms chunk costs a few microseconds.
+    """
+
+    def __init__(self, interval=1 / 25):
+        self.interval = interval
+        self.peak = [0, 0]
+        self.last = 0.0
+        self.live = False
+
+    def add(self, chunk):
+        samples = array('h', chunk)
+        for side in (0, 1):
+            channel = samples[side::2]
+            self.peak[side] = max(self.peak[side], max(channel), -min(channel))
+
+    def poll(self, now):
+        """Return (left, right) when one is due, a single (0, 0) once the sound has stopped, else None."""
+        if now - self.last < self.interval:
+            return None
+        self.last = now
+        left, right = self.peak
+        self.peak = [0, 0]
+        if left or right:
+            self.live = True
+        elif self.live:
+            self.live = False
+        else:
+            return None
+        return round(min(left / 32767, 1), 2), round(min(right / 32767, 1), 2)
 
 
 class PhoneAudio:

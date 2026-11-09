@@ -376,11 +376,17 @@ class HeadphonesArea(Gtk.DrawingArea):
         self.queue_draw()
 
     def tick(self):
+        if not self.get_mapped():
+            self.left = 0.0
+            self.right = 0.0
+            self.sync_accessible()
+            self.timer_id = None
+            return GLib.SOURCE_REMOVE
         self.left = self.left * 0.85 if self.left * 0.85 >= 0.005 else 0.0
         self.right = self.right * 0.85 if self.right * 0.85 >= 0.005 else 0.0
         self.sync_accessible()
         self.queue_draw()
-        if (self.left == 0.0 and self.right == 0.0) or self.mode != 'on' or not self.get_mapped():
+        if (self.left == 0.0 and self.right == 0.0) or self.mode != 'on':
             self.timer_id = None
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE
@@ -674,17 +680,28 @@ class App(Gtk.Application):
         self.process = None
         self.partial = b''
         self.stopping = False
-        self.status = {'phone': None, 'pad': False, 'pad_error': None, 'pending': []}
+        self.status = {'phone': None, 'pad': False, 'pad_error': None, 'pending': [], 'sound_enabled': True}
         self.error = None
         self.stopped = False
         self.config = system.load_config()
         self.ignored = set()
         self.tray = None
         self.has_tray = False
+        self.watching = None
         self.panel_key = None
         self.overview_link = None
         self.overview_delay = None
         self.overview_pad = None
+        self.overview_headphones = None
+        self.overview_sound_row = None
+        self.overview_sound_value = None
+        self.overview_sound_detail = None
+        self.sound_switch = None
+        self.sound_link = None
+        self.sound_headphones = None
+        self.sound_value = None
+        self.sound_detail = None
+        self.sound_delay = None
         self.readout = None
         self.blocked = set()
         self.firewall_dismissed = False
@@ -873,7 +890,8 @@ class App(Gtk.Application):
         self.pages.add_named(controllers_scroller, 'controllers')
 
         sound_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
-        self.sound_panel = column(8)
+        self.sound_panel = column(0)
+        self.sound_panel.set_vexpand(True)
         sound_scroller.set_child(self.sound_panel)
         self.pages.add_named(sound_scroller, 'sound')
 
@@ -882,17 +900,27 @@ class App(Gtk.Application):
         state_scroller.set_child(self.panel)
         self.pages.add_named(state_scroller, 'state')
 
+        self.pages.connect('notify::visible-child-name', lambda *_: self.sync_watch())
         shell.append(self.pages)
         self.window.set_child(shell)
 
+    def sync_watch(self):
+        if self.window is None or self.process is None:
+            return
+        want = (self.window.get_visible()
+                and self.pages.get_visible_child_name() in ('overview', 'controllers', 'sound'))
+        if want != self.watching:
+            self.watching = want
+            self.send({'watch': want})
+
     def show_window(self):
         self.window.present()
-        self.send({'watch': True})
+        self.sync_watch()
 
     def on_close(self, _window):
         if self.has_tray and self.config['tray']:
             self.window.set_visible(False)
-            self.send({'watch': False})
+            self.sync_watch()
             return True
         self.quit_app()
         return True
@@ -906,6 +934,7 @@ class App(Gtk.Application):
         self.stopped = False
         self.stopping = False
         self.partial = b''
+        self.watching = None
         try:
             self.process = subprocess.Popen([sys.executable, str(RECEIVER), '--service'], stdin=subprocess.PIPE,
                                             stdout=subprocess.PIPE, bufsize=0)
@@ -915,12 +944,13 @@ class App(Gtk.Application):
         GLib.io_add_watch(self.process.stdout.fileno(), GLib.PRIORITY_DEFAULT,
                           GLib.IOCondition.IN | GLib.IOCondition.HUP, self.on_receiver_output, self.process)
         self.send_allowed()
-        if self.window is not None and self.window.get_visible():
-            self.send({'watch': True})
+        self.send({'sound': self.config['sound_enabled']})
+        self.sync_watch()
 
     def stop_receiver(self):
         process, self.process = self.process, None
         self.stopping = True
+        self.watching = None
         if process:
             # Closing stdin makes the receiver release the pad and exit by itself.
             process.stdin.close()
@@ -928,7 +958,8 @@ class App(Gtk.Application):
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 process.kill()
-        self.status = {'phone': None, 'pad': False, 'pad_error': None, 'pending': []}
+        self.status = {'phone': None, 'pad': False, 'pad_error': None, 'pending': [],
+                       'sound_enabled': self.config['sound_enabled']}
 
     def on_receiver_output(self, fd, condition, process):
         if process is not self.process:
@@ -942,9 +973,11 @@ class App(Gtk.Application):
                     self.on_event(json.loads(line))
                 return True
         self.process = None
+        self.watching = None
         if not self.stopping and self.error is None:
             self.error = 'The receiver stopped unexpectedly.'
-            self.status = {'phone': None, 'pad': False, 'pad_error': None, 'pending': []}
+            self.status = {'phone': None, 'pad': False, 'pad_error': None, 'pending': [],
+                           'sound_enabled': self.config['sound_enabled']}
             self.refresh()
         return False
 
@@ -971,12 +1004,40 @@ class App(Gtk.Application):
                 self.readout.remove_css_class('live')
                 if description:
                     self.readout.add_css_class('live')
+        elif kind == 'levels':
+            for area in (self.overview_headphones, self.sound_headphones):
+                if area is not None:
+                    area.set_levels(event['l'], event['r'])
         elif kind == 'error':
             self.error = event['message']
             self.refresh()
         elif kind == 'status':
-            self.status = {key: event.get(key) for key in ('phone', 'pad', 'pad_error', 'pending', 'cable_error')}
+            self.status = {key: event.get(key) for key in (
+                'phone', 'pad', 'pad_error', 'pending', 'cable_error', 'sound_enabled')}
             self.refresh()
+
+    def sound_enabled(self):
+        if self.status.get('sound_enabled') is not None:
+            return bool(self.status['sound_enabled'])
+        return bool(self.config.get('sound_enabled', True))
+
+    def sound_state(self, phone):
+        if not phone:
+            return False, 'No phone yet', 'Needs a phone'
+        if not self.sound_enabled():
+            return False, 'Off on this PC', 'Turn it on here to send sound'
+        if phone.get('audio'):
+            return True, 'Playing', 'Through the "Musubi" output'
+        return False, 'Off on the phone', 'Turn on Play PC sound on the phone'
+
+    def on_sound_switch(self, enabled):
+        if enabled == self.config['sound_enabled'] and enabled == self.status.get('sound_enabled'):
+            return
+        self.config['sound_enabled'] = enabled
+        self.status['sound_enabled'] = enabled
+        self.save_config()
+        self.send({'sound': enabled})
+        self.refresh()
 
     def phone_name(self, phone):
         return self.config['phones'].get(phone['ip']) or phone['name'] or phone['ip']
@@ -1016,6 +1077,7 @@ class App(Gtk.Application):
                 widget.add_css_class('selected')
             else:
                 widget.remove_css_class('selected')
+        self.sync_watch()
 
     def update_sidebar(self, state, phone, pending):
         headers = {
@@ -1036,7 +1098,7 @@ class App(Gtk.Application):
 
         has_phone = state == 'connected'
         controller_on = bool(has_phone and (phone['controller'] is not None or self.status['pad']))
-        sound_on = bool(has_phone and phone.get('audio'))
+        sound_on = bool(has_phone and self.sound_enabled() and phone.get('audio'))
         players = 1 if controller_on else 0
 
         seg1 = has_phone and (controller_on or sound_on)
@@ -1080,17 +1142,51 @@ class App(Gtk.Application):
         self.update_sidebar(state, phone, pending)
         if self.overview_link is not None and phone:
             self.overview_link.set_label(self.link_line(phone))
-        if self.overview_delay is not None and phone:
-            self.update_overview_delay(phone)
+        if self.sound_link is not None and phone:
+            self.sound_link.set_label(self.link_line(phone))
+        if phone:
+            self.update_sound(phone)
         if self.tray:
             self.tray.set_status(self.tray_text())
 
-    def update_overview_delay(self, phone):
+    def has_sound_delay(self, phone):
         delay = phone.get('delay')
-        has_delay = bool(phone.get('audio')) and isinstance(delay, (int, float)) and not isinstance(delay, bool)
+        return (self.sound_enabled() and bool(phone.get('audio'))
+                and isinstance(delay, (int, float)) and not isinstance(delay, bool))
+
+    def update_overview_delay(self, phone):
+        has_delay = self.has_sound_delay(phone)
         self.overview_delay.set_visible(has_delay)
         if has_delay:
-            self.overview_delay.set_label(f'Delay ≈ {int(delay)} ms')
+            self.overview_delay.set_label(f"Delay ≈ {int(phone['delay'])} ms")
+
+    def update_sound_delay(self, phone):
+        self.sound_delay.set_label(f"Delay ≈ {int(phone['delay'])} ms" if self.has_sound_delay(phone) else '')
+
+    def update_sound(self, phone):
+        sound_on, sound_value, sound_detail = self.sound_state(phone)
+        mode = 'on' if sound_on else 'off'
+        if self.overview_headphones is not None:
+            self.overview_headphones.set_mode(mode)
+        if self.overview_sound_value is not None:
+            self.overview_sound_value.set_label(sound_value)
+        if self.overview_sound_detail is not None:
+            self.overview_sound_detail.set_label(sound_detail)
+        if self.overview_sound_row is not None:
+            self.overview_sound_row.update_property([Gtk.AccessibleProperty.LABEL],
+                                                    [f'Sound · to the phone, {sound_value}'])
+        if self.overview_delay is not None:
+            self.update_overview_delay(phone)
+        if self.sound_switch is not None and self.sound_switch.get_active() != self.sound_enabled():
+            self.sound_switch.set_active(self.sound_enabled())
+        if self.sound_headphones is not None:
+            self.sound_headphones.set_mode(mode)
+        if self.sound_value is not None:
+            self.sound_value.set_label(sound_value)
+        if self.sound_detail is not None:
+            self.sound_detail.set_label(sound_detail)
+        if self.sound_delay is not None:
+            self.update_sound_delay(phone)
 
     def tray_text(self):
         phone = self.status['phone']
@@ -1116,6 +1212,16 @@ class App(Gtk.Application):
         self.overview_link = None
         self.overview_delay = None
         self.overview_pad = None
+        self.overview_headphones = None
+        self.overview_sound_row = None
+        self.overview_sound_value = None
+        self.overview_sound_detail = None
+        self.sound_switch = None
+        self.sound_link = None
+        self.sound_headphones = None
+        self.sound_value = None
+        self.sound_detail = None
+        self.sound_delay = None
         self.readout = None
         self.clear_box(self.panel)
         self.clear_box(self.overview_panel)
@@ -1212,29 +1318,29 @@ class App(Gtk.Application):
         ))
         rows.append(hairline())
 
-        sound_on = bool(phone.get('audio'))
-        sound_value = 'Playing' if sound_on else 'Off on the phone'
-        sound_detail = ('Through the "Musubi" output' if sound_on
-                        else 'Turn on Play PC sound on the phone')
+        sound_on, sound_value, sound_detail = self.sound_state(phone)
         sound_labels = column(2)
         sound_labels.set_hexpand(True)
         sound_labels.set_valign(Gtk.Align.CENTER)
         sound_labels.append(text('Sound · to the phone', 'caption', ellipsize=True))
-        sound_labels.append(text(sound_value, 'value', ellipsize=True))
-        sound_detail_label = text(sound_detail, 'detail', wrap=True)
-        sound_detail_label.set_max_width_chars(36)
-        sound_labels.append(sound_detail_label)
+        self.overview_sound_value = text(sound_value, 'value', ellipsize=True)
+        sound_labels.append(self.overview_sound_value)
+        self.overview_sound_detail = text(sound_detail, 'detail', wrap=True)
+        self.overview_sound_detail.set_max_width_chars(36)
+        sound_labels.append(self.overview_sound_detail)
         self.overview_delay = text('', 'mono', ellipsize=True)
         self.overview_delay.set_single_line_mode(True)
         self.update_overview_delay(phone)
         sound_labels.append(self.overview_delay)
 
-        rows.append(self.overview_row(
+        self.overview_headphones = HeadphonesArea(width=80, mode='on' if sound_on else 'off')
+        self.overview_sound_row = self.overview_row(
             sound_labels,
-            HeadphonesArea(width=80, mode='on' if sound_on else 'off'),
+            self.overview_headphones,
             lambda: self.select_item('sound'),
             f'Sound · to the phone, {sound_value}',
-        ))
+        )
+        rows.append(self.overview_sound_row)
         rows.append(hairline())
 
         mic_row = Gtk.Box(spacing=12)
@@ -1255,10 +1361,95 @@ class App(Gtk.Application):
 
     def panel_sound(self, phone):
         self.sound_panel.append(text('Sound on phone', 'page-title'))
-        if phone.get('audio'):
-            self.sound_panel.append(block('Status', 'Playing', f'Sending PC sound to {self.phone_name(phone)}', divided=True))
+        self.sound_panel.append(spacer())
+
+        body = Gtk.Box(spacing=20)
+        body.set_valign(Gtk.Align.CENTER)
+
+        left = column(0)
+        left.set_hexpand(True)
+        left.set_valign(Gtk.Align.CENTER)
+
+        switch_row = Gtk.Box(spacing=12)
+        switch_labels = column(2)
+        switch_labels.set_hexpand(True)
+        switch_title = text('Play PC sound on the phone', 'row-title', wrap=True)
+        switch_title.set_max_width_chars(30)
+        switch_detail = text('When off, this PC removes the Musubi output', 'detail', wrap=True)
+        switch_detail.set_max_width_chars(36)
+        switch_labels.append(switch_title)
+        switch_labels.append(switch_detail)
+        switch_row.append(switch_labels)
+        self.sound_switch = Gtk.Switch(active=self.sound_enabled(), valign=Gtk.Align.CENTER)
+        self.sound_switch.update_property([Gtk.AccessibleProperty.LABEL], ['Play PC sound on the phone'])
+        self.sound_switch.connect('notify::active', lambda widget, _: self.on_sound_switch(widget.get_active()))
+        switch_row.append(self.sound_switch)
+        left.append(switch_row)
+
+        phone_box = column(2, 'divider')
+        phone_box.append(text('Phone', 'caption', ellipsize=True))
+        if phone:
+            phone_name = text(self.phone_name(phone), 'value', ellipsize=True)
+            phone_name.set_single_line_mode(True)
+            phone_name.set_max_width_chars(28)
+            phone_box.append(phone_name)
+            self.sound_link = text(self.link_line(phone), 'mono', ellipsize=True)
+            self.sound_link.set_single_line_mode(True)
+            phone_box.append(self.sound_link)
+            if phone['ip'] != 'usb':
+                ip_label = text(phone['ip'], 'mono', ellipsize=True)
+                ip_label.set_single_line_mode(True)
+                phone_box.append(ip_label)
         else:
-            self.sound_panel.append(block('Status', 'Off', 'Turn on Play PC sound in Musubi on your phone.', divided=True))
+            phone_box.append(text('No phone yet', 'value', ellipsize=True))
+        left.append(phone_box)
+
+        output_box = column(2, 'divider')
+        output_box.append(text('Output', 'caption', ellipsize=True))
+        output_detail = text('In your sound settings, pick "Musubi" as the output. '
+                             'Games set to the default output follow it.', 'detail', wrap=True)
+        output_detail.set_max_width_chars(40)
+        output_box.append(output_detail)
+        left.append(output_box)
+
+        sound_on, sound_value, sound_detail = self.sound_state(phone)
+        right = column(4)
+        right.set_size_request(150, -1)
+        right.set_hexpand(False)
+        right.set_halign(Gtk.Align.CENTER)
+        right.set_valign(Gtk.Align.CENTER)
+
+        self.sound_headphones = HeadphonesArea(width=140, mode='on' if sound_on else 'off')
+        self.sound_headphones.set_halign(Gtk.Align.CENTER)
+        right.append(self.sound_headphones)
+
+        self.sound_value = text(sound_value, 'value', wrap=True)
+        self.sound_value.set_max_width_chars(18)
+        self.sound_value.set_xalign(0.5)
+        self.sound_value.set_justify(Gtk.Justification.CENTER)
+        self.sound_value.set_halign(Gtk.Align.FILL)
+        right.append(self.sound_value)
+
+        self.sound_detail = text(sound_detail, 'detail', wrap=True)
+        self.sound_detail.set_max_width_chars(20)
+        self.sound_detail.set_xalign(0.5)
+        self.sound_detail.set_justify(Gtk.Justification.CENTER)
+        self.sound_detail.set_halign(Gtk.Align.FILL)
+        right.append(self.sound_detail)
+
+        self.sound_delay = text('', 'mono', ellipsize=True)
+        self.sound_delay.set_single_line_mode(True)
+        self.sound_delay.set_xalign(0.5)
+        self.sound_delay.set_justify(Gtk.Justification.CENTER)
+        self.sound_delay.set_halign(Gtk.Align.FILL)
+        right.append(self.sound_delay)
+        if phone:
+            self.update_sound_delay(phone)
+
+        body.append(left)
+        body.append(right)
+        self.sound_panel.append(body)
+        self.sound_panel.append(spacer())
 
     def panel_error(self):
         heading = text("Musubi can't run", 'title', wrap=True)
