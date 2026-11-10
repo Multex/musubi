@@ -27,6 +27,7 @@ RECEIVER = Path(__file__).resolve().parent / 'musubi.py'
 BUTTON_NAMES = ['A', 'B', 'X', 'Y', 'L1', 'R1', 'Select', 'Start', 'Guide', 'L3', 'R3']
 A, B, X, Y, L1, R1, SELECT, START, _, L3, R3 = range(11)
 STICK_MAX = 32767
+LEVEL_CURVE = 0.35
 TRIGGER_MAX = 255
 # Sticks rarely rest at exactly zero, and this only affects what the drawing shows.
 DEAD_ZONE = 0.05
@@ -490,8 +491,9 @@ class HeadphonesArea(Gtk.DrawingArea):
     def set_levels(self, left, right):
         if self.mode != 'on':
             return
-        self.left = max(min(max(left, 0.0), 1.0), self.left)
-        self.right = max(min(max(right, 0.0), 1.0), self.right)
+        # Same curve as the phone's HeadphonesView, so normal listening volume fills the cups the same on both.
+        self.left = max(min(max(left, 0.0), 1.0) ** LEVEL_CURVE, self.left)
+        self.right = max(min(max(right, 0.0), 1.0) ** LEVEL_CURVE, self.right)
         if (self.left > 0 or self.right > 0) and self.timer_id is None:
             self.timer_id = GLib.timeout_add(33, self.tick)
         self.sync_accessible()
