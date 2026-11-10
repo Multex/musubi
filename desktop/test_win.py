@@ -98,6 +98,14 @@ class ConsoleTest(unittest.TestCase):
         self.send(b'12345678')
         self.assertEqual(self.phone.recv(64), b'12345678')
 
+    def test_a_stall_from_a_connected_phone_is_logged(self):
+        self.allow()
+        self.send(hello())
+        self.console.last_packet = time.perf_counter() - 1
+        with self.assertLogs('musubi', 'WARNING') as logs:
+            self.send(hello())
+        self.assertIn('gap', logs.output[0])
+
     def test_rumble_from_the_driver_thread_reaches_the_phone(self):
         self.allow()
         self.send(hello())

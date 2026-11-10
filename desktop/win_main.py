@@ -22,6 +22,7 @@ except ImportError:
 
 LOG_FILE = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'musubi' / 'musubi.log'
 FIREWALL_HINT_AFTER = 30
+GAP_LOG_AFTER = 0.4  # A connected phone sends its state more often than this.
 MEMORY_LOG_AFTER = 300
 log = logging.getLogger('musubi')
 
@@ -69,6 +70,9 @@ class Console:
         self.line = 'No phone connected.'
         self.heard = False
         self.rumbled = False
+        self.last_packet = None
+        self.longest_step = 0.0
+        self.recv_errors = 0
         self.bridge = core.Bridge(sock, self.config['phones'], self.on_status,
                                   make_pad=make_pad or (lambda: win_pad.Pad(self.on_rumble)))
 
@@ -122,6 +126,7 @@ class Console:
 
     def step(self, timeout=core.TICK):
         readable = select.select([self.sock, self.wake], [], [], timeout)[0]
+        now = time.perf_counter()
         if self.wake in readable:
             self.wake.recv(64)
             while not self.inbox.empty():
@@ -129,14 +134,28 @@ class Console:
         if self.sock in readable:
             try:
                 data, addr = self.sock.recvfrom(core.MAX_DATAGRAM)
-            except OSError:
-                pass  # Windows raises here after a send to a phone that closed its port, and for oversized packets.
+            except OSError as ex:
+                # Windows raises here after a send to a phone that closed its port, and for oversized packets.
+                self.recv_errors += 1
+                if self.recv_errors % 100 == 1:
+                    log.warning('receive error %s (%d so far)', ex, self.recv_errors)
             else:
                 if not self.heard:
                     self.heard = True
                     log.info('first packet, from %s', addr[0])
+                if self.last_packet is not None and self.bridge.active is not None \
+                        and now - self.last_packet > GAP_LOG_AFTER:
+                    log.warning('gap %d ms since the last packet, longest loop step meanwhile %d ms, '
+                                'receive errors so far %d', (now - self.last_packet) * 1000,
+                                self.longest_step * 1000, self.recv_errors)
+                    self.longest_step = 0.0
+                self.last_packet = now
                 self.bridge.on_datagram(data, addr)
         self.bridge.on_tick()
+        busy = time.perf_counter() - now
+        self.longest_step = max(self.longest_step, busy)
+        if busy > 0.05:
+            log.warning('slow loop step %d ms', busy * 1000)
 
     def close(self):
         self.bridge.close()
