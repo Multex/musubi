@@ -7,9 +7,10 @@ import time
 import unittest
 from pathlib import Path
 
+import paths  # noqa: F401
 import core
-import win_main
-import win_pad
+import main as win_main
+import pad as win_pad
 from core import HELLO, HELLO_MAGIC, PACKET
 
 

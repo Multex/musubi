@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is shared with Windows, one folder up
+
 from core import CONFIG_DIR, PORT, load_config, save_config  # noqa: F401 (gui.py reads the config through here)
 
 UNIT_NAME = 'musubi-desktop.service'

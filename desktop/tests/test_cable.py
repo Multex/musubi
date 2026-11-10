@@ -4,6 +4,8 @@ import time
 import unittest
 from unittest import mock
 
+import paths  # noqa: F401
+
 try:
     import cable
 except ImportError:

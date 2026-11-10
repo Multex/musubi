@@ -9,11 +9,14 @@ import signal
 import socket
 import sys
 import time
+from pathlib import Path
 
 from evdev import AbsInfo, UInput, UInputError, ecodes as e, ff
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is shared with Windows, one folder up
+
 import audio
-import core
+import core  # noqa: E402
 from core import *  # noqa: F401,F403 (gui.py and the tests read the shared names from here)
 
 try:

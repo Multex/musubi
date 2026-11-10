@@ -7,6 +7,7 @@ from unittest import mock
 
 from evdev import InputEvent, ecodes as e, ff
 
+import paths  # noqa: F401
 import audio
 import musubi
 from musubi import HELLO, HELLO_MAGIC, PACKET, Bridge, decode, decode_hello

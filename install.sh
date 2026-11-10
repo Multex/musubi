@@ -12,7 +12,7 @@ cat > "$apps/io.github.multex.musubi.desktop" <<EOF
 Type=Application
 Name=Musubi
 Comment=Use a Bluetooth gamepad paired with your phone on this PC
-Exec=python3 "$dir/desktop/gui.py"
+Exec=python3 "$dir/desktop/linux/gui.py"
 Icon=$icons/io.github.multex.musubi.svg
 Categories=Game;Utility;
 EOF

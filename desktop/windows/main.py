@@ -12,8 +12,10 @@ import threading
 import time
 from pathlib import Path
 
-import core
-import win_pad
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is shared with Windows, one folder up
+
+import core  # noqa: E402
+import pad as win_pad  # noqa: E402
 
 try:
     from build import BUILD

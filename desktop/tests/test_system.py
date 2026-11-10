@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import paths  # noqa: F401
 from system import (blocked_sources, covers, default_network, load_config, save_config, startup_command,
                     ufw_allowed_sources, ufw_enabled)
 

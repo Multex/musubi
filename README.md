@@ -93,7 +93,7 @@ sudo ufw allow from 192.168.1.10 to any port 9999 proto udp
 ```
 
 ```sh
-python3 desktop/musubi.py 192.168.1.10
+python3 desktop/linux/musubi.py 192.168.1.10
 ```
 
 ## Desktop app
@@ -185,15 +185,15 @@ Any program you run can then create virtual input devices, so remove the rule if
 
 ## How it works
 
-Each controller packet is 20 bytes and holds the whole pad state: 11 button bits, then 8 axes (`!I8h` in `desktop/musubi.py`). The app sends one on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases everything.
+Each controller packet is 20 bytes and holds the whole pad state: 11 button bits, then 8 axes (`!I8h` in `desktop/core.py`). The app sends one on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases everything.
 
 Once a second the app also sends an 8-byte ping, and the receiver echoes it back to allowed phones. That is how the app knows the PC is answering and what the round trip takes. It also sends a hello packet with the phone's model, the controller's name, that ping time, and a feature flag for sound.
 
-When the phone announces that **Play PC sound** is on, the PC loads a virtual `Musubi` output (`module-null-sink` via `pactl` in `desktop/audio.py`) and captures 48 kHz 16-bit stereo PCM in 5 ms chunks with `parec`. Each chunk goes back over the same UDP socket (or USB cable) with a 2-byte sequence number (`!4sH`). After 200 ms of silence the PC stops sending chunks until sound plays again. On the phone, an adaptive jitter buffer (`android/AudioBuffer.java`) feeds a low-latency `AudioTrack`, and a foreground service (`android/KeepAliveService.java`) keeps the sound going in the background.
+When the phone announces that **Play PC sound** is on, the PC loads a virtual `Musubi` output (`module-null-sink` via `pactl` in `desktop/linux/audio.py`) and captures 48 kHz 16-bit stereo PCM in 5 ms chunks with `parec`. Each chunk goes back over the same UDP socket (or USB cable) with a 2-byte sequence number (`!4sH`). After 200 ms of silence the PC stops sending chunks until sound plays again. On the phone, an adaptive jitter buffer (`android/AudioBuffer.java`) feeds a low-latency `AudioTrack`, and a foreground service (`android/KeepAliveService.java`) keeps the sound going in the background.
 
 When a game sends force feedback to the virtual pad, the PC sends the strong and weak motor levels and the duration back to the phone (`!4sHHH`), and the phone drives the pad's motors (both motors on Android 12 and newer, one on older versions).
 
-Over a USB cable the phone uses Android Open Accessory instead of Wi-Fi. The PC asks the phone to switch modes (`desktop/cable.py`), and then the same packets travel over USB, each one starting with its length in 2 bytes.
+Over a USB cable the phone uses Android Open Accessory instead of Wi-Fi. The PC asks the phone to switch modes (`desktop/linux/cable.py`), and then the same packets travel over USB, each one starting with its length in 2 bytes.
 
 The desktop app runs the receiver as a separate process, so drawing the window can't delay the pad.
 
@@ -212,9 +212,7 @@ The result is `android/build/musubi.apk`. The first build creates `android/debug
 `build.sh` also runs the button map and audio buffer tests. Run the PC tests with:
 
 ```sh
-python3 desktop/test_musubi.py
-python3 desktop/test_cable.py
-python3 desktop/test_system.py
+python3 -m unittest discover -s desktop/tests
 ```
 
 ## AI disclosure
