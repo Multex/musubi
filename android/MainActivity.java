@@ -1807,8 +1807,8 @@ public class MainActivity extends Activity {
 
         LinearLayout about = column();
         about.addView(text("About the delay", 12, MUTED));
-        TextView aboutNote = detail("Bluetooth adds its own delay. Some phones include it here and some can't measure it. "
-            + "A USB cable to the PC removes the Wi-Fi part.");
+        TextView aboutNote = detail("Bluetooth adds its own delay, which some phones can't measure. "
+            + "For less delay, use the USB cable and your earbuds' game mode.");
         aboutNote.setPadding(0, dp(8), 0, 0);
         about.addView(aboutNote);
         body.addView(divided(about));
