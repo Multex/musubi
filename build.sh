@@ -12,9 +12,10 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 rm -rf build
 mkdir -p build/classes build/test
-javac -d build/test ButtonMap.java AudioBuffer.java test/ButtonMapTest.java test/AudioBufferTest.java
+javac -d build/test ButtonMap.java AudioBuffer.java Battery.java test/ButtonMapTest.java test/AudioBufferTest.java test/BatteryTest.java
 java -ea -cp build/test io.github.multex.musubi.ButtonMapTest
 java -ea -cp build/test io.github.multex.musubi.AudioBufferTest
+java -ea -cp build/test io.github.multex.musubi.BatteryTest
 javac -source 8 -target 8 -Xlint:-options -cp "$JAR" -d build/classes ./*.java
 "$TOOLS/d8" --lib "$JAR" --min-api 21 --output build build/classes/io/github/multex/musubi/*.class
 "$TOOLS/aapt2" compile --dir res -o build/res.zip

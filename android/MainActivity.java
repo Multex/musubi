@@ -164,6 +164,9 @@ public class MainActivity extends Activity {
     private static final int TRIGGER_MAX = 255;
     private static final int UI_INTERVAL_MS = 100;
     private static final int TICK_MS = 500;
+    private static final int BATTERY_INTERVAL_MS = 1000;
+    // android.hardware.BatteryState values; the class is API 31+ and missing from the android-28 jar.
+    private static final int BATTERY_CHARGING = 2, BATTERY_FULL = 5;
     private static final int AUTO_GAME_MODE_MS = 60000;
     // A single press can fire a key and an axis a moment apart; both belong to the same step.
     private static final int CAPTURE_WINDOW_MS = 150;
@@ -247,6 +250,12 @@ public class MainActivity extends Activity {
     private boolean autoGameMode;
 
     private volatile int deviceId = -1;
+    // The pad's battery percent, or Battery.UNKNOWN when it doesn't report one. UI thread only.
+    private int padBattery = Battery.UNKNOWN;
+    private boolean padCharging;
+    private long nextBatteryRead;
+    private static Method batteryState, batteryPresent, batteryCapacity, batteryStatus;
+    private static boolean batteryUnreadable = Build.VERSION.SDK_INT < 31;
     private volatile String deviceName;
     private String descriptor;
     private int stickXAxis = MotionEvent.AXIS_Z, stickYAxis = MotionEvent.AXIS_RZ;
@@ -310,6 +319,11 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             refreshStatus();
+            long now = SystemClock.uptimeMillis();
+            if (now >= nextBatteryRead) {
+                nextBatteryRead = now + BATTERY_INTERVAL_MS;
+                if (readBattery() && (screen == HOME || screen == CONTROLLERS)) render();
+            }
             handler.postDelayed(this, TICK_MS);
         }
     };
@@ -715,6 +729,55 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Reads the pad's battery and returns true when the percent or charging state changed. */
+    private boolean readBattery() {
+        int level = Battery.UNKNOWN;
+        boolean charging = false;
+        InputDevice device = deviceId != -1 && !batteryUnreadable ? InputDevice.getDevice(deviceId) : null;
+        if (device != null) {
+            try {
+                if (batteryState == null) {
+                    Class<?> type = Class.forName("android.hardware.BatteryState");
+                    batteryPresent = type.getMethod("isPresent");
+                    batteryCapacity = type.getMethod("getCapacity");
+                    batteryStatus = type.getMethod("getStatus");
+                    batteryState = InputDevice.class.getMethod("getBatteryState");
+                }
+                Object state = batteryState.invoke(device);
+                if ((Boolean) batteryPresent.invoke(state)) {
+                    level = Battery.percent((Float) batteryCapacity.invoke(state));
+                    int status = (Integer) batteryStatus.invoke(state);
+                    // Full on the cable reads as charging at 100%.
+                    charging = level != Battery.UNKNOWN && (status == BATTERY_CHARGING || status == BATTERY_FULL);
+                }
+            } catch (ReflectiveOperationException ex) {
+                Log.w("musubi", "battery unreadable", ex);
+                batteryUnreadable = true;
+            } catch (RuntimeException ex) {
+                level = Battery.UNKNOWN;
+                charging = false;
+            }
+        }
+        if (level == padBattery && charging == padCharging) return false;
+        padBattery = level;
+        padCharging = charging;
+        return true;
+    }
+
+    /** Only player 1 is real until multi-pad, so the others never report. */
+    private int batteryLevel(int player) {
+        return player == 1 && deviceId != -1 ? padBattery : Battery.UNKNOWN;
+    }
+
+    private boolean batteryCharging(int player) {
+        return batteryLevel(player) != Battery.UNKNOWN && padCharging;
+    }
+
+    private int firstLowPlayer() {
+        for (int n = 1; n <= 4; n++) if (Battery.low(batteryLevel(n), batteryCharging(n))) return n;
+        return 1;
+    }
+
     private static int amplitude(int level) {
         return Math.max(1, level * 255 / 65535);
     }
@@ -979,6 +1042,7 @@ public class MainActivity extends Activity {
             showRumble(0, 0, 0);
             // A controller joining or dropping is always player 1 until multi-pad, so show that tab.
             selectedPlayer = 1;
+            readBattery();
         }
         if (deviceId != before && (screen == CONTROLLERS || screen == HOME || screen == SETTINGS)) {
             render();
@@ -1475,18 +1539,43 @@ public class MainActivity extends Activity {
         squareShape.setColor(lost ? ALERT : answering ? ACTIVE : IDLE);
         square.setBackground(squareShape);
 
+        List<Integer> low = new ArrayList<>(), charging = new ArrayList<>();
+        LinearLayout chips = row();
+        chips.setPadding(0, dp(2), 0, 0);
+        // The charging bolt pokes past the slot's top-right corner.
+        chips.setClipChildren(false);
+        chips.setClipToPadding(false);
+        for (int i = 1; i <= 4; i++) {
+            int level = batteryLevel(i);
+            if (batteryCharging(i)) {
+                charging.add(i);
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(18), dp(18));
+                params.rightMargin = dp(10);
+                chips.addView(new ChargeView(this, i, level), params);
+            } else {
+                boolean isLow = Battery.low(level, false);
+                if (isLow) low.add(i);
+                chips.addView(chip(i, i <= players, isLow));
+            }
+        }
+        String lowText = Battery.lowText(low);
         LinearLayout controllers = clickableRow(() -> {
-                selectedPlayer = 1;
+                selectedPlayer = firstLowPlayer();
                 show(CONTROLLERS);
             },
-            "Controllers, " + players + " of 4 players connected, open");
+            "Controllers, " + players + " of 4 players connected"
+                + (low.isEmpty() ? "" : ", " + lowText.toLowerCase(Locale.ROOT))
+                + (charging.isEmpty() ? "" : ", " + Battery.players(charging).toLowerCase(Locale.ROOT) + " charging") + ", open");
         controllers.setMinimumHeight(dp(64));
         controllers.setPadding(dp(4), dp(6), dp(4), dp(6));
         LinearLayout controllerText = featureText("Controllers · to PC", players + " of 4 players", TEXT);
-        LinearLayout chips = row();
-        chips.setPadding(0, dp(2), 0, 0);
-        for (int i = 1; i <= 4; i++) chips.addView(chip(i, i <= players));
+        controllerText.setClipChildren(false);
         controllerText.addView(chips);
+        if (!low.isEmpty()) {
+            TextView lowLine = text(lowText, 13, ALERT);
+            lowLine.setPadding(0, dp(2), 0, 0);
+            controllerText.addView(lowLine);
+        }
         controllers.addView(controllerText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         padView = new PadView(this);
         padView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -1582,18 +1671,18 @@ public class MainActivity extends Activity {
         return node;
     }
 
-    private TextView chip(int number, boolean on) {
+    private TextView chip(int number, boolean on, boolean low) {
         TextView chip = text(String.valueOf(number), 10, on ? BACKGROUND : MUTED);
         chip.setTypeface(Typeface.DEFAULT_BOLD);
         chip.setGravity(Gravity.CENTER);
         chip.setIncludeFontPadding(false);
         GradientDrawable shape = new GradientDrawable();
         shape.setShape(GradientDrawable.OVAL);
-        if (on) shape.setColor(ACTIVE);
+        if (on) shape.setColor(low ? ALERT : ACTIVE);
         else shape.setStroke(dp(1.5f), IDLE, dp(2), dp(2));
         chip.setBackground(shape);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(18), dp(18));
-        params.rightMargin = dp(4);
+        params.rightMargin = dp(10);
         chip.setLayoutParams(params);
         return chip;
     }
@@ -1820,6 +1909,17 @@ public class MainActivity extends Activity {
         body.addView(detail(n > 1 ? "More controllers at once are coming in a later version."
             : connected ? "Player 1 · games see Xbox 360 controller 1"
             : "Turn on a controller paired with this phone. Games will see it as Xbox 360 controller 1."));
+        int level = batteryLevel(n);
+        if (level != Battery.UNKNOWN) {
+            boolean charging = batteryCharging(n);
+            LinearLayout line = row();
+            line.setPadding(0, dp(6), 0, 0);
+            line.addView(batteryGlyph(level, charging, 12));
+            TextView words = text(Battery.line(level, charging), 13, Battery.low(level, charging) ? ALERT : MUTED);
+            words.setPadding(dp(6), 0, 0, 0);
+            line.addView(words);
+            body.addView(line);
+        }
         if (n == 1 && connected && !canVibrate(deviceId)) body.addView(detail("Can't vibrate over Bluetooth"));
         if (n > 1) {
             body.addView(new View(this), weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
@@ -1875,13 +1975,16 @@ public class MainActivity extends Activity {
     /** Number over label; the selected tab gets the surface fill and a cream bottom edge, like the output tabs. */
     private View playerTab(int n, boolean connected) {
         boolean real = n == 1, on = real && connected, selected = n == selectedPlayer;
+        int level = batteryLevel(n);
+        boolean charging = batteryCharging(n), low = Battery.low(level, charging);
         LinearLayout tab = column();
         tab.setGravity(Gravity.CENTER_HORIZONTAL);
         tab.setPadding(0, dp(10), 0, 0);
         tab.setClickable(true);
         tab.setFocusable(true);
         tab.setSelected(selected);
-        tab.setContentDescription("Player " + n + (on ? ", " + deviceName : real ? ", free" : ", coming later"));
+        tab.setContentDescription("Player " + n + (on ? ", " + deviceName : real ? ", free" : ", coming later")
+            + (level == Battery.UNKNOWN ? "" : ", battery " + (charging ? "charging, " : "") + level + "%" + (low ? ", low" : "")));
         tab.setOnClickListener(view -> {
             selectedPlayer = n;
             render();
@@ -1897,11 +2000,20 @@ public class MainActivity extends Activity {
         number.setIncludeFontPadding(false);
         GradientDrawable shape = new GradientDrawable();
         shape.setShape(GradientDrawable.OVAL);
-        if (on) shape.setColor(ACTIVE);
+        if (on) shape.setColor(low ? ALERT : ACTIVE);
         else shape.setStroke(dp(2), IDLE, dp(3), dp(2));
         number.setBackground(shape);
-        tab.addView(number, new LinearLayout.LayoutParams(dp(28), dp(28)));
-        TextView label = text(on ? "Connected" : real ? "Free" : "Later", 11, selected ? TEXT : MUTED);
+        LinearLayout top = row();
+        top.setGravity(Gravity.CENTER);
+        top.addView(number, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        if (level != Battery.UNKNOWN) {
+            View glyph = batteryGlyph(level, charging, 10);
+            ((LinearLayout.LayoutParams) glyph.getLayoutParams()).leftMargin = dp(5);
+            top.addView(glyph);
+        }
+        tab.addView(top);
+        TextView label = text(low ? "Battery low" : on ? "Connected" : real ? "Free" : "Later", 11,
+            low ? ALERT : selected ? TEXT : MUTED);
         label.setGravity(Gravity.CENTER);
         label.setSingleLine(true);
         label.setEllipsize(TextUtils.TruncateAt.END);
@@ -1912,6 +2024,15 @@ public class MainActivity extends Activity {
         edge.setBackgroundColor(selected ? TEXT : 0);
         tab.addView(edge, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)));
         return tab;
+    }
+
+    /** The four-bar battery, height in dp; charging puts a bolt in front of it. */
+    private View batteryGlyph(int level, boolean charging, int heightDp) {
+        View glyph = new BatteryView(this, level, charging);
+        glyph.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        float width = heightDp * 23 / 12f + (charging ? heightDp * 8 / 12f + Math.max(1, Math.round(heightDp / 5f)) : 0);
+        glyph.setLayoutParams(new LinearLayout.LayoutParams(dp(width), dp(heightDp)));
+        return glyph;
     }
 
     private View soundSwitch() {
@@ -2495,6 +2616,119 @@ public class MainActivity extends Activity {
         public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
             super.onInitializeAccessibilityNodeInfo(info);
             info.setClassName(Switch.class.getName());
+        }
+    }
+
+    private static void bolt(Path path) {
+        path.moveTo(5.2f, 0.5f);
+        path.lineTo(1, 7);
+        path.lineTo(4, 7);
+        path.lineTo(2.8f, 11.5f);
+        path.lineTo(7, 5);
+        path.lineTo(4, 5);
+        path.close();
+    }
+
+    /** Spec battery glyph in its 23 by 12 unit box, after an 8-unit bolt when charging. Red when low. */
+    private static final class BatteryView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path bolt = new Path();
+        private final RectF rect = new RectF();
+        private final int bars;
+        private final boolean charging;
+        private final int ink;
+
+        BatteryView(Context context, int level, boolean charging) {
+            super(context);
+            this.charging = charging;
+            bars = Battery.bars(level);
+            ink = Battery.low(level, charging) ? ALERT : MUTED;
+            bolt(bolt);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float unit = getHeight() / 12f;
+            canvas.save();
+            canvas.scale(unit, unit);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(MUTED);
+            if (charging) {
+                canvas.drawPath(bolt, paint);
+                canvas.translate((getWidth() / unit) - 23, 0);
+            }
+            paint.setColor(ink);
+            rect.set(20.5f, 3.75f, 22.5f, 8.25f);
+            canvas.drawRoundRect(rect, 0.75f, 0.75f, paint);
+            for (int i = 0; i < bars; i++) {
+                rect.set(2.5f + i * 4.08f, 2.5f, 5.75f + i * 4.08f, 9.5f);
+                canvas.drawRoundRect(rect, 0.5f, 0.5f, paint);
+            }
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.5f);
+            rect.set(0.75f, 0.75f, 19.75f, 11.25f);
+            canvas.drawRoundRect(rect, 2, 2, paint);
+            canvas.restore();
+        }
+    }
+
+    /**
+     * A charging player's number on Home: an amber ring filled from the bottom to the pad's level, with a bolt
+     * past its top-right corner. Still on purpose; it only changes when the screen is rebuilt for a new level.
+     */
+    private static final class ChargeView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path circle = new Path();
+        private final Path bolt = new Path();
+        private final String number;
+        private final float level;
+
+        ChargeView(Context context, int number, int level) {
+            super(context);
+            this.number = String.valueOf(number);
+            this.level = level / 100f;
+            bolt(bolt);
+            paint.setTypeface(Typeface.DEFAULT_BOLD);
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 10, getResources().getDisplayMetrics()));
+            setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float size = getWidth(), r = size / 2, dp = getResources().getDisplayMetrics().density;
+            float surface = size * (1 - level);
+            float baseline = r - (paint.descent() + paint.ascent()) / 2;
+            circle.reset();
+            circle.addCircle(r, r, r, Path.Direction.CW);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(BACKGROUND);
+            canvas.drawCircle(r, r, r, paint);
+            paint.setColor(ACTIVE);
+            canvas.drawText(number, r, baseline, paint);
+            // Inside the fill the number flips to dark, like the liquid covering it.
+            canvas.save();
+            canvas.clipPath(circle);
+            canvas.clipRect(0, surface, size, size);
+            canvas.drawColor(ACTIVE);
+            paint.setColor(BACKGROUND);
+            canvas.drawText(number, r, baseline, paint);
+            canvas.restore();
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.5f * dp);
+            paint.setColor(ACTIVE);
+            canvas.drawCircle(r, r, r - 0.75f * dp, paint);
+            // An 11dp dark badge 5dp above and 6dp right of the slot, holding a 6 by 9dp bolt.
+            float cx = size + 0.5f * dp, cy = 0.5f * dp;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(BACKGROUND);
+            canvas.drawCircle(cx, cy, 5.5f * dp, paint);
+            paint.setColor(TEXT);
+            canvas.save();
+            canvas.translate(cx - 3 * dp, cy - 4.5f * dp);
+            canvas.scale(0.75f * dp, 0.75f * dp);
+            canvas.drawPath(bolt, paint);
+            canvas.restore();
         }
     }
 
