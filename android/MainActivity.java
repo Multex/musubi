@@ -1806,9 +1806,10 @@ public class MainActivity extends Activity {
         boolean connected = deviceId != -1;
         int n = selectedPlayer;
         LinearLayout strip = row();
+        strip.setPadding(dp(12), dp(8), dp(12), 0);
         for (int i = 1; i <= 4; i++) {
             if (i > 1) strip.addView(new View(this), new LinearLayout.LayoutParams(dp(4), 0));
-            strip.addView(playerTab(i, connected), weighted(0, dp(64)));
+            strip.addView(playerTab(i, connected), weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
 
         LinearLayout body = column();
@@ -1875,7 +1876,8 @@ public class MainActivity extends Activity {
     private View playerTab(int n, boolean connected) {
         boolean real = n == 1, on = real && connected, selected = n == selectedPlayer;
         LinearLayout tab = column();
-        tab.setGravity(Gravity.CENTER);
+        tab.setGravity(Gravity.CENTER_HORIZONTAL);
+        tab.setPadding(0, dp(10), 0, 0);
         tab.setClickable(true);
         tab.setFocusable(true);
         tab.setSelected(selected);
@@ -1884,12 +1886,10 @@ public class MainActivity extends Activity {
             selectedPlayer = n;
             render();
         });
-        Drawable fill = new ColorDrawable(0);
-        if (selected) {
-            LayerDrawable layered = new LayerDrawable(new Drawable[] {new ColorDrawable(SURFACE), new ColorDrawable(TEXT)});
-            layered.setLayerInset(1, 0, dp(62), 0, 0);
-            fill = layered;
-        }
+        GradientDrawable fill = new GradientDrawable();
+        int r = dp(6);
+        fill.setCornerRadii(new float[] {r, r, r, r, 0, 0, 0, 0});
+        fill.setColor(selected ? SURFACE : 0);
         tab.setBackground(ripple(fill));
         TextView number = text(String.valueOf(n), 13, on ? BACKGROUND : MUTED);
         number.setTypeface(Typeface.DEFAULT_BOLD);
@@ -1901,10 +1901,16 @@ public class MainActivity extends Activity {
         else shape.setStroke(dp(2), IDLE, dp(3), dp(2));
         number.setBackground(shape);
         tab.addView(number, new LinearLayout.LayoutParams(dp(28), dp(28)));
-        TextView label = text(on ? "Connected" : real ? "Free" : "Later", 12, selected ? TEXT : MUTED);
+        TextView label = text(on ? "Connected" : real ? "Free" : "Later", 11, selected ? TEXT : MUTED);
         label.setGravity(Gravity.CENTER);
-        label.setPadding(0, dp(4), 0, 0);
-        tab.addView(label);
+        label.setSingleLine(true);
+        label.setEllipsize(TextUtils.TruncateAt.END);
+        label.setPadding(dp(2), dp(6), dp(2), dp(8));
+        tab.addView(label, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        // A child view, not a layer: API 21 can't pin a layer to the bottom of a wrap-content height.
+        View edge = new View(this);
+        edge.setBackgroundColor(selected ? TEXT : 0);
+        tab.addView(edge, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)));
         return tab;
     }
 
