@@ -17,7 +17,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 import system  # noqa: E402
 
-VERSION = '0.7.0'
+VERSION = '0.7.1'
 REPO = 'https://github.com/Multex/musubi'
 BUTTON_NAMES = ['A', 'B', 'X', 'Y', 'L1', 'R1', 'Select', 'Start', 'Guide', 'L3', 'R3']
 A, B, X, Y, L1, R1, SELECT, START, _, L3, R3 = range(11)
