@@ -11,6 +11,7 @@ import paths  # noqa: F401
 import core
 import main as win_main
 import pad as win_pad
+import window
 from core import HELLO, HELLO_MAGIC, PACKET
 
 
@@ -91,6 +92,22 @@ class ConsoleTest(unittest.TestCase):
         self.console.step(timeout=2)
         self.assertEqual(core.load_config(self.config)['phones'], {'127.0.0.1': 'Pixel'})
 
+    def test_allow_lets_in_only_that_phone_and_saves_it(self):
+        other = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(other.close)
+        other.bind(('127.0.0.2', 0))
+        other.sendto(hello(), self.sock.getsockname())
+        self.send(hello())
+        self.console.post('allow', '127.0.0.2')
+        self.console.step(timeout=2)
+        self.assertEqual(core.load_config(self.config)['phones'], {'127.0.0.2': 'Pixel'})
+        self.assertEqual([phone['ip'] for phone in self.console.bridge.status()['pending']], ['127.0.0.1'])
+
+    def test_quit_stops_the_loop(self):
+        self.console.post('quit')
+        self.console.step(timeout=2)
+        self.assertFalse(self.console.running)
+
     def test_allowed_phone_drives_the_pad_and_gets_pings_back(self):
         self.allow()
         self.send(hello())
@@ -125,6 +142,23 @@ class ConsoleTest(unittest.TestCase):
         self.phone.settimeout(0.2)
         with self.assertRaises(TimeoutError):
             self.phone.recv(64)
+
+
+class RowsTest(unittest.TestCase):
+    def status(self, phone=None, pad=False):
+        return {'phone': phone, 'pad': pad, 'pad_error': None, 'pending': []}
+
+    def test_no_phone(self):
+        self.assertEqual(window.rows(None), ('Not connected', 'None', 'Off', False))
+        self.assertEqual(window.rows(self.status()), ('Not connected', 'None', 'Off', False))
+
+    def test_phone_with_controller_and_pad(self):
+        phone = {'ip': '10.0.0.5', 'name': 'Pixel', 'controller': 'Xbox pad', 'rtt': 4}
+        self.assertEqual(window.rows(self.status(phone, True)), ('Pixel · 4 ms', 'Xbox pad', 'On', True))
+
+    def test_phone_without_a_name_shows_its_address(self):
+        phone = {'ip': '10.0.0.5', 'name': '', 'controller': None, 'rtt': None}
+        self.assertEqual(window.rows(self.status(phone)), ('10.0.0.5', 'None', 'Off', False))
 
 
 class XInputState(ctypes.Structure):

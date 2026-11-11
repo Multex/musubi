@@ -52,7 +52,20 @@ jobs:
           if ($musubi.HasExited) { throw 'The exe stopped by itself.' }
           Stop-Process $musubi
           if (-not (Select-String -Path $log -Pattern 'listening' -Quiet)) { throw 'The exe never started listening.' }
+      - name: Build the window exe
+        shell: pwsh
+        run: pyinstaller --onefile --windowed --name Musubi-window-test --paths desktop --paths desktop/windows --add-binary "desktop/windows/ViGEmClient.dll;." desktop/windows/window.py
+      - name: Start the window exe once
+        shell: pwsh
+        run: |
+          $musubi = Start-Process dist/Musubi-window-test.exe -PassThru
+          Start-Sleep 10
+          $log = "$env:LOCALAPPDATA/musubi/musubi.log"
+          Get-Content $log -ErrorAction SilentlyContinue
+          if ($musubi.HasExited) { throw 'The window exe stopped by itself.' }
+          Stop-Process $musubi
+          if (-not (Select-String -Path $log -Pattern 'window open' -Quiet)) { throw 'The window never opened.' }
       - uses: actions/upload-artifact@v4
         with:
           name: Musubi-test
-          path: dist/Musubi-test.exe
+          path: dist/*.exe

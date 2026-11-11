@@ -68,6 +68,7 @@ class Console:
         self.inbox = queue.SimpleQueue()
         self.wake, self.waker = socket.socketpair()
         self.shown = None
+        self.running = True
         self.asked = set()
         self.line = 'No phone connected.'
         self.heard = False
@@ -115,16 +116,24 @@ class Console:
                 self.rumbled = True
                 log.info('first rumble from a game: %s %s', large, small)
             self.bridge.set_rumble(large * 257, small * 257)
-        elif details[0].lower() in ('y', 'yes'):
-            pending = self.bridge.status()['pending']
-            if not pending:
-                self.say('No phone is waiting.')
-                return
-            for phone in pending:
-                self.config['phones'][phone['ip']] = phone['name']
-                self.say(f"Allowed {phone['name'] or phone['ip']}.")
-            core.save_config(self.config, self.config_path)
-            self.bridge.set_allowed(self.config['phones'])
+        elif kind == 'allow':
+            self.allow(details[0])
+        elif kind == 'quit':
+            self.running = False
+        elif kind == 'line' and details[0].lower() in ('y', 'yes'):
+            self.allow(None)
+
+    def allow(self, ip):
+        """Lets the waiting phone at ip connect, or every waiting phone when ip is None, and remembers it."""
+        pending = [phone for phone in self.bridge.status()['pending'] if ip in (None, phone['ip'])]
+        if not pending:
+            self.say('No phone is waiting.')
+            return
+        for phone in pending:
+            self.config['phones'][phone['ip']] = phone['name']
+            self.say(f"Allowed {phone['name'] or phone['ip']}.")
+        core.save_config(self.config, self.config_path)
+        self.bridge.set_allowed(self.config['phones'])
 
     def step(self, timeout=core.TICK):
         readable = select.select([self.sock, self.wake], [], [], timeout)[0]
@@ -178,19 +187,50 @@ def keep_running_when_clicked():
     kernel32.SetConsoleMode(kernel32.GetStdHandle(-10), 0x0007 | 0x0080)
 
 
+def check_driver():
+    """None if a virtual pad can be made, else what is wrong."""
+    try:
+        win_pad.Pad(lambda large, small: None).close()
+    except OSError as ex:
+        log.error('driver check: %s', ex)
+        return str(ex)
+    log.info('driver found')
+    return None
+
+
+def serve(console, say):
+    """Runs the receiver loop until a 'quit' is posted, then closes it."""
+    started = time.monotonic()
+    hinted = False
+    memory_logged = False
+    try:
+        while console.running:
+            console.step()
+            running = time.monotonic() - started
+            if not hinted and not console.heard and running > FIREWALL_HINT_AFTER:
+                hinted = True
+                log.warning('no packet in %s s', FIREWALL_HINT_AFTER)
+                say('Nothing has arrived from a phone yet. Check that the phone is on the same Wi-Fi '
+                    'and that Windows Firewall allows Musubi on both private and public networks.')
+            if not memory_logged and running > MEMORY_LOG_AFTER:
+                memory_logged = True
+                log.info('memory after %s s: %s MB', MEMORY_LOG_AFTER, memory_mb())
+    finally:
+        console.close()
+        log.info('stopped')
+
+
 def run():
     keep_running_when_clicked()
     print(f'Musubi for Windows, test build ({BUILD})')
     print(f'Log file: {LOG_FILE}')
     log.info('build %s, %s, python %s, %s MB', BUILD, platform.platform(), platform.python_version(), memory_mb())
-    try:
-        win_pad.Pad(lambda large, small: None).close()
-        log.info('driver found')
-        print('ViGEmBus driver: found.')
-    except OSError as ex:
-        log.error('driver check: %s', ex)
-        print(f'ViGEmBus driver: {ex}')
+    error = check_driver()
+    if error:
+        print(f'ViGEmBus driver: {error}')
         print('The controller will not work until that is fixed. Then start Musubi again.')
+    else:
+        print('ViGEmBus driver: found.')
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -207,32 +247,19 @@ def run():
 
     console = Console(sock)
     threading.Thread(target=read_lines, args=(console,), daemon=True).start()
-    started = time.monotonic()
-    hinted = False
-    memory_logged = False
-    try:
-        while True:
-            console.step()
-            running = time.monotonic() - started
-            if not hinted and not console.heard and running > FIREWALL_HINT_AFTER:
-                hinted = True
-                log.warning('no packet in %s s', FIREWALL_HINT_AFTER)
-                print('Nothing has arrived from a phone yet. Check that the phone is on the same Wi-Fi '
-                      'and that Windows Firewall allows Musubi on both private and public networks.')
-            if not memory_logged and running > MEMORY_LOG_AFTER:
-                memory_logged = True
-                log.info('memory after %s s: %s MB', MEMORY_LOG_AFTER, memory_mb())
-    finally:
-        console.close()
-        log.info('stopped')
+    serve(console, print)
 
 
-def main():
+def setup_log():
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=256 * 1024, backupCount=1, encoding='utf-8')
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
     log.addHandler(handler)
     log.setLevel(logging.INFO)
+
+
+def main():
+    setup_log()
     try:
         run()
     except KeyboardInterrupt:
