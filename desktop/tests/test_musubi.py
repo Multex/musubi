@@ -332,8 +332,18 @@ class BridgeTest(unittest.TestCase):
 
     def test_sends_audio_over_the_cable_when_the_phone_is_on_it(self):
         self.bridge.on_datagram(hello(features=musubi.FEATURE_AUDIO), (musubi.USB, 0))
+        self.usb_sent.clear()
         self.bridge.send_to_phone(self.AUDIO)
         self.assertEqual((self.sock.sent, self.usb_sent), ([], [self.AUDIO]))
+
+    def test_a_cable_hello_gets_the_pc_name_back_and_a_wifi_hello_does_not(self):
+        with mock.patch('socket.gethostname', return_value='desk'):
+            self.bridge.on_datagram(hello(), self.PHONE)
+            self.bridge.on_datagram(hello(), (musubi.USB, 0))
+        self.assertEqual((self.sock.sent, self.usb_sent), ([], [b'PBNM' + b'desk']))
+
+    def test_the_name_is_cut_without_splitting_a_character(self):
+        self.assertEqual(musubi.name_message('a' * 63 + 'é'), b'PBNM' + b'a' * 63)
 
     def test_a_failed_send_doesnt_crash(self):
         bridge = Bridge(FailingSock(), [self.PHONE[0]], self.on_status, make_pad=self.make_pad, clock=lambda: self.now)
@@ -505,6 +515,7 @@ class RumbleTest(unittest.TestCase):
 
     def test_goes_over_the_cable_too(self):
         self.bridge.on_datagram(hello(features=musubi.FEATURE_RUMBLE), (musubi.USB, 0))
+        self.usb_sent.clear()
         self.pad.upload(0, 0, 5, 5, 0)
         self.play(0)
         self.assertEqual(self.usb_sent, [musubi.rumble_message(5, 5, 0)])

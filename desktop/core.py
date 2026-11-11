@@ -1,6 +1,7 @@
 """What every desktop OS shares: the packets, the phones and their approval, and the saved settings."""
 import json
 import os
+import socket
 import struct
 import sys
 import time
@@ -33,6 +34,8 @@ AUDIO_MAGIC = b'PBAU'
 # PC to phone: magic, strong and weak motor 0..65535, then ms left (0 = until the next message). Sent on change only.
 RUMBLE = struct.Struct('!4sHHH')
 RUMBLE_MAGIC = b'PBRM'
+# PC to phone over the cable: magic, then the PC name in UTF-8. Sent on every hello; Wi-Fi phones name PCs themselves.
+NAME_MAGIC = b'PBNM'
 RUMBLE_STOPPED = (0, 0, None)
 # The phone stops an endless rumble after 2 s unless told again, so a lost stop can't leave the pad buzzing.
 RUMBLE_REFRESH = 1.0
@@ -64,6 +67,11 @@ def clean_name(raw):
     """Names come straight off the network, so they get no control characters or unbounded length."""
     text = raw.decode('utf-8', 'replace')
     return ''.join(c for c in text if c.isprintable())[:MAX_NAME]
+
+
+def name_message(name):
+    """The name cut to MAX_NAME bytes without splitting a character."""
+    return NAME_MAGIC + name.encode('utf-8')[:MAX_NAME].decode('utf-8', 'ignore').encode('utf-8')
 
 
 def decode_hello(data):
@@ -241,6 +249,8 @@ class Bridge:
             if hello != self.hello:
                 self.hello = hello
                 self.on_status()
+            if ip == USB:
+                self.send_to_phone(name_message(socket.gethostname()))
             self._sync_pad()
             return
         if len(data) == PING_SIZE:
