@@ -11,7 +11,7 @@ import paths  # noqa: F401
 import core
 import main as win_main
 import pad as win_pad
-import window
+import app
 from core import HELLO, HELLO_MAGIC, PACKET
 
 
@@ -149,16 +149,16 @@ class RowsTest(unittest.TestCase):
         return {'phone': phone, 'pad': pad, 'pad_error': None, 'pending': []}
 
     def test_no_phone(self):
-        self.assertEqual(window.rows(None), ('Not connected', 'None', 'Off', False))
-        self.assertEqual(window.rows(self.status()), ('Not connected', 'None', 'Off', False))
+        self.assertEqual(app.rows(None), ('Not connected', 'None', 'Off', False))
+        self.assertEqual(app.rows(self.status()), ('Not connected', 'None', 'Off', False))
 
     def test_phone_with_controller_and_pad(self):
         phone = {'ip': '10.0.0.5', 'name': 'Pixel', 'controller': 'Xbox pad', 'rtt': 4}
-        self.assertEqual(window.rows(self.status(phone, True)), ('Pixel · 4 ms', 'Xbox pad', 'On', True))
+        self.assertEqual(app.rows(self.status(phone, True)), ('Pixel · 4 ms', 'Xbox pad', 'On', True))
 
     def test_phone_without_a_name_shows_its_address(self):
         phone = {'ip': '10.0.0.5', 'name': '', 'controller': None, 'rtt': None}
-        self.assertEqual(window.rows(self.status(phone)), ('10.0.0.5', 'None', 'Off', False))
+        self.assertEqual(app.rows(self.status(phone)), ('10.0.0.5', 'None', 'Off', False))
 
 
 class XInputState(ctypes.Structure):

@@ -54,7 +54,7 @@ jobs:
           if (-not (Select-String -Path $log -Pattern 'listening' -Quiet)) { throw 'The exe never started listening.' }
       - name: Build the window exe
         shell: pwsh
-        run: pyinstaller --onefile --windowed --name Musubi-window-test --paths desktop --paths desktop/windows --add-binary "desktop/windows/ViGEmClient.dll;." desktop/windows/window.py
+        run: pyinstaller --onefile --windowed --name Musubi-window-test --paths desktop --paths desktop/windows --add-binary "desktop/windows/ViGEmClient.dll;." desktop/windows/app.py
       - name: Start the window exe once
         shell: pwsh
         run: |

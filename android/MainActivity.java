@@ -143,6 +143,9 @@ public class MainActivity extends Activity {
     // Magic, strong and weak motor 0..65535, then ms (0 = until the next message), matching RUMBLE in musubi.py.
     private static final byte[] RUMBLE_MAGIC = {'P', 'B', 'R', 'M'};
     private static final int RUMBLE_SIZE = RUMBLE_MAGIC.length + 6;
+    // Magic, then the PC name in UTF-8, matching NAME_MAGIC in core.py. Only sent over the cable.
+    private static final byte[] NAME_MAGIC = {'P', 'B', 'N', 'M'};
+    private static final String USB_PC_NAME = "PC on USB";
     // The PC repeats an endless rumble every second, so a lost stop can't leave the pad buzzing past this.
     private static final int RUMBLE_CAP_MS = 2000;
     // 5 ms of 48 kHz stereo PCM is under 1 KB.
@@ -235,7 +238,7 @@ public class MainActivity extends Activity {
     private UsbManager usbManager;
     private ParcelFileDescriptor usbFile;
     private volatile FileOutputStream usbOut;
-    private final Pc usbPc = new Pc("PC on USB", "Cable");
+    private final Pc usbPc = new Pc(USB_PC_NAME, "Cable");
     private WifiManager.WifiLock wifiLock;
     private InputManager inputManager;
     private AudioManager audioManager;
@@ -451,6 +454,8 @@ public class MainActivity extends Activity {
     private void closeAccessory() {
         if (usbFile == null) return;
         usbOut = null;
+        // The next PC on the cable sends its own name; older ones never do.
+        usbPc.name = USB_PC_NAME;
         try {
             usbFile.close();
         } catch (IOException ignored) {
@@ -642,6 +647,15 @@ public class MainActivity extends Activity {
                     rumble(deviceId, strong, weak, ms);
                     handler.post(() -> showRumble(strong, weak, ms));
                 }
+            } else if (magic == ByteBuffer.wrap(NAME_MAGIC).getInt()) {
+                String name = shorten(new String(data, in.position(), in.remaining(), StandardCharsets.UTF_8)
+                    .replaceAll("\\p{Cntrl}", "").trim());
+                if (!name.isEmpty()) handler.post(() -> {
+                    if (name.equals(usbPc.name)) return;
+                    usbPc.name = name;
+                    if (backgrounded && currentPc() == usbPc) showKeepAlive();
+                    render();
+                });
             }
         }
     }
@@ -1793,8 +1807,8 @@ public class MainActivity extends Activity {
 
         LinearLayout about = column();
         about.addView(text("About the delay", 12, MUTED));
-        TextView aboutNote = detail("Bluetooth adds its own delay. Some phones include it here and some can't measure it. "
-            + "A USB cable to the PC removes the Wi-Fi part.");
+        TextView aboutNote = detail("Bluetooth adds its own delay, which some phones can't measure. "
+            + "For less delay, use the USB cable and your earbuds' game mode.");
         aboutNote.setPadding(0, dp(8), 0, 0);
         about.addView(aboutNote);
         body.addView(divided(about));
