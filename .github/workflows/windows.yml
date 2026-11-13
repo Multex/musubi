@@ -102,27 +102,30 @@ jobs:
           if ($LASTEXITCODE) { throw 'Python cannot load GTK.' }
           pyinstaller --noconfirm desktop/windows/gtk_spike.spec
           "{0:N1} MB unpacked" -f ((Get-ChildItem dist/Musubi-gtk-test -Recurse | Measure-Object Length -Sum).Sum / 1MB)
-      - name: Start the GTK test once
+      - name: Start the GTK test with each renderer
         shell: pwsh
         run: |
-          $env:MUSUBI_TEST_SECONDS = '14'
-          $test = Start-Process dist/Musubi-gtk-test/Musubi-gtk-test.exe -PassThru
-          Start-Sleep 7
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
-          $picture = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
-          [System.Drawing.Graphics]::FromImage($picture).CopyFromScreen($screen.Left, $screen.Top, 0, 0, $picture.Size)
-          $picture.Save("$PWD/dist/Musubi-gtk-test/screen.png")
-          $closed = $test.WaitForExit(60000)
           $log = "$env:LOCALAPPDATA/musubi/gtk-test.log"
-          Get-Content $log -ErrorAction SilentlyContinue
-          if (-not $closed) { Stop-Process $test; throw 'The GTK test did not close by itself.' }
+          New-Item -ItemType Directory screens | Out-Null
+          $env:MUSUBI_TEST_SECONDS = '14'
+          foreach ($renderer in 'cairo', 'gl') {
+            $env:GSK_RENDERER = $renderer
+            $test = Start-Process dist/Musubi-gtk-test/Musubi-gtk-test.exe -PassThru
+            Start-Sleep 7
+            $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $picture = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
+            [System.Drawing.Graphics]::FromImage($picture).CopyFromScreen($screen.Left, $screen.Top, 0, 0, $picture.Size)
+            $picture.Save("$PWD/screens/$renderer.png")
+            if (-not $test.WaitForExit(60000)) { Stop-Process $test; Get-Content $log; throw "The GTK test did not close by itself with $renderer." }
+          }
+          Get-Content $log
           if (-not (Select-String -Path $log -Pattern 'after 10 s' -Quiet)) { throw 'The GTK window never opened.' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: Musubi-gtk-screen
-          path: dist/Musubi-gtk-test/screen.png
+          path: screens
       - uses: actions/upload-artifact@v4
         with:
           name: Musubi-gtk-test

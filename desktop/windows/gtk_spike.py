@@ -19,7 +19,9 @@ handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
 handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
 log.addHandler(handler)
 log.setLevel(logging.INFO)
-log.info('gtk test, python %s', sys.version.split()[0])
+log.info('gtk test, python %s, renderer %s', sys.version.split()[0], os.environ.get('GSK_RENDERER', 'cairo'))
+# A windowed exe has no stderr, and that is where GTK reports a drawing that failed.
+sys.stderr = open(LOG_FILE, 'a', encoding='utf-8', buffering=1)
 
 try:
     import core  # noqa: E402
@@ -58,6 +60,11 @@ def memory_mb():
 
 
 class Spike(window.App):
+    def do_startup(self):
+        window.App.do_startup(self)
+        # The title bar is GTK's own on Windows, and it should be dark like the rest.
+        Gtk.Settings.get_default().set_property('gtk-application-prefer-dark-theme', True)
+
     def do_activate(self):
         self.build_window()
         self.local_ip, self.network = system.read_network()
