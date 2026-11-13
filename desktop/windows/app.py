@@ -26,16 +26,17 @@ OPEN_FOLDER = getattr(os, 'startfile', webbrowser.open)
 log = logging.getLogger('musubi')
 
 
-def rows(status):
-    """The Phone, Controller and Virtual pad values, and whether the pad is on, from a status dict or None."""
+def rows(status, capturing):
+    """The Phone, Controller, Virtual pad and Sound values, and whether the pad is on, from a status dict or None."""
     pad = bool(status and status['pad'])
+    sound = 'To the phone' if capturing else 'Off'
     phone = status and status['phone']
     if not phone:
-        return 'Not connected', 'None', 'On' if pad else 'Off', pad
+        return 'Not connected', 'None', 'On' if pad else 'Off', pad, sound
     name = phone['name'] or phone['ip']
     if phone['rtt'] is not None:
         name += f" · {phone['rtt']} ms"
-    return name, phone['controller'] or 'None', 'On' if pad else 'Off', pad
+    return name, phone['controller'] or 'None', 'On' if pad else 'Off', pad, sound
 
 
 def label(parent, text='', fg=TEXT, font=FONT, **options):
@@ -99,7 +100,7 @@ def run(make_pad, port, config_path):
     table.grid(row=5, column=0, sticky='ew')
     table.columnconfigure(0, minsize=110)
     values = []
-    for row, name in enumerate(('Phone', 'Controller', 'Virtual pad')):
+    for row, name in enumerate(('Phone', 'Controller', 'Virtual pad', 'Sound')):
         label(table, name, MUTED).grid(row=row, column=0, sticky='w', pady=3)
         values.append(label(table, wraplength=WIDTH - 110))
         values[-1].grid(row=row, column=1, sticky='w', pady=3)
@@ -124,12 +125,13 @@ def run(make_pad, port, config_path):
         nonlocal notice
         notice = text
 
-    def render(status, notice):
-        phone, controller, pad, pad_on = rows(status)
+    def render(status, notice, capturing, sound_error):
+        phone, controller, pad, pad_on, sound = rows(status, capturing)
         connected = bool(status and status['phone'])
         values[0].config(text=phone, fg=TEXT if connected else MUTED)
         values[1].config(text=controller, fg=TEXT if connected and controller != 'None' else MUTED)
         values[2].config(text=pad, fg=ACTIVE if pad_on else MUTED)
+        values[3].config(text=sound, fg=TEXT if capturing else MUTED)
 
         pending = [(phone['ip'], phone['name']) for phone in status['pending']] if status else []
         problems = []
@@ -140,6 +142,8 @@ def run(make_pad, port, config_path):
             problems.append((f'Another program is using UDP port {port}. Is Musubi already running?', ALERT))
         if status and status['pad_error']:
             problems.append((f"The virtual pad could not start: {status['pad_error']}", ALERT))
+        if sound_error:
+            problems.append((sound_error, ALERT))
         if notice:
             problems.append((notice, TEXT))
         # The ping changes every second. Rebuilding these then would take the keyboard focus off Allow.
@@ -176,7 +180,7 @@ def run(make_pad, port, config_path):
 
     def refresh():
         nonlocal shown
-        now = (console.shown, '' if console.heard else notice)
+        now = (console.shown, '' if console.heard else notice, console.sound.capturing, console.sound.error)
         if now != shown:
             shown = now
             render(*now)
@@ -188,7 +192,7 @@ def run(make_pad, port, config_path):
             thread.join(1)
         root.destroy()
 
-    render(None, '')
+    render(None, '', False, None)
     if console:
         refresh()
     root.protocol('WM_DELETE_WINDOW', close)

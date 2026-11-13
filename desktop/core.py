@@ -31,6 +31,14 @@ FEATURE_RUMBLE = 2
 # PC to phone: magic, sequence number, then PCM.
 AUDIO = struct.Struct('!4sH')
 AUDIO_MAGIC = b'PBAU'
+RATE = 48000
+CHANNELS = 2
+# 5 ms of 16-bit stereo per packet, which fits the phone's 2048-byte UDP buffer.
+CHUNK = RATE * CHANNELS * 2 * 5 // 1000
+# Linux's null sink monitor gives exact zeros while nothing plays, so those chunks aren't worth sending.
+SILENCE = bytes(CHUNK)
+# 200 ms of zeros still go out, so a short pause between sounds doesn't make the phone stop and refill.
+HANGOVER = 40
 # PC to phone: magic, strong and weak motor 0..65535, then ms left (0 = until the next message). Sent on change only.
 RUMBLE = struct.Struct('!4sHHH')
 RUMBLE_MAGIC = b'PBRM'
@@ -96,6 +104,28 @@ def decode_hello(data):
 
 def audio_message(seq, pcm):
     return AUDIO.pack(AUDIO_MAGIC, seq & 0xffff) + pcm
+
+
+def split_chunks(buffered):
+    """Return (whole chunks, leftover bytes)."""
+    end = len(buffered) - len(buffered) % CHUNK
+    return [buffered[i:i + CHUNK] for i in range(0, end, CHUNK)], buffered[end:]
+
+
+def number_chunks(chunks, seq, quiet):
+    """Return ((seq, chunk) pairs worth sending, next seq, next quiet count)."""
+    numbered = []
+    for chunk in chunks:
+        if chunk != SILENCE:
+            quiet = 0
+        elif quiet < HANGOVER:
+            quiet += 1
+        else:
+            continue
+        # Skipped silence takes no number, so a gap the phone sees is always a lost packet.
+        numbered.append((seq, chunk))
+        seq = (seq + 1) & 0xffff
+    return numbered, seq, quiet
 
 
 def rumble_message(strong, weak, ms):

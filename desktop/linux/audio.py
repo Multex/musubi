@@ -3,27 +3,18 @@ import os
 import subprocess
 import sys
 from array import array
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is shared with Windows, one folder up
+
+from core import CHANNELS, CHUNK, HANGOVER, RATE, SILENCE, number_chunks, split_chunks  # noqa: E402,F401
 
 SINK = 'musubi'
-RATE = 48000
-CHANNELS = 2
-# 5 ms of 16-bit stereo per packet, which fits the phone's 2048-byte UDP buffer.
-CHUNK = RATE * CHANNELS * 2 * 5 // 1000
-# A null sink's monitor gives exact zeros while nothing plays, so those chunks aren't worth sending.
-SILENCE = bytes(CHUNK)
-# 200 ms of zeros still go out, so a short pause between sounds doesn't make the phone stop and refill.
-HANGOVER = 40
 LOAD = ['pactl', 'load-module', 'module-null-sink', f'sink_name={SINK}',
         'sink_properties=device.description=Musubi']
 # The latency request also shrinks PipeWire's quantum to 256 frames, so reads arrive every 5.3 ms instead of 21.
 CAPTURE = ['parec', '-d', f'{SINK}.monitor', '--raw', '--format=s16le', f'--rate={RATE}',
            f'--channels={CHANNELS}', '--latency-msec=5']
-
-
-def split_chunks(buffered):
-    """Return (whole chunks, leftover bytes)."""
-    end = len(buffered) - len(buffered) % CHUNK
-    return [buffered[i:i + CHUNK] for i in range(0, end, CHUNK)], buffered[end:]
 
 
 class Levels:
@@ -128,15 +119,5 @@ class PhoneAudio:
             self.stop()
             return []
         chunks, self.buffered = split_chunks(self.buffered + data)
-        numbered = []
-        for chunk in chunks:
-            if chunk != SILENCE:
-                self.quiet = 0
-            elif self.quiet < HANGOVER:
-                self.quiet += 1
-            else:
-                continue
-            # Skipped silence takes no number, so a gap the phone sees is always a lost packet.
-            numbered.append((self.seq, chunk))
-            self.seq = (self.seq + 1) & 0xffff
+        numbered, self.seq, self.quiet = number_chunks(chunks, self.seq, self.quiet)
         return numbered

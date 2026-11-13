@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import ctypes
+from array import array
 import socket
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import core
 import main as win_main
 import pad as win_pad
 import app
+import sound as win_sound
 from core import HELLO, HELLO_MAGIC, PACKET
 
 
@@ -50,6 +52,22 @@ class FakePad:
         self.closed = True
 
 
+class FakeSound:
+    def __init__(self, on_pcm):
+        self.on_pcm = on_pcm
+        self.capturing = False
+        self.error = None
+        self.starts = 0
+
+    def start(self):
+        if not self.capturing:
+            self.capturing = True
+            self.starts += 1
+
+    def stop(self):
+        self.capturing = False
+
+
 def hello(features=core.FEATURE_RUMBLE):
     return HELLO.pack(HELLO_MAGIC, 1, 9) + b'Pixel\0Xbox pad\0' + bytes([features])
 
@@ -65,7 +83,7 @@ class ConsoleTest(unittest.TestCase):
         self.config = Path(tempfile.mkdtemp()) / 'config.json'
         self.said = []
         self.pads = []
-        self.console = win_main.Console(self.sock, self.make_pad, self.config, self.said.append)
+        self.console = win_main.Console(self.sock, self.make_pad, self.config, self.said.append, FakeSound)
 
     def tearDown(self):
         self.console.close()
@@ -144,22 +162,96 @@ class ConsoleTest(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.phone.recv(64)
 
+    def test_a_phone_that_wants_sound_gets_it_until_it_leaves(self):
+        self.allow()
+        self.send(hello(features=core.FEATURE_AUDIO))
+        self.assertTrue(self.console.sound.capturing)
+        pcm = b'\x01' * core.CHUNK
+        self.console.sound.on_pcm(pcm)
+        self.console.step(timeout=2)
+        self.assertEqual(self.phone.recv(2048), b'PBAU\0\0' + pcm)
+        self.console.bridge.last_seen -= core.PHONE_TIMEOUT + 1
+        self.console.step(timeout=0)
+        self.assertFalse(self.console.sound.capturing)
+
+    def test_a_phone_without_the_sound_feature_never_starts_it(self):
+        self.allow()
+        self.send(hello())
+        self.assertEqual(self.console.sound.starts, 0)
+
+
+class SoundTest(unittest.TestCase):
+    def test_a_failed_start_waits_for_a_stop_before_trying_again(self):
+        opener = mock.Mock(side_effect=OSError('No sound output was found on this PC.'))
+        sound = win_sound.Sound(lambda chunk: None, opener)
+        with self.assertLogs('musubi', 'ERROR'):
+            sound.start()
+        sound.start()
+        self.assertEqual((opener.call_count, sound.error), (1, 'No sound output was found on this PC.'))
+        sound.stop()
+        self.assertIsNone(sound.error)
+
+    def test_a_good_start_captures_until_stopped(self):
+        capture = mock.Mock(channels=2)
+        capture.name = 'Speakers [Loopback]'
+        sound = win_sound.Sound(lambda chunk: None, mock.Mock(return_value=capture))
+        sound.start()
+        self.assertTrue(sound.capturing)
+        sound.stop()
+        self.assertFalse(sound.capturing)
+        capture.close.assert_called_once()
+
+    def test_the_library_is_missing_off_windows(self):
+        with mock.patch.dict(sys.modules, {'pyaudiowpatch': None}):
+            with self.assertRaisesRegex(OSError, 'library is missing'):
+                win_sound.open_capture(lambda chunk: None)
+
+    def fake_library(self, rate=48000, channels=6):
+        library = mock.Mock(paInt16=8, paContinue=0)
+        audio = library.PyAudio.return_value
+        audio.get_default_wasapi_loopback.return_value = {
+            'index': 7, 'name': 'Speakers [Loopback]', 'defaultSampleRate': float(rate), 'maxInputChannels': channels}
+        return library, audio
+
+    def test_the_callback_hands_on_whole_stereo_chunks(self):
+        library, audio = self.fake_library()
+        chunks = []
+        with mock.patch.dict(sys.modules, {'pyaudiowpatch': library}):
+            capture = win_sound.open_capture(chunks.append)
+        callback = audio.open.call_args.kwargs['stream_callback']
+        self.assertEqual(callback(bytes(6 * 2 * 300), 300, {}, 0), (None, 0))
+        self.assertEqual([len(chunk) for chunk in chunks], [960])
+        capture.close()
+        audio.terminate.assert_called_once()
+
+    def test_a_wrong_rate_says_what_to_change_and_lets_go_of_portaudio(self):
+        library, audio = self.fake_library(rate=44100)
+        with mock.patch.dict(sys.modules, {'pyaudiowpatch': library}):
+            with self.assertRaisesRegex(OSError, 'at 44100 Hz'):
+                win_sound.open_capture(lambda chunk: None)
+        audio.terminate.assert_called_once()
+
+    def test_surround_keeps_the_front_left_and_right(self):
+        frames = array('h', [1, 2, 3, 4, 5, 6, -1, -2, -3, -4, -5, -6]).tobytes()
+        self.assertEqual(array('h', win_sound.stereo(frames, 6)).tolist(), [1, 2, -1, -2])
+        self.assertIs(win_sound.stereo(frames, 2), frames)
+
 
 class RowsTest(unittest.TestCase):
     def status(self, phone=None, pad=False):
         return {'phone': phone, 'pad': pad, 'pad_error': None, 'pending': []}
 
     def test_no_phone(self):
-        self.assertEqual(app.rows(None), ('Not connected', 'None', 'Off', False))
-        self.assertEqual(app.rows(self.status()), ('Not connected', 'None', 'Off', False))
+        self.assertEqual(app.rows(None, False), ('Not connected', 'None', 'Off', False, 'Off'))
+        self.assertEqual(app.rows(self.status(), False), ('Not connected', 'None', 'Off', False, 'Off'))
 
     def test_phone_with_controller_and_pad(self):
         phone = {'ip': '10.0.0.5', 'name': 'Pixel', 'controller': 'Xbox pad', 'rtt': 4}
-        self.assertEqual(app.rows(self.status(phone, True)), ('Pixel · 4 ms', 'Xbox pad', 'On', True))
+        self.assertEqual(app.rows(self.status(phone, True), True), ('Pixel · 4 ms', 'Xbox pad', 'On', True, 'To the phone'))
 
     def test_phone_without_a_name_shows_its_address(self):
         phone = {'ip': '10.0.0.5', 'name': '', 'controller': None, 'rtt': None}
-        self.assertEqual(app.rows(self.status(phone)), ('10.0.0.5', 'None', 'Off', False))
+        self.assertEqual(app.rows(self.status(phone), False), ('10.0.0.5', 'None', 'Off', False, 'Off'))
 
 
 class XInputState(ctypes.Structure):

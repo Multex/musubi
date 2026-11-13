@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is sh
 
 import core  # noqa: E402
 import pad as win_pad  # noqa: E402
+import sound  # noqa: E402
 
 try:
     from build import BUILD
@@ -60,7 +61,7 @@ def memory_mb():
 class Console:
     """The receiver loop. Threads hand it work through `post`, so the bridge is only touched from one thread."""
 
-    def __init__(self, sock, make_pad=None, config_path=core.CONFIG_FILE, say=print):
+    def __init__(self, sock, make_pad=None, config_path=core.CONFIG_FILE, say=print, make_sound=None):
         self.sock = sock
         self.say = say
         self.config_path = config_path
@@ -76,6 +77,11 @@ class Console:
         self.last_packet = None
         self.longest_step = 0.0
         self.recv_errors = 0
+        self.sound = (make_sound or sound.Sound)(self.on_pcm)
+        self.sound_said = (False, None)
+        self.sound_sent = False
+        self.seq = 0
+        self.quiet = core.HANGOVER
         self.bridge = core.Bridge(sock, self.config['phones'], self.on_status,
                                   make_pad=make_pad or (lambda: win_pad.Pad(self.on_rumble)))
 
@@ -85,6 +91,9 @@ class Console:
 
     def on_rumble(self, large, small):
         self.post('rumble', large, small)
+
+    def on_pcm(self, chunk):
+        self.post('audio', chunk)
 
     def on_status(self):
         status = self.bridge.status()
@@ -110,7 +119,15 @@ class Console:
             self.say(line)
 
     def handle(self, kind, *details):
-        if kind == 'rumble':
+        if kind == 'audio':
+            numbered, self.seq, self.quiet = core.number_chunks(details, self.seq, self.quiet)
+            for seq, pcm in numbered:
+                if self.bridge.wants_audio():
+                    self.bridge.send_to_phone(core.audio_message(seq, pcm))
+                    if not self.sound_sent:
+                        self.sound_sent = True
+                        log.info('first sound packet sent')
+        elif kind == 'rumble':
             large, small = details
             if not self.rumbled:
                 self.rumbled = True
@@ -163,12 +180,23 @@ class Console:
                 self.last_packet = now
                 self.bridge.on_datagram(data, addr)
         self.bridge.on_tick()
+        core.sync_sound(self.sound, self.config['sound_enabled'] and self.bridge.wants_audio())
+        if not self.sound.capturing:
+            self.quiet = core.HANGOVER
+        said = (self.sound.capturing, self.sound.error)
+        if said != self.sound_said:
+            self.sound_said = said
+            if said[0]:
+                self.say('PC sound is playing on the phone.')
+            elif said[1]:
+                self.say(said[1])
         busy = time.perf_counter() - now
         self.longest_step = max(self.longest_step, busy)
         if busy > 0.05:
             log.warning('slow loop step %d ms', busy * 1000)
 
     def close(self):
+        self.sound.stop()
         self.bridge.close()
 
 
