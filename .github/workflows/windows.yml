@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Ubuntu's own Python, because the GTK bindings the Linux app needs only come as system packages.
-      - run: sudo apt-get update && sudo apt-get install -y python3-gi python3-evdev python3-usb
+      - run: sudo apt-get update && sudo apt-get install -y python3-gi python3-evdev python3-usb python3-tk
       - run: python3 -m unittest discover -s desktop/tests -p 'test_*.py'
 
   exe:
