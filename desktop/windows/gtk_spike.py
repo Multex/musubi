@@ -42,7 +42,9 @@ try:
     sys.modules['system'] = system
 
     import window  # noqa: E402
-    from gi.repository import GLib, Gtk  # noqa: E402
+    gi_version = __import__('gi').require_version
+    gi_version('PangoCairo', '1.0')
+    from gi.repository import GLib, Gtk, Pango, PangoCairo  # noqa: E402
 except Exception:
     # A windowed exe has nowhere else to say why GTK did not load.
     log.exception('could not load the window')
@@ -50,6 +52,46 @@ except Exception:
 
 PHONE = {'ip': '192.168.1.11', 'name': 'motorola edge 60 fusion', 'controller': 'Xbox Wireless Controller',
          'controller_known': True, 'rtt': 8, 'audio': True, 'delay': 140}
+
+
+class Text:
+    """A cairo context whose text goes through Pango. Cairo's own text calls, which the drawings use, crash on Windows."""
+
+    def __init__(self, cr):
+        self.cr = cr
+        self.font = Pango.FontDescription()
+        self.font.set_family('Roboto, Segoe UI, sans-serif')
+
+    def __getattr__(self, name):
+        return getattr(self.cr, name)
+
+    def select_font_face(self, family, slant, weight):
+        self.font.set_weight(Pango.Weight.BOLD if weight else Pango.Weight.NORMAL)
+
+    def set_font_size(self, size):
+        self.font.set_absolute_size(size * Pango.SCALE)
+
+    def layout(self, text):
+        layout = PangoCairo.create_layout(self.cr)
+        layout.set_font_description(self.font)
+        layout.set_text(text, -1)
+        return layout
+
+    def text_extents(self, text):
+        ink = self.layout(text).get_pixel_extents()[0]
+        # Pango measures from the top left where cairo measures from the baseline, and show_text below matches it.
+        return types.SimpleNamespace(width=ink.width, height=ink.height, x_bearing=ink.x, y_bearing=ink.y)
+
+    def show_text(self, text):
+        PangoCairo.show_layout(self.cr, self.layout(text))
+
+
+def through_pango(draw):
+    return lambda self, area, cr, *rest: draw(self, area, Text(cr), *rest)
+
+
+for drawing in window.PadArea, window.HeadphonesArea, window.PlayerNumber:
+    drawing.draw = through_pango(drawing.draw)
 
 
 def memory_mb():
