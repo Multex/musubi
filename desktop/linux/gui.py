@@ -15,6 +15,8 @@ from tray import Tray, tray_available
 HERE = Path(__file__).resolve().parent
 RECEIVER = HERE / 'musubi.py'
 # Window commands the hub handles itself. The rest go on to the receiver.
+# How long a hidden start at login waits for the tray host to come up before showing the window instead.
+TRAY_WAIT = 15
 HUB_COMMANDS = ('stop', 'start', 'ignored', 'reload', 'page')
 
 
@@ -92,7 +94,6 @@ class Hub(Gio.Application):
         self.asking = []
         self.watch = False
         self.tray = None
-        self.has_tray = False
 
     def do_activate(self):
         if self.started:
@@ -100,13 +101,23 @@ class Hub(Gio.Application):
             return
         self.started = True
         self.hold()  # The hub has no windows, so without this it would exit right after starting.
-        self.has_tray = tray_available()
-        if self.has_tray:
+        try:
+            # The icon registers itself whenever a tray host appears, even one that starts after us at login.
             self.tray = Tray(self.show_window, self.quit_app)
+        except GLib.Error:
+            self.tray = None
         self.start_receiver()
         self.refresh()
-        if not (self.start_hidden and self.has_tray):
+        if not self.start_hidden or self.tray is None:
             self.show_window()
+        elif not tray_available():
+            GLib.timeout_add_seconds(TRAY_WAIT, self.show_without_tray)
+
+    def show_without_tray(self):
+        """A hidden start with no tray host by now would leave Musubi running with no way back to it."""
+        if not tray_available():
+            self.show_window()
+        return False
 
     def quit_app(self):
         self.stop_receiver()
@@ -233,7 +244,7 @@ class Hub(Gio.Application):
         self.watch = False
         self.send_receiver({'watch': False})
         self.config = system.load_config()
-        if not (self.has_tray and self.config['tray']):
+        if not (self.config['tray'] and self.tray and tray_available()):
             self.quit_app()
 
 
