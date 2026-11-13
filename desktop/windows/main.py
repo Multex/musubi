@@ -24,7 +24,7 @@ except ImportError:
 
 LOG_FILE = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'musubi' / 'musubi.log'
 FIREWALL_HINT_AFTER = 30
-GAP_LOG_AFTER = 0.4  # A connected phone sends its state more often than this.
+GAP_LOG_AFTER = 1.5  # A phone with an idle controller only talks once a second.
 MEMORY_LOG_AFTER = 300
 log = logging.getLogger('musubi')
 

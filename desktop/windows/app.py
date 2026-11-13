@@ -1,6 +1,7 @@
 """Musubi's receiver for Windows, in a small window."""
 import ctypes
 import logging
+import os
 import platform
 import socket
 import sys
@@ -20,6 +21,8 @@ ACTIVE = '#FF9E1B'
 ALERT = '#E04F3E'
 FONT = ('Segoe UI', 10)
 WIDTH = 392  # 440 px window less 24 px padding on each side
+# Explorer on Windows. webbrowser with a file address did nothing there, and it is only kept for trying this on Linux.
+OPEN_FOLDER = getattr(os, 'startfile', webbrowser.open)
 log = logging.getLogger('musubi')
 
 
@@ -112,7 +115,7 @@ def run(make_pad, port, config_path):
     footer.grid(row=9, column=0, sticky='ew')
     footer.columnconfigure(0, weight=1)
     label(footer, f'Test build {BUILD}', MUTED).grid(row=0, column=0, sticky='w')
-    button(footer, 'Open log folder', lambda: webbrowser.open(LOG_FILE.parent.as_uri()), False).grid(row=0, column=1)
+    button(footer, 'Open log folder', lambda: OPEN_FOLDER(str(LOG_FILE.parent)), False).grid(row=0, column=1)
 
     notice = ''
     built = [None, None]

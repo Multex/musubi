@@ -8,6 +8,8 @@ DRIVER_PAGE = 'https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0'
 DLL = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / 'ViGEmClient.dll'
 SUCCESS = 0x20000000
 BUS_NOT_FOUND = 0xE0000001
+# On the user's Windows 11 the first plug-in after a pause timed out (error 0xe0000007) and the next one worked.
+PLUG_TRIES = 3
 # Same bit order as the packet: A, B, X, Y, LB, RB, Back, Start, Guide, left stick, right stick.
 BUTTON_BITS = [0x1000, 0x2000, 0x4000, 0x8000, 0x0100, 0x0200, 0x0020, 0x0010, 0x0400, 0x0040, 0x0080]
 DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT = 0x1, 0x2, 0x4, 0x8
@@ -61,22 +63,28 @@ class Pad:
 
     def __init__(self, on_rumble):
         self.lib = load()
+        self.client = self.target = None
+        for attempt in range(PLUG_TRIES):
+            try:
+                self._plug(on_rumble)
+                return
+            except OSError:
+                self.close()
+                if attempt == PLUG_TRIES - 1:
+                    raise
+
+    def _plug(self, on_rumble):
         self.client = self.lib.vigem_alloc()
-        self.target = None
-        try:
-            error = self.lib.vigem_connect(self.client)
-            if error == BUS_NOT_FOUND:
-                raise OSError(f'The ViGEmBus driver is not installed. Get it from {DRIVER_PAGE}')
-            self._check(error, 'connect to the driver')
-            self.target = self.lib.vigem_target_x360_alloc()
-            self._check(self.lib.vigem_target_add(self.client, self.target), 'plug in the virtual pad')
-            # Kept on self: ctypes frees a callback nobody holds, and the driver would call freed memory.
-            self.notify = NOTIFY(lambda client, target, large, small, led, data: on_rumble(large, small))
-            self._check(self.lib.vigem_target_x360_register_notification(self.client, self.target, self.notify, None),
-                        'listen for rumble')
-        except OSError:
-            self.close()
-            raise
+        error = self.lib.vigem_connect(self.client)
+        if error == BUS_NOT_FOUND:
+            raise OSError(f'The ViGEmBus driver is not installed. Get it from {DRIVER_PAGE}')
+        self._check(error, 'connect to the driver')
+        self.target = self.lib.vigem_target_x360_alloc()
+        self._check(self.lib.vigem_target_add(self.client, self.target), 'plug in the virtual pad')
+        # Kept on self: ctypes frees a callback nobody holds, and the driver would call freed memory.
+        self.notify = NOTIFY(lambda client, target, large, small, led, data: on_rumble(large, small))
+        self._check(self.lib.vigem_target_x360_register_notification(self.client, self.target, self.notify, None),
+                    'listen for rumble')
 
     def _check(self, error, action):
         if error != SUCCESS:
