@@ -94,20 +94,35 @@ jobs:
         shell: pwsh
         run: |
           pip install pyinstaller
-          Get-ChildItem C:\gtk -Recurse -Include 'pygobject*.whl', 'pycairo*.whl' | ForEach-Object { pip install --force-reinstall $_.FullName }
+          Get-ChildItem C:\gtk\wheels -Include 'pygobject*.whl', 'pycairo*.whl' -Recurse | ForEach-Object { pip install --force-reinstall $_.FullName }
+          # Python no longer looks on PATH for the DLLs a module needs, so every Python started here is told where GTK's are.
+          $site = python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
+          "import os; os.add_dll_directory(r'C:\gtk\bin')" | Out-File -Encoding ascii (Join-Path $site 'gtk.pth')
           python -c "import gi; gi.require_version('Gtk', '4.0'); from gi.repository import Gtk; print('GTK', Gtk.get_major_version(), Gtk.get_minor_version(), Gtk.get_micro_version())"
-          pyinstaller --noconfirm --windowed --name Musubi-gtk-test --paths desktop --paths desktop/linux --paths desktop/windows desktop/windows/gtk_spike.py
+          if ($LASTEXITCODE) { throw 'Python cannot load GTK.' }
+          pyinstaller --noconfirm desktop/windows/gtk_spike.spec
           "{0:N1} MB unpacked" -f ((Get-ChildItem dist/Musubi-gtk-test -Recurse | Measure-Object Length -Sum).Sum / 1MB)
       - name: Start the GTK test once
         shell: pwsh
         run: |
           $env:MUSUBI_TEST_SECONDS = '14'
           $test = Start-Process dist/Musubi-gtk-test/Musubi-gtk-test.exe -PassThru
+          Start-Sleep 7
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          $picture = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
+          [System.Drawing.Graphics]::FromImage($picture).CopyFromScreen($screen.Left, $screen.Top, 0, 0, $picture.Size)
+          $picture.Save("$PWD/dist/Musubi-gtk-test/screen.png")
           $closed = $test.WaitForExit(60000)
           $log = "$env:LOCALAPPDATA/musubi/gtk-test.log"
           Get-Content $log -ErrorAction SilentlyContinue
           if (-not $closed) { Stop-Process $test; throw 'The GTK test did not close by itself.' }
           if (-not (Select-String -Path $log -Pattern 'after 10 s' -Quiet)) { throw 'The GTK window never opened.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Musubi-gtk-screen
+          path: dist/Musubi-gtk-test/screen.png
       - uses: actions/upload-artifact@v4
         with:
           name: Musubi-gtk-test

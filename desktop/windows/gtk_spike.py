@@ -12,28 +12,39 @@ STARTED = time.perf_counter()
 DESKTOP = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(DESKTOP), str(DESKTOP / 'linux')]
 
-import core  # noqa: E402
-
 LOG_FILE = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'musubi' / 'gtk-test.log'
 log = logging.getLogger('musubi')
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
+handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+log.addHandler(handler)
+log.setLevel(logging.INFO)
+log.info('gtk test, python %s', sys.version.split()[0])
 
-# The window reads the firewall, the autostart and the network through Linux's system.py, so this stands in for it.
-system = types.ModuleType('system')
-system.PORT = core.PORT
-system.load_config = lambda: {'phones': {}, 'tray': True, 'sound_enabled': True}
-system.save_config = lambda config: None
-system.read_network = lambda: ('192.168.1.12', ipaddress.ip_network('192.168.1.0/24'))
-system.firewall_status = lambda: ('none', [])
-system.blocked_sources = lambda text: set()
-system.covers = lambda sources, network: True
-system.open_port_command = lambda network: []
-system.autostart_enabled = lambda: False
-system.set_autostart = lambda enabled: None
-system.startup_command = lambda: ''
-sys.modules['system'] = system
+try:
+    import core  # noqa: E402
 
-import window  # noqa: E402
-from gi.repository import GLib  # noqa: E402
+    # The window reads the firewall, the autostart and the network through Linux's system.py, so this stands in.
+    system = types.ModuleType('system')
+    system.PORT = core.PORT
+    system.load_config = lambda: {'phones': {}, 'tray': True, 'sound_enabled': True}
+    system.save_config = lambda config: None
+    system.read_network = lambda: ('192.168.1.12', ipaddress.ip_network('192.168.1.0/24'))
+    system.firewall_status = lambda: ('none', [])
+    system.blocked_sources = lambda text: set()
+    system.covers = lambda sources, network: True
+    system.open_port_command = lambda network: []
+    system.autostart_enabled = lambda: False
+    system.set_autostart = lambda enabled: None
+    system.startup_command = lambda: ''
+    sys.modules['system'] = system
+
+    import window  # noqa: E402
+    from gi.repository import GLib, Gtk  # noqa: E402
+except Exception:
+    # A windowed exe has nowhere else to say why GTK did not load.
+    log.exception('could not load the window')
+    raise
 
 PHONE = {'ip': '192.168.1.11', 'name': 'motorola edge 60 fusion', 'controller': 'Xbox Wireless Controller',
          'controller_known': True, 'rtt': 8, 'audio': True, 'delay': 140}
@@ -84,12 +95,7 @@ class Spike(window.App):
 
 
 def main():
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
-    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
-    log.addHandler(handler)
-    log.setLevel(logging.INFO)
-    log.info('gtk test, python %s', sys.version.split()[0])
+    log.info('GTK %s.%s.%s', Gtk.get_major_version(), Gtk.get_minor_version(), Gtk.get_micro_version())
     try:
         Spike().run([])
     except Exception:
