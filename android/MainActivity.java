@@ -1725,6 +1725,7 @@ public class MainActivity extends Activity {
     private TextView settingsNote(String value) {
         TextView view = detail(value);
         view.setLineSpacing(0, 1.35f);
+        view.setPadding(0, dp(2), 0, 0);
         return view;
     }
 
@@ -1938,7 +1939,7 @@ public class MainActivity extends Activity {
         body.addView(detail(n > 1 ? "More controllers at once are coming in a later version."
             : connected ? "Player 1 · games see Xbox 360 controller 1"
             : "Turn on a controller paired with this phone. Games will see it as Xbox 360 controller 1."));
-        if (n == 1 && connected && !canVibrate(deviceId)) body.addView(detail("Can't vibrate over Bluetooth"));
+        if (n == 1 && connected && !canVibrate(deviceId)) body.addView(detail("Needs a newer Android to vibrate"));
         if (n > 1) {
             body.addView(new View(this), weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
         } else {
@@ -2276,7 +2277,7 @@ public class MainActivity extends Activity {
         reset.setAlpha(canReset ? 1 : 0.5f);
         controllerSection.addView(spaced(reset, 44));
         boolean stuck = controller && !canVibrate(deviceId);
-        LinearLayout vibrationRow = prefRow("Vibration", stuck ? deviceName + " can't vibrate over Bluetooth" : "Rumble from games", "vibration",
+        LinearLayout vibrationRow = prefRow("Vibration", stuck ? deviceName + " needs a newer Android to vibrate" : "Rumble from games", "vibration",
             () -> {
                 vibration = prefs.getBoolean("vibration", true);
                 render();
@@ -2286,7 +2287,7 @@ public class MainActivity extends Activity {
             toggle.setEnabled(false);
             toggle.setAlpha(0.5f);
         }
-        vibrationRow.setPadding(0, dp(8), 0, 0);
+        vibrationRow.setPadding(0, dp(12), 0, dp(6));
         controllerSection.addView(vibrationRow);
         if (vibration && !stuck) {
             if (!controller || canVaryStrength(deviceId)) {
@@ -2303,6 +2304,7 @@ public class MainActivity extends Activity {
         gameSection.addView(sectionHeading("Game mode", false, ICON_HALF, null));
         LinearLayout autoRow = row();
         autoRow.setMinimumHeight(dp(52));
+        autoRow.setPadding(0, dp(6), 0, dp(6));
         LinearLayout autoText = column();
         TextView autoTitle = text("Turn on by itself", 15, TEXT);
         autoTitle.setTypeface(medium());
@@ -2394,7 +2396,7 @@ public class MainActivity extends Activity {
         dotParams.leftMargin = dotParams.rightMargin = dp(4);
         row.addView(dot, dotParams);
         LinearLayout text = column();
-        text.setPadding(dp(12), dp(4), 0, dp(4));
+        text.setPadding(dp(12), dp(6), 0, dp(6));
         TextView name = text(title, 15, TEXT);
         name.setTypeface(medium());
         text.addView(name);
@@ -2456,7 +2458,7 @@ public class MainActivity extends Activity {
         LinearLayout box = column();
         box.setPadding(0, dp(8), 0, 0);
         LinearLayout labels = row();
-        TextView name = text("Strength", 14, TEXT);
+        TextView name = text("Strength", 15, TEXT);
         name.setTypeface(medium());
         labels.addView(name, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView value = mono(vibrationStrength + "%");
@@ -2488,7 +2490,7 @@ public class MainActivity extends Activity {
         LinearLayout box = column();
         box.setPadding(0, dp(8), 0, 0);
         LinearLayout labels = row();
-        TextView name = text("Stick deadzone", 14, TEXT);
+        TextView name = text("Stick deadzone", 15, TEXT);
         name.setTypeface(medium());
         labels.addView(name, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         int percent = Math.round(deadzone * 100);
@@ -2540,6 +2542,7 @@ public class MainActivity extends Activity {
     private LinearLayout prefRow(String title, String note, String key, Runnable changed) {
         LinearLayout row = row();
         row.setMinimumHeight(dp(52));
+        row.setPadding(0, dp(6), 0, dp(6));
         LinearLayout text = column();
         TextView name = text(title, 15, TEXT);
         name.setTypeface(medium());
