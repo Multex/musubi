@@ -41,9 +41,11 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.SpannableString;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.text.format.DateFormat;
+import android.text.style.ForegroundColorSpan;
 import android.util.Log;
 import android.util.Patterns;
 import android.util.TypedValue;
@@ -53,6 +55,7 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
@@ -180,6 +183,7 @@ public class MainActivity extends Activity {
     private static final int CONNECTING = 0, RESPONDING = 1, LOST = 2;
     private static final int PRIMARY = 0, SECONDARY = 1, PLAIN = 2;
     private static final int ICON_DOWN = 0, ICON_RIGHT = 1, ICON_LEFT = 2, ICON_ARROW_UP = 3, ICON_ARROW_DOWN = 4;
+    private static final int ICON_SQUARE = 5, ICON_HALF = 6, ICON_INFO = 7, ICON_SLIDERS = 8;
     private static final int NODE_LIVE = 0, NODE_IDLE = 1, NODE_LATER = 2;
     // How often the player thread re-measures the delay, in 5 ms chunks.
     private static final int DELAY_EVERY = 50;
@@ -248,6 +252,8 @@ public class MainActivity extends Activity {
     private final List<Pc> pcs = new ArrayList<>();
     private int selectedPc;
     private boolean autoGameMode;
+    private volatile boolean vibration = true;
+    private volatile int vibrationStrength = 100;
 
     private volatile int deviceId = -1;
     private volatile String deviceName;
@@ -258,6 +264,8 @@ public class MainActivity extends Activity {
     private String unmapped;
 
     private int screen = HOME;
+    private int renderedScreen = -1;
+    private ScrollView scroller;
     private int gameFrom = HOME;
     private int selectedPlayer = 1;
     private int shownPcState = -1;
@@ -268,7 +276,7 @@ public class MainActivity extends Activity {
 
     private PadView padView;
     private float rumbleStrong, rumbleWeak;
-    private TextView readout, pcDetail, soundName, soundDetail;
+    private TextView readout, pcDetail, settingsPing, soundName, soundDetail;
     private TextView earbudsName, earbudsDetail, soundReadout, soundStatus;
     private HeadphonesView headphones;
 
@@ -325,7 +333,6 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         // Without this, Wi-Fi power saving batches packets and adds tens of milliseconds.
         wifiLock = wifi.createWifiLock(
@@ -335,6 +342,8 @@ public class MainActivity extends Activity {
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         prefs = getPreferences(MODE_PRIVATE);
         autoGameMode = prefs.getBoolean("autoGameMode", true);
+        vibration = prefs.getBoolean("vibration", true);
+        vibrationStrength = prefs.getInt("vibration_strength", 100);
         soundOn = prefs.getBoolean("sound", false);
         speaker = prefs.getBoolean("speaker", false);
         // Registered for the app's whole life, since the sound also plays in the background.
@@ -378,7 +387,7 @@ public class MainActivity extends Activity {
         axisButtons = 0;
         clearInput();
         // Connected, so keep the PC's sound playing; the sender keeps the neutral pad alive on the PC.
-        if (pcState() == RESPONDING) enterBackground();
+        if (prefs.getBoolean("background", true) && pcState() == RESPONDING) enterBackground();
         else stopAll();
     }
 
@@ -642,8 +651,9 @@ public class MainActivity extends Activity {
                 onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
             } else if (length >= RUMBLE_SIZE && magic == ByteBuffer.wrap(RUMBLE_MAGIC).getInt()) {
                 // The pad's input doesn't reach the PC from the background, so neither does its rumble.
-                if (running && !backgrounded) {
-                    int strong = in.getShort() & 0xffff, weak = in.getShort() & 0xffff, ms = in.getShort() & 0xffff;
+                if (running && !backgrounded && vibration) {
+                    int scale = vibrationStrength;
+                    int strong = (in.getShort() & 0xffff) * scale / 100, weak = (in.getShort() & 0xffff) * scale / 100, ms = in.getShort() & 0xffff;
                     rumble(deviceId, strong, weak, ms);
                     handler.post(() -> showRumble(strong, weak, ms));
                 }
@@ -724,6 +734,27 @@ public class MainActivity extends Activity {
                 if (((int[]) manager.getClass().getMethod("getVibratorIds").invoke(manager)).length > 0) return true;
             }
             return device.getVibrator().hasVibrator();
+        } catch (ReflectiveOperationException | RuntimeException ex) {
+            return false;
+        }
+    }
+
+    /** True only when the pad's vibrator(s) can vary amplitude; some Bluetooth pads are on/off. Always false below API 26. */
+    private static boolean canVaryStrength(int id) {
+        if (Build.VERSION.SDK_INT < 26) return false;
+        InputDevice device = InputDevice.getDevice(id);
+        try {
+            if (device == null) return false;
+            if (Build.VERSION.SDK_INT >= 31) {
+                Object manager = InputDevice.class.getMethod("getVibratorManager").invoke(device);
+                int[] ids = (int[]) manager.getClass().getMethod("getVibratorIds").invoke(manager);
+                for (int vid : ids) {
+                    Vibrator v = (Vibrator) manager.getClass().getMethod("getVibrator", int.class).invoke(manager, vid);
+                    if (v.hasAmplitudeControl()) return true;
+                }
+                if (ids.length > 0) return false;
+            }
+            return device.getVibrator().hasAmplitudeControl();
         } catch (ReflectiveOperationException | RuntimeException ex) {
             return false;
         }
@@ -1252,9 +1283,13 @@ public class MainActivity extends Activity {
         refreshOutput();
         if (state != shownPcState) {
             shownPcState = state;
-            if (((screen == CONTROLLERS || screen == HOME || screen == HEADPHONES) && currentPc() != null) || screen == GAME) render();
+            if (((screen == CONTROLLERS || screen == HOME || screen == HEADPHONES) && currentPc() != null) || screen == GAME || screen == SETTINGS) render();
         }
         if (pcDetail != null) pcDetail.setText(pcDetailText(state));
+        if (settingsPing != null) {
+            CharSequence ping = pcUseText(savedPc());
+            if (!ping.toString().contentEquals(settingsPing.getText())) settingsPing.setText(ping);
+        }
         updateSound();
         updateReadout(true);
         if ((screen == CONTROLLERS || screen == HOME) && autoGameMode && deviceId != -1 && currentPc() != null
@@ -1389,9 +1424,12 @@ public class MainActivity extends Activity {
     }
 
     private void render() {
+        int keepScroll = renderedScreen == screen && scroller != null ? scroller.getScrollY() : 0;
+        scroller = null;
         padView = null;
         readout = null;
         pcDetail = null;
+        settingsPing = null;
         soundName = null;
         soundDetail = null;
         earbudsName = null;
@@ -1412,14 +1450,27 @@ public class MainActivity extends Activity {
             case HEADPHONES: setContentView(buildHeadphones()); break;
             default: setContentView(currentPc() != null ? buildControllers(currentPc()) : buildMain()); break;
         }
+        renderedScreen = screen;
+        if (keepScroll > 0 && scroller != null) {
+            ScrollView fresh = scroller;
+            fresh.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+                @Override public boolean onPreDraw() {
+                    fresh.getViewTreeObserver().removeOnPreDrawListener(this);
+                    fresh.scrollTo(0, keepScroll);
+                    return true;
+                }
+            });
+        }
         pushPadState();
         updateSound();
         updateReadout(true);
     }
 
     private void applyGameWindow(boolean game) {
+        if (game || prefs.getBoolean("keep_screen", true)) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WindowManager.LayoutParams attributes = getWindow().getAttributes();
-        attributes.screenBrightness = game ? 0.01f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        attributes.screenBrightness = game ? prefs.getInt("game_brightness", 1) / 100f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
         getWindow().setAttributes(attributes);
         getWindow().getDecorView().setSystemUiVisibility(game
             ? View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -1530,9 +1581,9 @@ public class MainActivity extends Activity {
 
         LinearLayout features = column();
         features.setAlpha(lost ? 0.45f : 1);
-        features.addView(strand(toControllers, 26, node(answering && players > 0 ? NODE_LIVE : NODE_IDLE, true), 24, toSound, controllers, true));
-        features.addView(strand(toSound, 26, node(soundLive ? NODE_LIVE : NODE_IDLE, false), 24, BORDER, sound, true));
-        features.addView(strand(BORDER, 26, node(NODE_LATER, true), 24, 0, mic, true));
+        features.addView(strand(toControllers, 26, node(answering && players > 0 ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), 24, toSound, controllers, true));
+        features.addView(strand(toSound, 26, node(soundLive ? NODE_LIVE : NODE_IDLE, ICON_ARROW_DOWN), 24, BORDER, sound, true));
+        features.addView(strand(BORDER, 26, node(NODE_LATER, ICON_ARROW_UP), 24, 0, mic, true));
 
         LinearLayout cord = column();
         cord.setPadding(dp(16), dp(16), dp(16), 0);
@@ -1578,7 +1629,7 @@ public class MainActivity extends Activity {
         return line;
     }
 
-    private View node(int kind, boolean up) {
+    private View node(int kind, int icon) {
         FrameLayout node = new FrameLayout(this);
         GradientDrawable shape = new GradientDrawable();
         shape.setShape(GradientDrawable.OVAL);
@@ -1591,7 +1642,7 @@ public class MainActivity extends Activity {
         }
         node.setBackground(shape);
         int arrow = kind == NODE_LIVE ? BACKGROUND : kind == NODE_IDLE ? MUTED : IDLE;
-        node.addView(new IconView(this, up ? ICON_ARROW_UP : ICON_ARROW_DOWN, arrow),
+        node.addView(new IconView(this, icon, arrow),
             new FrameLayout.LayoutParams(dp(12), dp(12), Gravity.CENTER));
         return node;
     }
@@ -1631,6 +1682,13 @@ public class MainActivity extends Activity {
     private TextView detail(String value) {
         TextView view = text(value, 13, MUTED);
         view.setLineSpacing(0, 1.4f);
+        return view;
+    }
+
+    /** Settings-only detail line: the design's tighter 1.35 line spacing. */
+    private TextView settingsNote(String value) {
+        TextView view = detail(value);
+        view.setLineSpacing(0, 1.35f);
         return view;
     }
 
@@ -1812,7 +1870,7 @@ public class MainActivity extends Activity {
         aboutNote.setPadding(0, dp(8), 0, 0);
         about.addView(aboutNote);
         body.addView(divided(about));
-        return withHeader("Headphones", node(soundLive() ? NODE_LIVE : NODE_IDLE, false), () -> show(HOME), body);
+        return withHeader("Headphones", node(soundLive() ? NODE_LIVE : NODE_IDLE, ICON_ARROW_DOWN), () -> show(HOME), body);
     }
 
     /** Spec 4.3. Until multi-pad ships only player 1 is real; players 2 to 4 are placeholders. */
@@ -1878,7 +1936,7 @@ public class MainActivity extends Activity {
         page.addView(strip);
         page.addView(cordLine(BORDER), buttonParams(1));
         page.addView(body, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
-        LinearLayout root = (LinearLayout) withHeader("Controllers", node(shownPcState == RESPONDING && deviceId != -1 ? NODE_LIVE : NODE_IDLE, true), () -> show(HOME), page);
+        LinearLayout root = (LinearLayout) withHeader("Controllers", node(shownPcState == RESPONDING && deviceId != -1 ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), () -> show(HOME), page);
         LinearLayout header = (LinearLayout) root.getChildAt(0);
         header.getChildAt(0).setContentDescription("Back to " + pc.name);
         header.addView(new View(this), weighted(0, 0));
@@ -1940,7 +1998,15 @@ public class MainActivity extends Activity {
     /** Styled like the player strip: the chosen output gets the surface fill and a cream bottom edge. */
     private Button outputTab(String label, boolean forSpeaker) {
         Button tab = button(label, PLAIN, () -> setSpeaker(forSpeaker));
-        boolean chosen = forSpeaker == useSpeaker();
+        styleTab(tab, forSpeaker == useSpeaker());
+        if (forSpeaker && Build.VERSION.SDK_INT < 23) {
+            tab.setEnabled(false);
+            tab.setAlpha(0.5f);
+        }
+        return tab;
+    }
+
+    private void styleTab(Button tab, boolean chosen) {
         tab.setSelected(chosen);
         tab.setTextColor(chosen ? TEXT : MUTED);
         if (chosen) {
@@ -1949,11 +2015,6 @@ public class MainActivity extends Activity {
             fill.setLayerInset(1, 0, dp(42), 0, 0);
             tab.setBackground(ripple(fill));
         }
-        if (forSpeaker && Build.VERSION.SDK_INT < 23) {
-            tab.setEnabled(false);
-            tab.setAlpha(0.5f);
-        }
-        return tab;
     }
 
     private void startRemap() {
@@ -2108,55 +2169,209 @@ public class MainActivity extends Activity {
 
     private View buildSettings() {
         LinearLayout pcSection = column();
-        pcSection.addView(sectionTitle("PCs", false));
+        pcSection.addView(sectionHeading("PCs", shownPcState == RESPONDING, ICON_SQUARE, null));
         for (int i = 0; i < pcs.size(); i++) {
             pcSection.addView(pcSettingsRow(i));
         }
-        pcSection.addView(spaced(button("Add PC", SECONDARY, () -> editPc(-1)), 44));
+        View addPc = spaced(button("Add PC", SECONDARY, () -> editPc(-1)), 44);
+        ((LinearLayout.LayoutParams) addPc.getLayoutParams()).topMargin = dp(4);
+        pcSection.addView(addPc);
+        TextView cableNote = settingsNote("A USB cable always wins over Wi-Fi while it's plugged in.");
+        cableNote.setPadding(0, dp(10), 0, 0);
+        pcSection.addView(cableNote);
 
-        pcSection.addView(sectionTitle("Button layout", true));
-        LinearLayout layoutRow = row();
-        layoutRow.setMinimumHeight(dp(52));
-        LinearLayout layoutText = column();
-        TextView layoutName = text(hasCustomMap() ? "Custom" : "Default", 15, TEXT);
-        layoutName.setTypeface(medium());
-        layoutText.addView(layoutName);
-        layoutText.addView(text(deviceName != null ? "For " + deviceName : "Connect a controller to change it", 12, MUTED));
-        layoutRow.addView(layoutText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
-        Button reset = button("Reset", SECONDARY, () -> {
+        // Until multi-pad ships at most one controller is connected.
+        boolean controller = deviceId != -1;
+        LinearLayout generalSection = column();
+        generalSection.addView(sectionHeading("General", false, ICON_SLIDERS, null));
+        generalSection.addView(prefRow("Keep the screen on", "While Musubi is open. Game mode always keeps it on.", "keep_screen",
+            () -> applyGameWindow(screen == GAME)));
+        generalSection.addView(prefRow("Play in the background", "PC sound keeps playing after you leave Musubi. Controllers wait until you're back.", "background", null));
+
+        LinearLayout controllerSection = column();
+        controllerSection.addView(sectionHeading("Controllers", controller, ICON_ARROW_UP, controller ? "1 connected" : null));
+        TextView layouts = text("Button layouts", 15, TEXT);
+        layouts.setTypeface(medium());
+        layouts.setPadding(0, dp(4), 0, 0);
+        controllerSection.addView(layouts);
+        controllerSection.addView(settingsNote("Each controller keeps its own layout. Change one from Controllers, on its player, with Remap."));
+        boolean canReset = controller && hasCustomMap();
+        Button reset = button("Reset layout", SECONDARY, () -> {
             resetLayout();
             render();
         });
-        reset.setEnabled(hasCustomMap());
-        reset.setAlpha(hasCustomMap() ? 1 : 0.5f);
-        layoutRow.addView(reset, new LinearLayout.LayoutParams(dp(84), dp(44)));
-        pcSection.addView(layoutRow);
+        reset.setEnabled(canReset);
+        reset.setAlpha(canReset ? 1 : 0.5f);
+        controllerSection.addView(spaced(reset, 44));
+        boolean stuck = controller && !canVibrate(deviceId);
+        LinearLayout vibrationRow = prefRow("Vibration", stuck ? deviceName + " can't vibrate over Bluetooth" : "Rumble from games", "vibration",
+            () -> {
+                vibration = prefs.getBoolean("vibration", true);
+                render();
+            });
+        if (stuck) {
+            View toggle = vibrationRow.getChildAt(1);
+            toggle.setEnabled(false);
+            toggle.setAlpha(0.5f);
+        }
+        vibrationRow.setPadding(0, dp(8), 0, 0);
+        controllerSection.addView(vibrationRow);
+        boolean strength = false;
+        if (vibration && !stuck) {
+            if (!controller || canVaryStrength(deviceId)) {
+                controllerSection.addView(strengthRow(controller));
+                strength = true;
+            } else {
+                LinearLayout testRow = row();
+                testRow.addView(testButton());
+                controllerSection.addView(testRow);
+            }
+        }
 
-        LinearLayout otherSection = column();
-        otherSection.addView(sectionTitle("Game mode", false));
-        Switch auto = new Switch(this);
+        LinearLayout gameSection = column();
+        gameSection.addView(sectionHeading("Game mode", false, ICON_HALF, null));
+        LinearLayout autoRow = row();
+        autoRow.setMinimumHeight(dp(52));
+        LinearLayout autoText = column();
+        TextView autoTitle = text("Turn on by itself", 15, TEXT);
+        autoTitle.setTypeface(medium());
+        autoText.addView(autoTitle);
+        autoText.addView(settingsNote("After 1 minute without touching the screen, while a controller is connected"));
+        autoRow.addView(autoText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        SwitchView auto = new SwitchView(this);
         auto.setChecked(autoGameMode);
-        auto.setText("Turn on by itself after 1 minute without touching the screen");
-        auto.setTextColor(TEXT);
-        auto.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        auto.setMinimumHeight(dp(52));
+        auto.setContentDescription("Turn on game mode by itself");
+        auto.setBackground(ripple(new ColorDrawable(0)));
         auto.setOnCheckedChangeListener((view, checked) -> {
             autoGameMode = checked;
             prefs.edit().putBoolean("autoGameMode", checked).apply();
         });
-        otherSection.addView(auto);
-        otherSection.addView(sectionTitle("About", true));
-        otherSection.addView(link("PC setup guide", REPO + "#setup"));
-        otherSection.addView(link("Source code", REPO));
-        TextView version = text("Musubi " + versionName() + " · MIT license", 12, MUTED);
-        version.setTypeface(Typeface.MONOSPACE);
+        autoRow.addView(auto, gapped(56, 44));
+        gameSection.addView(autoRow);
+
+        LinearLayout brightness = column();
+        brightness.setPadding(0, dp(8), 0, 0);
+        TextView brightnessTitle = text("Screen brightness", 15, TEXT);
+        brightnessTitle.setTypeface(medium());
+        brightness.addView(brightnessTitle);
+        brightness.addView(settingsNote("Lowest saves the most battery."));
+        LinearLayout levels = row();
+        levels.setPadding(0, dp(6), 0, 0);
+        int[] percents = {1, 5, 15, 30};
+        for (int i = 0; i < percents.length; i++) {
+            int percent = percents[i];
+            Button level = button(percent + "%", PLAIN, () -> {
+                prefs.edit().putInt("game_brightness", percent).apply();
+                render();
+            });
+            boolean chosen = percent == prefs.getInt("game_brightness", 1);
+            level.setSelected(chosen);
+            level.setTypeface(Typeface.MONOSPACE);
+            level.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            level.setTextColor(chosen ? BACKGROUND : TEXT);
+            GradientDrawable outline = new GradientDrawable();
+            outline.setCornerRadius(dp(6));
+            outline.setColor(chosen ? TEXT : 0);
+            outline.setStroke(dp(1), chosen ? TEXT : IDLE);
+            level.setBackground(ripple(outline));
+            level.setContentDescription("Screen brightness " + percent + "%");
+            if (i > 0) levels.addView(new View(this), new LinearLayout.LayoutParams(dp(6), 0));
+            levels.addView(level, weighted(0, dp(44)));
+        }
+        brightness.addView(levels);
+        gameSection.addView(brightness);
+
+        LinearLayout aboutSection = column();
+        aboutSection.addView(sectionHeading("About", false, ICON_INFO, null));
+        aboutSection.addView(link("PC setup guide", REPO + "#setup"));
+        aboutSection.addView(link("Source code", REPO));
+        TextView version = mono("Musubi " + versionName() + " · MIT license");
         version.setPadding(0, dp(8), 0, 0);
-        otherSection.addView(version);
+        aboutSection.addView(version);
 
         LinearLayout body = column();
-        body.addView(padded(pcSection));
-        body.addView(padded(otherSection));
+        View[] sections = {pcSection, generalSection, controllerSection, gameSection, aboutSection};
+        for (int i = 0; i < sections.length; i++) {
+            if (i > 0) body.addView(cordLine(BORDER), buttonParams(1));
+            sections[i].setPadding(dp(16), dp(16), dp(16), dp(12));
+            body.addView(sections[i]);
+        }
+        // The 44dp slider already carries its own air below the track.
+        if (strength) controllerSection.setPadding(dp(16), dp(16), dp(16), dp(4));
         return withHeader("Settings", null, () -> show(HOME), body);
+    }
+
+    private Button testButton() {
+        Button test = button("Test", SECONDARY, () -> {
+            int level = 65535 * vibrationStrength / 100;
+            rumble(deviceId, level, level, 500);
+        });
+        test.setContentDescription("Test vibration");
+        test.setPadding(dp(14), 0, dp(14), 0);
+        test.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
+        return test;
+    }
+
+    private LinearLayout strengthRow(boolean withTest) {
+        LinearLayout box = column();
+        box.setPadding(0, dp(8), 0, 0);
+        LinearLayout labels = row();
+        TextView name = text("Strength", 14, TEXT);
+        name.setTypeface(medium());
+        labels.addView(name, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView value = mono(vibrationStrength + "%");
+        value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        labels.addView(value);
+        if (withTest) {
+            Button test = testButton();
+            ((LinearLayout.LayoutParams) test.getLayoutParams()).leftMargin = dp(12);
+            labels.addView(test);
+        }
+        box.addView(labels);
+
+        StrengthView bar = new StrengthView(this, vibrationStrength);
+        bar.setListener(new StrengthView.Listener() {
+            @Override public void onChange(int strength) {
+                vibrationStrength = strength;
+                value.setText(strength + "%");
+                prefs.edit().putInt("vibration_strength", strength).apply();
+            }
+            @Override public void onHold(boolean held) {
+                value.setTextColor(held ? ACTIVE : MUTED);
+            }
+        });
+        box.addView(bar, buttonParams(44));
+        return box;
+    }
+
+    private LinearLayout prefRow(String title, String note, String key, Runnable changed) {
+        LinearLayout row = row();
+        row.setMinimumHeight(dp(52));
+        LinearLayout text = column();
+        TextView name = text(title, 15, TEXT);
+        name.setTypeface(medium());
+        text.addView(name);
+        text.addView(settingsNote(note));
+        row.addView(text, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        SwitchView toggle = new SwitchView(this);
+        toggle.setChecked(prefs.getBoolean(key, true));
+        toggle.setContentDescription(title);
+        toggle.setBackground(ripple(new ColorDrawable(0)));
+        toggle.setOnCheckedChangeListener((view, checked) -> {
+            prefs.edit().putBoolean(key, checked).apply();
+            if (changed != null) changed.run();
+        });
+        row.addView(toggle, gapped(56, 44));
+        return row;
+    }
+
+    /** "In use · 8 ms" in amber while this PC answers, plain "In use" otherwise. */
+    private CharSequence pcUseText(Pc pc) {
+        String ip = pc.ip + " · ";
+        if (pc != currentPc() || shownPcState != RESPONDING) return ip + "In use";
+        SpannableString line = new SpannableString(ip + "In use · " + rttMs + " ms");
+        line.setSpan(new ForegroundColorSpan(ACTIVE), ip.length(), line.length(), 0);
+        return line;
     }
 
     private View pcSettingsRow(int index) {
@@ -2166,8 +2381,11 @@ public class MainActivity extends Activity {
         TextView name = text(pc.name, 15, TEXT);
         name.setTypeface(medium());
         labels.addView(name);
-        TextView detail = text(pc.ip + (index == selectedPc ? " · In use" : ""), 12, MUTED);
-        detail.setTypeface(Typeface.MONOSPACE);
+        TextView detail = mono(pc.ip);
+        if (index == selectedPc) {
+            detail.setText(pcUseText(pc));
+            settingsPing = detail;
+        }
         labels.addView(detail);
         row.addView(labels, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         row.addView(new IconView(this, ICON_RIGHT), new LinearLayout.LayoutParams(dp(20), dp(20)));
@@ -2256,6 +2474,8 @@ public class MainActivity extends Activity {
     }
 
     private static Typeface medium() {
+        // Some vendor fonts map "sans-serif-medium" to regular; the weight API is exact.
+        if (Build.VERSION.SDK_INT >= 28) return Typeface.create(Typeface.DEFAULT, 500, false);
         return Typeface.create("sans-serif-medium", Typeface.NORMAL);
     }
 
@@ -2291,7 +2511,9 @@ public class MainActivity extends Activity {
     private ScrollView scrolling(View content) {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
         scroll.addView(content);
+        scroller = scroll;
         return scroll;
     }
 
@@ -2337,10 +2559,21 @@ public class MainActivity extends Activity {
         return wrapper;
     }
 
-    private View sectionTitle(String title, boolean separated) {
-        TextView view = text(title, 12, MUTED);
-        view.setPadding(0, separated ? dp(20) : 0, 0, dp(4));
-        return view;
+    /** A Settings section heading: a small cord node, the title, then an optional amber note on the right. */
+    private LinearLayout sectionHeading(String title, boolean live, int icon, String note) {
+        LinearLayout heading = row();
+        heading.setPadding(0, 0, 0, dp(4));
+        heading.addView(node(live ? NODE_LIVE : NODE_IDLE, icon), new LinearLayout.LayoutParams(dp(24), dp(24)));
+        TextView label = text(title, 14, TEXT);
+        label.setTypeface(medium());
+        label.setPadding(dp(10), 0, 0, 0);
+        heading.addView(label, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        if (note != null) {
+            TextView noteView = mono(note);
+            noteView.setTextColor(ACTIVE);
+            heading.addView(noteView);
+        }
+        return heading;
     }
 
     private Drawable ripple(Drawable content) {
@@ -2514,7 +2747,7 @@ public class MainActivity extends Activity {
 
     private static final class IconView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Path path = new Path();
+        private final Path path = new Path(), fill = new Path();
 
         IconView(Context context, int kind) {
             this(context, kind, kind == ICON_LEFT ? TEXT : MUTED);
@@ -2534,6 +2767,26 @@ public class MainActivity extends Activity {
                 path.moveTo(4.2f, wing);
                 path.lineTo(10, tip);
                 path.lineTo(15.8f, wing);
+            } else if (kind == ICON_SQUARE) {
+                fill.addRoundRect(new RectF(5, 5, 15, 15), 1.7f, 1.7f, Path.Direction.CW);
+            } else if (kind == ICON_HALF) {
+                paint.setStrokeWidth(2.5f);
+                path.addCircle(10, 10, 6.7f, Path.Direction.CW);
+                fill.addArc(new RectF(3.3f, 3.3f, 16.7f, 16.7f), 90, 180);
+                fill.close();
+            } else if (kind == ICON_INFO) {
+                paint.setStrokeWidth(3.3f);
+                path.moveTo(10, 9.2f);
+                path.lineTo(10, 16.7f);
+                fill.addCircle(10, 4.7f, 2, Path.Direction.CW);
+            } else if (kind == ICON_SLIDERS) {
+                paint.setStrokeWidth(2 * 20 / 12f);
+                path.moveTo(3.3f, 6);
+                path.lineTo(16.7f, 6);
+                path.moveTo(3.3f, 14);
+                path.lineTo(16.7f, 14);
+                fill.addCircle(7, 6, 3.3f, Path.Direction.CW);
+                fill.addCircle(13, 14, 3.3f, Path.Direction.CW);
             } else if (kind == ICON_DOWN) {
                 path.moveTo(5, 8);
                 path.lineTo(10, 13);
@@ -2554,7 +2807,164 @@ public class MainActivity extends Activity {
             canvas.save();
             canvas.scale(getWidth() / 20f, getHeight() / 20f);
             canvas.drawPath(path, paint);
+            paint.setStyle(Paint.Style.FILL);
+            canvas.drawPath(fill, paint);
+            paint.setStyle(Paint.Style.STROKE);
             canvas.restore();
+        }
+    }
+
+    /** Strength slider, 10..100 in steps of 10. A zigzag line replaces the fill while the finger is down. */
+    private static final class StrengthView extends View {
+        interface Listener {
+            void onChange(int strength);
+            void onHold(boolean held);
+        }
+
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path zigzag = new Path();
+        private final float d = getResources().getDisplayMetrics().density;
+        private Listener listener;
+        private int strength;
+        private boolean held, jitterUp, still;
+        private final Runnable jitter = new Runnable() {
+            @Override public void run() {
+                jitterUp = !jitterUp;
+                invalidate();
+                // Half period: 140ms per cycle at 10%, 80ms at 100%.
+                postDelayed(this, (long) (70 - (strength - 10) / 90f * 30));
+            }
+        };
+
+        StrengthView(Context context, int strength) {
+            super(context);
+            this.strength = strength;
+            setFocusable(true);
+            setContentDescription(description());
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.MITER);
+        }
+
+        void setListener(Listener listener) {
+            this.listener = listener;
+        }
+
+        private String description() {
+            return "Vibration strength, " + strength + "%";
+        }
+
+        private void setStrength(int next) {
+            next = Math.max(10, Math.min(100, next));
+            if (next == strength) return;
+            strength = next;
+            setContentDescription(description());
+            if (listener != null) listener.onChange(strength);
+            invalidate();
+        }
+
+        private void setHeld(boolean down) {
+            if (held == down) return;
+            held = down;
+            removeCallbacks(jitter);
+            if (down) {
+                still = android.provider.Settings.Global.getFloat(getContext().getContentResolver(),
+                    android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f;
+                if (!still) postDelayed(jitter, 70);
+            }
+            if (listener != null) listener.onHold(down);
+            invalidate();
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent event) {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+                    setHeld(true);
+                    // fall through
+                case MotionEvent.ACTION_MOVE:
+                    float r = 11 * d, span = Math.max(1, getWidth() - 2 * r);
+                    setStrength(10 * (1 + Math.round((event.getX() - r) / span * 9)));
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    setHeld(false);
+                    return true;
+                default:
+                    return super.onTouchEvent(event);
+            }
+        }
+
+        @Override
+        public boolean onKeyDown(int keyCode, KeyEvent event) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                setStrength(strength + (keyCode == KeyEvent.KEYCODE_DPAD_LEFT ? -10 : 10));
+                return true;
+            }
+            return super.onKeyDown(keyCode, event);
+        }
+
+        @Override
+        public boolean performAccessibilityAction(int action, Bundle arguments) {
+            if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD || action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) {
+                setStrength(strength + (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ? 10 : -10));
+                return true;
+            }
+            return super.performAccessibilityAction(action, arguments);
+        }
+
+        @Override
+        public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+            super.onInitializeAccessibilityNodeInfo(info);
+            info.setClassName("android.widget.SeekBar");
+            info.setRangeInfo(AccessibilityNodeInfo.RangeInfo.obtain(AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_INT, 10, 100, strength));
+            info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
+            info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            removeCallbacks(jitter);
+            held = false;
+            super.onDetachedFromWindow();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float r = 11 * d, cy = getHeight() / 2f, start = r, end = getWidth() - r;
+            float x = start + (strength - 10) / 90f * (end - start);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(4 * d);
+            paint.setColor(BORDER);
+            canvas.drawLine(held ? x : start, cy, end, cy, paint);
+            if (!held) {
+                paint.setColor(TEXT);
+                canvas.drawLine(start, cy, x, cy, paint);
+            } else {
+                float filled = x - start, spacing = 11 * d;
+                int n = Math.max(2, Math.round(filled / spacing));
+                float h = Math.max(d, 5.4f * d * strength / 100f);
+                float shift = still ? 0 : (jitterUp ? -0.6f : 0.6f) * d;
+                zigzag.rewind();
+                for (int i = 0; i <= n; i++) {
+                    float taper = Math.min(1f, Math.min(i, n - i) / 2f);
+                    float px = start + filled * i / n, py = cy + shift + (i % 2 == 0 ? h : -h) * taper;
+                    if (i == 0) zigzag.moveTo(px, py); else zigzag.lineTo(px, py);
+                }
+                paint.setStrokeWidth(2 * d);
+                paint.setColor(ACTIVE);
+                paint.setAlpha((int) (Math.min(1f, strength * 5 / 100f) * 255));
+                canvas.drawPath(zigzag, paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(held ? ACTIVE : TEXT);
+            canvas.drawCircle(x, cy, r, paint);
+            if (isFocused() && !held) {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(2 * d);
+                paint.setColor(BACKGROUND);
+                canvas.drawCircle(x, cy, r - 3 * d, paint);
+            }
         }
     }
 }
