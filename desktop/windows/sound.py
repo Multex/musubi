@@ -1,5 +1,6 @@
 """PC sound for the phone: a WASAPI loopback capture of the default output, cut into 5 ms chunks."""
 import logging
+import threading
 from array import array
 
 import core
@@ -95,26 +96,48 @@ class Sound:
         self.open_capture = open_capture
         self.capture = None
         self.error = None
+        self.wanted = False
+        self.opening = None
+        self.lock = threading.Lock()
 
     @property
     def capturing(self):
         return self.capture is not None
 
     def start(self):
-        if self.capture is not None or self.error:
-            return
+        with self.lock:
+            self.wanted = True
+            if self.capture is not None or self.error or self.opening is not None:
+                return
+            # On a thread: Windows took 3 s to say there was no sound device, and the controller froze meanwhile.
+            self.opening = threading.Thread(target=self._open, daemon=True)
+        self.opening.start()
+
+    def _open(self):
+        capture = error = None
         try:
-            self.capture = self.open_capture(self.on_pcm)
+            capture = self.open_capture(self.on_pcm)
         except OSError as ex:
-            self.error = str(ex)
-            log.error('sound: %s', ex)
-            return
-        log.info('sound started, %s, %d Hz, %d channels', self.capture.name, core.RATE, self.capture.channels)
+            error = str(ex)
+        with self.lock:
+            self.opening = None
+            kept = self.wanted
+            if kept:
+                self.capture, self.error = capture, error
+        if not kept:
+            # The phone stopped asking while this was opening.
+            if capture is not None:
+                capture.close()
+        elif error:
+            log.error('sound: %s', error)
+        else:
+            log.info('sound started, %s, %d Hz, %d channels', capture.name, core.RATE, capture.channels)
 
     def stop(self):
-        self.error = None
-        if self.capture is None:
-            return
-        self.capture.close()
-        self.capture = None
-        log.info('sound stopped')
+        with self.lock:
+            self.wanted = False
+            self.error = None
+            capture, self.capture = self.capture, None
+        if capture is not None:
+            capture.close()
+            log.info('sound stopped')

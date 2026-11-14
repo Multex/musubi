@@ -4,6 +4,7 @@ from array import array
 import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -181,12 +182,19 @@ class ConsoleTest(unittest.TestCase):
 
 
 class SoundTest(unittest.TestCase):
+    def start(self, sound):
+        """start(), then wait for the opening it does on its own thread."""
+        sound.start()
+        thread = sound.opening
+        if thread is not None:
+            thread.join(2)
+
     def test_a_failed_start_waits_for_a_stop_before_trying_again(self):
         opener = mock.Mock(side_effect=OSError('No sound output was found on this PC.'))
         sound = win_sound.Sound(lambda chunk: None, opener)
         with self.assertLogs('musubi', 'ERROR'):
-            sound.start()
-        sound.start()
+            self.start(sound)
+        self.start(sound)
         self.assertEqual((opener.call_count, sound.error), (1, 'No sound output was found on this PC.'))
         sound.stop()
         self.assertIsNone(sound.error)
@@ -195,9 +203,27 @@ class SoundTest(unittest.TestCase):
         capture = mock.Mock(channels=2)
         capture.name = 'Speakers [Loopback]'
         sound = win_sound.Sound(lambda chunk: None, mock.Mock(return_value=capture))
-        sound.start()
+        self.start(sound)
         self.assertTrue(sound.capturing)
         sound.stop()
+        self.assertFalse(sound.capturing)
+        capture.close.assert_called_once()
+
+    def test_a_slow_start_does_not_hold_the_caller_and_a_stop_meanwhile_closes_it(self):
+        go = threading.Event()
+        capture = mock.Mock(channels=2)
+
+        def opener(on_pcm):
+            go.wait(2)
+            return capture
+
+        sound = win_sound.Sound(lambda chunk: None, opener)
+        sound.start()
+        thread = sound.opening
+        self.assertFalse(sound.capturing)
+        sound.stop()
+        go.set()
+        thread.join(2)
         self.assertFalse(sound.capturing)
         capture.close.assert_called_once()
 
