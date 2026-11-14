@@ -46,12 +46,14 @@ class HubTest(unittest.TestCase):
         self.window = FakeWindow()
         self.pads = []
         self.sounds = []
+        self.no_driver = False
         self.phone = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.addCleanup(self.phone.close)
 
     def start(self, allowed=()):
         core.save_config({'phones': {ip: 'Pixel' for ip in allowed}, 'tray': True, 'sound_enabled': True}, self.config)
-        self.hub = hub.Hub(self.make_pad, self.make_sound, self.port, self.config, lambda: self.window)
+        self.hub = hub.Hub(self.make_pad, self.make_sound, self.port, self.config, lambda: self.window,
+                           lambda: self.no_driver)
         self.thread = threading.Thread(target=self.hub.run, daemon=True)
         self.thread.start()
         self.addCleanup(self.finish)
@@ -160,6 +162,16 @@ class HubTest(unittest.TestCase):
         taken.close()
         self.command(start=True)
         self.assertIsNone(self.next_event(lambda event: event['event'] == 'state')['error'])
+
+    def test_a_missing_driver_is_said_until_check_again_finds_it(self):
+        self.no_driver = True
+        self.start(['127.0.0.1'])
+        status = self.status(lambda event: event.get('driver_missing'))
+        self.assertEqual(status['pad_error'], hub.NO_DRIVER)
+        self.no_driver = False
+        self.command(driver=True)
+        status = self.status(lambda event: event.get('driver_missing') is False)
+        self.assertIsNone(status['pad_error'])
 
     def test_the_loop_ends_when_the_window_does(self):
         self.start()

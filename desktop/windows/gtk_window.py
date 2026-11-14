@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import types
+import webbrowser
 from pathlib import Path
 
 STARTED = time.perf_counter()
@@ -13,6 +14,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent), str(HERE.parent / 'linux')]
 
 import main as win_main  # noqa: E402
+import pad as win_pad  # noqa: E402
 import win_system  # noqa: E402
 
 # Its own file, because two processes can't share the hub's rotating log. Started fresh each time to stay small.
@@ -80,6 +82,27 @@ for drawing in window.PadArea, window.HeadphonesArea, window.PlayerNumber:
 
 
 class App(window.App):
+    driver_missing = False
+
+    def on_event(self, event):
+        if event['event'] == 'status':
+            self.driver_missing = bool(event.get('driver_missing'))
+        window.App.on_event(self, event)
+
+    def panel_controllers(self, phone):
+        window.App.panel_controllers(self, phone)
+        if not self.driver_missing:
+            return
+        # Without the driver there is no pad to test, so the drawing gives way to the two ways forward.
+        self.controllers_panel.remove(self.controllers_panel.get_last_child())
+        self.controllers_panel.remove(self.pad)
+        self.readout = None
+        row = Gtk.Box(spacing=8)
+        row.set_margin_top(16)
+        row.append(window.button('Get the driver', lambda: webbrowser.open(win_pad.DRIVER_PAGE), 'primary'))
+        row.append(window.button('Check again', lambda: self.send({'driver': True})))
+        self.controllers_panel.append(row)
+
     def do_startup(self):
         window.App.do_startup(self)
         # The title bar is GTK's own on Windows, and it should be dark like the rest.

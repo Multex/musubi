@@ -16,16 +16,32 @@ sys.path[:0] = [str(HERE.parent), str(HERE.parent / 'linux')]  # core.py, and au
 
 import core  # noqa: E402
 import main as win_main  # noqa: E402
+import pad as win_pad  # noqa: E402
 from audio import Levels  # noqa: E402
 
 log = logging.getLogger('musubi')
 # Window commands the hub handles itself. The rest go on to the receiver.
-HUB_COMMANDS = ('stop', 'start', 'ignored', 'reload', 'page')
+HUB_COMMANDS = ('stop', 'start', 'ignored', 'reload', 'page', 'driver')
+NO_DRIVER = ("Controllers need the ViGEmBus driver, and this PC doesn't have it. Install it, then press Check again. "
+             'Sound works without it.')
 
 
 def idle_status(sound_enabled):
     return {'event': 'status', 'phone': None, 'pad': False, 'pad_error': None, 'pending': [],
             'sound_enabled': sound_enabled}
+
+
+def driver_missing():
+    """Whether a virtual pad can't be made because ViGEmBus isn't installed. Any other failure shows up when a
+    controller connects, with its own message."""
+    try:
+        win_pad.Pad(lambda large, small: None).close()
+    except win_pad.DriverMissing:
+        log.warning('the ViGEmBus driver is not installed')
+        return True
+    except OSError as ex:
+        log.warning('driver check: %s', ex)
+    return False
 
 
 def spawn_window():
@@ -43,13 +59,17 @@ class Receiver(win_main.Console):
         self.input_at = 0.0
         self.latest_input = None
         self.next_status = 0
+        self.driver_missing = False
         super().__init__(sock, say=lambda text: None, **kwargs)
         self.bridge.on_input = self.on_input
         self.bridge.on_rumble = lambda strong, weak: emit({'event': 'rumble', 'strong': strong, 'weak': weak})
 
     def send_status(self):
-        self.emit({'event': 'status', **self.bridge.status(), 'cable_error': None,
-                   'sound_enabled': self.config['sound_enabled']})
+        status = self.bridge.status()
+        if self.driver_missing:
+            status['pad_error'] = NO_DRIVER
+        self.emit({'event': 'status', **status, 'cable_error': None, 'sound_enabled': self.config['sound_enabled'],
+                   'driver_missing': self.driver_missing})
 
     def on_status(self):
         super().on_status()
@@ -103,12 +123,14 @@ class Hub:
     """Linux's hub without the tray: the receiver, and the window until it closes. Its state lives on one thread."""
 
     def __init__(self, make_pad=None, make_sound=None, port=core.PORT, config_path=core.CONFIG_FILE,
-                 spawn_window=spawn_window):
+                 spawn_window=spawn_window, driver_missing=driver_missing):
         self.make_pad = make_pad
         self.make_sound = make_sound
         self.port = port
         self.config_path = config_path
         self.spawn_window = spawn_window
+        self.check_driver = driver_missing
+        self.driver_missing = False
         self.config = core.load_config(config_path)
         self.receiver = None
         self.window = None
@@ -137,6 +159,7 @@ class Hub:
         log.info('listening, local address %s', win_main.local_ip())
         self.receiver = Receiver(sock, self.on_receiver_event, self.watch, make_pad=self.make_pad,
                                  config_path=self.config_path, make_sound=self.make_sound)
+        self.receiver.driver_missing = self.driver_missing
 
     def stop_receiver(self):
         receiver, self.receiver = self.receiver, None
@@ -182,9 +205,19 @@ class Hub:
             self.page = command['page']
         if 'watch' in command:
             self.watch = bool(command['watch'])
+        if 'driver' in command:
+            self.sync_driver()
         relay = {key: value for key, value in command.items() if key not in HUB_COMMANDS}
         if relay and self.receiver:
             self.receiver.command(relay)
+
+    def sync_driver(self):
+        """Looks for the driver again, and lets a pad that failed without it be tried once more."""
+        self.driver_missing = self.check_driver()
+        if self.receiver:
+            self.receiver.driver_missing = self.driver_missing
+            self.receiver.bridge.pad_error = None
+            self.receiver.send_status()
 
     def on_window_end(self):
         log.info('window closed')
@@ -230,6 +263,8 @@ class Hub:
             threading.Thread(target=self.read_window, args=(self.window.stdout,), daemon=True).start()
             threading.Thread(target=self.write_window, args=(self.window.stdin,), daemon=True).start()
             self.send_state()
+            # After the window is up, because a driver that is slow to answer takes seconds here.
+            self.sync_driver()
             while self.window is not None:
                 if self.receiver is not None:
                     self.receiver.step()
