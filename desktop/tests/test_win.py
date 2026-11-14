@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import ctypes
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -10,6 +11,7 @@ from unittest import mock
 
 import paths  # noqa: F401
 import core
+import firewall
 import main as win_main
 import pad as win_pad
 from core import HELLO, HELLO_MAGIC, PACKET
@@ -149,6 +151,44 @@ class PlugTest(unittest.TestCase):
     def test_it_gives_up_after_three_tries(self):
         with self.assertRaisesRegex(OSError, 'plug in the virtual pad'):
             self.pad([0xE0000007] * 3)
+
+
+class FirewallTest(unittest.TestCase):
+    EXE = r'C:\Users\Ana\Downloads\Musubi-test.exe'
+
+    def netsh(self, returncode=0, stdout=''):
+        return mock.patch.object(firewall.subprocess, 'run', return_value=mock.Mock(
+            returncode=returncode, stdout=stdout, stderr=''))
+
+    def test_rule_counts_only_when_it_names_this_exe(self):
+        with self.netsh(stdout=r'Program: c:\users\ana\downloads\musubi-test.exe'):
+            self.assertTrue(firewall.rule_ok(self.EXE))
+        with self.netsh(stdout=r'Program: C:\Old\Musubi-test.exe'):
+            self.assertFalse(firewall.rule_ok(self.EXE))
+        with self.netsh(returncode=1, stdout=self.EXE):
+            self.assertFalse(firewall.rule_ok(self.EXE))
+
+    def test_old_rules_for_the_exe_go_before_the_new_one(self):
+        with self.netsh() as run:
+            self.assertTrue(firewall.open_port(self.EXE))
+        calls = [c.args[0][3:] for c in run.call_args_list]
+        self.assertEqual(calls[0], ['delete', 'rule', 'name=all', f'program={self.EXE}'])
+        self.assertEqual(calls[1], ['delete', 'rule', 'name=Musubi'])
+        self.assertEqual(calls[2][:2], ['add', 'rule'])
+        for part in ('dir=in', 'action=allow', f'program={self.EXE}', 'protocol=UDP', 'localport=9999', 'profile=any'):
+            self.assertIn(part, calls[2])
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'needs Windows')
+class RealFirewallTest(unittest.TestCase):
+    """Real netsh. The CI runner is admin."""
+
+    def test_the_rule_is_added_and_read_back(self):
+        exe = r'C:\musubi-test\fake.exe'
+        self.addCleanup(subprocess.run, ['netsh', 'advfirewall', 'firewall', 'delete', 'rule', 'name=Musubi'],
+                        capture_output=True)
+        self.assertTrue(firewall.open_port(exe))
+        self.assertTrue(firewall.rule_ok(exe))
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'needs Windows')

@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is shared with Windows, one folder up
 
 import core  # noqa: E402
+import firewall  # noqa: E402
 import pad as win_pad  # noqa: E402
 
 try:
@@ -178,6 +179,11 @@ def keep_running_when_clicked():
     kernel32.SetConsoleMode(kernel32.GetStdHandle(-10), 0x0007 | 0x0080)
 
 
+def log_network():
+    for line in firewall.describe():
+        log.info('%s', line)
+
+
 def run():
     keep_running_when_clicked()
     print(f'Musubi for Windows, test build ({BUILD})')
@@ -191,6 +197,19 @@ def run():
         log.error('driver check: %s', ex)
         print(f'ViGEmBus driver: {ex}')
         print('The controller will not work until that is fixed. Then start Musubi again.')
+
+    if not getattr(sys, 'frozen', False):
+        log.info('firewall check skipped, not frozen')
+    elif firewall.rule_ok(sys.executable):
+        log.info('firewall rule found')
+    else:
+        print('Windows will ask for permission so phones can reach Musubi through the firewall.')
+        if firewall.ask_to_open(sys.executable):
+            log.info('firewall rule added')
+        else:
+            log.warning('firewall rule missing, permission refused or failed')
+            print('Without that permission, phones may not reach Musubi. It will ask again next time.')
+    threading.Thread(target=log_network, daemon=True).start()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -218,7 +237,7 @@ def run():
                 hinted = True
                 log.warning('no packet in %s s', FIREWALL_HINT_AFTER)
                 print('Nothing has arrived from a phone yet. Check that the phone is on the same Wi-Fi '
-                      'and that Windows Firewall allows Musubi on both private and public networks.')
+                      'as this PC, and that no antivirus firewall is blocking Musubi.')
             if not memory_logged and running > MEMORY_LOG_AFTER:
                 memory_logged = True
                 log.info('memory after %s s: %s MB', MEMORY_LOG_AFTER, memory_mb())
@@ -228,6 +247,8 @@ def run():
 
 
 def main():
+    if '--firewall' in sys.argv:
+        sys.exit(0 if firewall.open_port(sys.executable) else 1)
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=256 * 1024, backupCount=1, encoding='utf-8')
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))

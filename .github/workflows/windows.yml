@@ -44,7 +44,7 @@ jobs:
         shell: pwsh
         run: |
           $musubi = Start-Process dist/Musubi-test.exe -PassThru -RedirectStandardOutput out.txt
-          Start-Sleep 10
+          Start-Sleep 20
           $log = "$env:LOCALAPPDATA/musubi/musubi.log"
           Get-Content out.txt, $log -ErrorAction SilentlyContinue
           if ($musubi.HasExited) { throw 'The exe stopped by itself.' }
