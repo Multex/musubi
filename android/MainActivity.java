@@ -11,6 +11,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
+import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
@@ -229,6 +230,8 @@ public class MainActivity extends Activity {
         return true;
     };
     private final short[] axes = new short[6];
+    // Sticks as the pad reports them, before the deadzone, for the Settings preview. UI thread only.
+    private float rawLx, rawLy, rawRx, rawRy;
     private boolean dirty;
     private InetAddress target;
 
@@ -254,6 +257,8 @@ public class MainActivity extends Activity {
     private boolean autoGameMode;
     private volatile boolean vibration = true;
     private volatile int vibrationStrength = 100;
+    // Stick deadzone radius, 0..1; read once per motion event.
+    private volatile float deadzone;
 
     private volatile int deviceId = -1;
     private volatile String deviceName;
@@ -275,6 +280,7 @@ public class MainActivity extends Activity {
     private int editIndex = -1;
 
     private PadView padView;
+    private StickPreview stickPreview;
     private float rumbleStrong, rumbleWeak;
     private TextView readout, pcDetail, settingsPing, soundName, soundDetail;
     private TextView earbudsName, earbudsDetail, soundReadout, soundStatus;
@@ -344,6 +350,7 @@ public class MainActivity extends Activity {
         autoGameMode = prefs.getBoolean("autoGameMode", true);
         vibration = prefs.getBoolean("vibration", true);
         vibrationStrength = prefs.getInt("vibration_strength", 100);
+        deadzone = prefs.getInt("deadzone", 0) / 100f;
         soundOn = prefs.getBoolean("sound", false);
         speaker = prefs.getBoolean("speaker", false);
         // Registered for the app's whole life, since the sound also plays in the background.
@@ -984,6 +991,7 @@ public class MainActivity extends Activity {
             dirty = true;
             lock.notify();
         }
+        rawLx = rawLy = rawRx = rawRy = 0;
         unmapped = null;
         pushPadState();
     }
@@ -1104,11 +1112,15 @@ public class MainActivity extends Activity {
         int leftControl = map.control(ButtonMap.LEFT_TRIGGER), rightControl = map.control(ButtonMap.RIGHT_TRIGGER);
         float l2 = leftControl == L2_BIT ? left : rightControl == L2_BIT ? right : 0;
         float r2 = leftControl == R2_BIT ? left : rightControl == R2_BIT ? right : 0;
+        rawLx = event.getAxisValue(MotionEvent.AXIS_X);
+        rawLy = event.getAxisValue(MotionEvent.AXIS_Y);
+        rawRx = event.getAxisValue(stickXAxis);
+        rawRy = event.getAxisValue(stickYAxis);
+        if (stickPreview != null) stickPreview.setSticks(rawLx, rawLy, rawRx, rawRy);
+        float d = deadzone;
         synchronized (lock) {
-            axes[0] = stick(event, MotionEvent.AXIS_X);
-            axes[1] = stick(event, MotionEvent.AXIS_Y);
-            axes[2] = stick(event, stickXAxis);
-            axes[3] = stick(event, stickYAxis);
+            Deadzone.apply(axes, 0, rawLx, rawLy, d);
+            Deadzone.apply(axes, 2, rawRx, rawRy, d);
             axes[4] = (short) (l2 * TRIGGER_MAX);
             axes[5] = (short) (r2 * TRIGGER_MAX);
             dirty = true;
@@ -1116,10 +1128,6 @@ public class MainActivity extends Activity {
         }
         pushPadState();
         return true;
-    }
-
-    private static short stick(MotionEvent event, int axis) {
-        return (short) (event.getAxisValue(axis) * STICK_MAX);
     }
 
     private void setAxisButton(int input, boolean down) {
@@ -1427,6 +1435,7 @@ public class MainActivity extends Activity {
         int keepScroll = renderedScreen == screen && scroller != null ? scroller.getScrollY() : 0;
         scroller = null;
         padView = null;
+        stickPreview = null;
         readout = null;
         pcDetail = null;
         settingsPing = null;
@@ -2216,17 +2225,16 @@ public class MainActivity extends Activity {
         }
         vibrationRow.setPadding(0, dp(8), 0, 0);
         controllerSection.addView(vibrationRow);
-        boolean strength = false;
         if (vibration && !stuck) {
             if (!controller || canVaryStrength(deviceId)) {
                 controllerSection.addView(strengthRow(controller));
-                strength = true;
             } else {
                 LinearLayout testRow = row();
                 testRow.addView(testButton());
                 controllerSection.addView(testRow);
             }
         }
+        controllerSection.addView(deadzoneRow(controller));
 
         LinearLayout gameSection = column();
         gameSection.addView(sectionHeading("Game mode", false, ICON_HALF, null));
@@ -2296,8 +2304,8 @@ public class MainActivity extends Activity {
             sections[i].setPadding(dp(16), dp(16), dp(16), dp(12));
             body.addView(sections[i]);
         }
-        // The 44dp slider already carries its own air below the track.
-        if (strength) controllerSection.setPadding(dp(16), dp(16), dp(16), dp(4));
+        // The 44dp deadzone slider already carries its own air below the track.
+        controllerSection.setPadding(dp(16), dp(16), dp(16), dp(4));
         return withHeader("Settings", null, () -> show(HOME), body);
     }
 
@@ -2329,7 +2337,7 @@ public class MainActivity extends Activity {
         }
         box.addView(labels);
 
-        StrengthView bar = new StrengthView(this, vibrationStrength);
+        StrengthView bar = new StrengthView(this, "Vibration strength", 10, 100, 10, vibrationStrength, true);
         bar.setListener(new StrengthView.Listener() {
             @Override public void onChange(int strength) {
                 vibrationStrength = strength;
@@ -2341,6 +2349,47 @@ public class MainActivity extends Activity {
             }
         });
         box.addView(bar, buttonParams(44));
+        return box;
+    }
+
+    private LinearLayout deadzoneRow(boolean controller) {
+        LinearLayout box = column();
+        box.setPadding(0, dp(8), 0, 0);
+        LinearLayout labels = row();
+        TextView name = text("Stick deadzone", 14, TEXT);
+        name.setTypeface(medium());
+        labels.addView(name, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        int percent = Math.round(deadzone * 100);
+        TextView value = mono(percent == 0 ? "Off" : percent + "%");
+        value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        labels.addView(value);
+        box.addView(labels);
+        box.addView(settingsNote("Ignores small stick moves, for a stick that drifts."));
+
+        StickPreview preview = new StickPreview(this, controller);
+        preview.setDeadzone(deadzone);
+        preview.setSticks(rawLx, rawLy, rawRx, rawRy);
+        preview.setVisibility(View.GONE);
+        StrengthView bar = new StrengthView(this, "Stick deadzone", 0, 30, 1, percent, false);
+        bar.setListener(new StrengthView.Listener() {
+            @Override public void onChange(int next) {
+                deadzone = next / 100f;
+                value.setText(next == 0 ? "Off" : next + "%");
+                preview.setDeadzone(deadzone);
+                prefs.edit().putInt("deadzone", next).apply();
+            }
+            @Override public void onHold(boolean held) {
+                value.setTextColor(held ? ACTIVE : MUTED);
+                preview.setVisibility(held ? View.VISIBLE : View.GONE);
+                stickPreview = held ? preview : null;
+                if (held) preview.setSticks(rawLx, rawLy, rawRx, rawRy);
+            }
+        });
+        box.addView(bar, buttonParams(44));
+        LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        previewParams.topMargin = dp(4);
+        previewParams.bottomMargin = dp(8);
+        box.addView(preview, previewParams);
         return box;
     }
 
@@ -2814,7 +2863,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Strength slider, 10..100 in steps of 10. A zigzag line replaces the fill while the finger is down. */
+    /** Percent slider. With zigzag on, a zigzag line replaces the fill while the finger is down. */
     private static final class StrengthView extends View {
         interface Listener {
             void onChange(int strength);
@@ -2824,6 +2873,9 @@ public class MainActivity extends Activity {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path zigzag = new Path();
         private final float d = getResources().getDisplayMetrics().density;
+        private final String label;
+        private final int min, max, step;
+        private final boolean zigzagOn;
         private Listener listener;
         private int strength;
         private boolean held, jitterUp, still;
@@ -2836,8 +2888,13 @@ public class MainActivity extends Activity {
             }
         };
 
-        StrengthView(Context context, int strength) {
+        StrengthView(Context context, String label, int min, int max, int step, int strength, boolean zigzagOn) {
             super(context);
+            this.label = label;
+            this.min = min;
+            this.max = max;
+            this.step = step;
+            this.zigzagOn = zigzagOn;
             this.strength = strength;
             setFocusable(true);
             setContentDescription(description());
@@ -2850,11 +2907,11 @@ public class MainActivity extends Activity {
         }
 
         private String description() {
-            return "Vibration strength, " + strength + "%";
+            return label + ", " + (strength == 0 ? "off" : strength + "%");
         }
 
         private void setStrength(int next) {
-            next = Math.max(10, Math.min(100, next));
+            next = Math.max(min, Math.min(max, next));
             if (next == strength) return;
             strength = next;
             setContentDescription(description());
@@ -2869,7 +2926,7 @@ public class MainActivity extends Activity {
             if (down) {
                 still = android.provider.Settings.Global.getFloat(getContext().getContentResolver(),
                     android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f;
-                if (!still) postDelayed(jitter, 70);
+                if (!still && zigzagOn) postDelayed(jitter, 70);
             }
             if (listener != null) listener.onHold(down);
             invalidate();
@@ -2884,7 +2941,7 @@ public class MainActivity extends Activity {
                     // fall through
                 case MotionEvent.ACTION_MOVE:
                     float r = 11 * d, span = Math.max(1, getWidth() - 2 * r);
-                    setStrength(10 * (1 + Math.round((event.getX() - r) / span * 9)));
+                    setStrength(min + step * Math.round((event.getX() - r) / span * (max - min) / step));
                     return true;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
@@ -2898,7 +2955,7 @@ public class MainActivity extends Activity {
         @Override
         public boolean onKeyDown(int keyCode, KeyEvent event) {
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-                setStrength(strength + (keyCode == KeyEvent.KEYCODE_DPAD_LEFT ? -10 : 10));
+                setStrength(strength + (keyCode == KeyEvent.KEYCODE_DPAD_LEFT ? -step : step));
                 return true;
             }
             return super.onKeyDown(keyCode, event);
@@ -2907,7 +2964,7 @@ public class MainActivity extends Activity {
         @Override
         public boolean performAccessibilityAction(int action, Bundle arguments) {
             if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD || action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) {
-                setStrength(strength + (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ? 10 : -10));
+                setStrength(strength + (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ? step : -step));
                 return true;
             }
             return super.performAccessibilityAction(action, arguments);
@@ -2917,7 +2974,7 @@ public class MainActivity extends Activity {
         public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
             super.onInitializeAccessibilityNodeInfo(info);
             info.setClassName("android.widget.SeekBar");
-            info.setRangeInfo(AccessibilityNodeInfo.RangeInfo.obtain(AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_INT, 10, 100, strength));
+            info.setRangeInfo(AccessibilityNodeInfo.RangeInfo.obtain(AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_INT, min, max, strength));
             info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
             info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
         }
@@ -2932,12 +2989,13 @@ public class MainActivity extends Activity {
         @Override
         protected void onDraw(Canvas canvas) {
             float r = 11 * d, cy = getHeight() / 2f, start = r, end = getWidth() - r;
-            float x = start + (strength - 10) / 90f * (end - start);
+            float x = start + (strength - min) / (float) (max - min) * (end - start);
+            boolean zigzagging = held && zigzagOn;
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(4 * d);
             paint.setColor(BORDER);
-            canvas.drawLine(held ? x : start, cy, end, cy, paint);
-            if (!held) {
+            canvas.drawLine(zigzagging ? x : start, cy, end, cy, paint);
+            if (!zigzagging) {
                 paint.setColor(TEXT);
                 canvas.drawLine(start, cy, x, cy, paint);
             } else {
@@ -2965,6 +3023,105 @@ public class MainActivity extends Activity {
                 paint.setColor(BACKGROUND);
                 canvas.drawCircle(x, cy, r - 3 * d, paint);
             }
+        }
+    }
+
+    /** Both sticks at their raw position, with the deadzone drawn as a dashed disc. Shown while the deadzone slider is held. */
+    private static final class StickPreview extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint dashed = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint caption = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float d = getResources().getDisplayMetrics().density;
+        private final boolean connected;
+        private float zone, lx, ly, rx, ry;
+        private String text = "";
+        private int shownPercent = -1;
+        private boolean shownIgnored;
+
+        StickPreview(Context context, boolean connected) {
+            super(context);
+            this.connected = connected;
+            GradientDrawable box = new GradientDrawable();
+            box.setColor(SURFACE);
+            box.setStroke((int) d, BORDER);
+            box.setCornerRadius(6 * d);
+            setBackground(box);
+            dashed.setStyle(Paint.Style.STROKE);
+            dashed.setStrokeWidth(1.5f * d);
+            dashed.setColor(MUTED);
+            dashed.setPathEffect(new DashPathEffect(new float[] {4 * d, 3 * d}, 0));
+            float sp = getResources().getDisplayMetrics().scaledDensity;
+            caption.setTextSize(12 * sp);
+            caption.setColor(MUTED);
+            caption.setTextAlign(Paint.Align.CENTER);
+            line.setTextSize(12 * sp);
+            line.setColor(ACTIVE);
+            line.setTypeface(Typeface.MONOSPACE);
+            line.setTextAlign(Paint.Align.CENTER);
+        }
+
+        void setDeadzone(float zone) {
+            this.zone = zone;
+            invalidate();
+        }
+
+        void setSticks(float lx, float ly, float rx, float ry) {
+            this.lx = lx;
+            this.ly = ly;
+            this.rx = rx;
+            this.ry = ry;
+            invalidate();
+        }
+
+        @Override
+        protected void onMeasure(int widthSpec, int heightSpec) {
+            float height = 24 * d + 120 * d + 6 * d + caption.getFontSpacing();
+            if (connected) height += 10 * d + line.getFontSpacing();
+            setMeasuredDimension(MeasureSpec.getSize(widthSpec), (int) Math.ceil(height));
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float inner = getWidth() - 24 * d, top = 12 * d, radius = 60 * d, cy = top + radius;
+            float captionY = cy + radius + 6 * d - caption.ascent();
+            drawStick(canvas, 12 * d + inner / 4, cy, lx, ly, "Left stick", captionY);
+            drawStick(canvas, 12 * d + inner * 3 / 4, cy, rx, ry, "Right stick", captionY);
+            if (!connected) return;
+            float m = (float) Math.sqrt(lx * lx + ly * ly);
+            int percent = Math.round(m * 100);
+            boolean ignored = m <= zone;
+            // Rebuilt only when the words change, not on every motion event.
+            if (percent != shownPercent || ignored != shownIgnored) {
+                shownPercent = percent;
+                shownIgnored = ignored;
+                text = "Left stick at rest: " + percent + "%. " + (ignored ? "Ignored." : "Sent as a small move.");
+                setContentDescription(text);
+            }
+            canvas.drawText(text, getWidth() / 2f, captionY + caption.descent() + 10 * d - line.ascent(), line);
+        }
+
+        private void drawStick(Canvas canvas, float cx, float cy, float x, float y, String name, float captionY) {
+            // The dot's centre travels 6dp short of the rim so it stays inside the circle.
+            float travel = 54 * d, m = (float) Math.sqrt(x * x + y * y);
+            if (m > 1) {
+                x /= m;
+                y /= m;
+            }
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.5f * d);
+            paint.setColor(IDLE);
+            canvas.drawCircle(cx, cy, 60 * d - 0.75f * d, paint);
+            if (zone > 0) {
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(BORDER);
+                canvas.drawCircle(cx, cy, zone * travel, paint);
+                canvas.drawCircle(cx, cy, zone * travel, dashed);
+            }
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(ACTIVE);
+            canvas.drawCircle(cx + x * travel, cy + y * travel, 6 * d, paint);
+            canvas.drawText(name, cx, captionY, caption);
         }
     }
 }
