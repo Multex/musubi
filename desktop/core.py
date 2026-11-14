@@ -28,6 +28,8 @@ HELLO_MAGIC = b'PBHI'
 # Feature bits stay below 0x20: 0.5.x desktops read the byte as part of the controller name and drop it as a control character.
 FEATURE_AUDIO = 1
 FEATURE_RUMBLE = 2
+# "Most stable": the phone asks for 7.5 ms audio packets instead of 5.
+FEATURE_STABLE = 4
 # PC to phone: magic, sequence number, then PCM.
 AUDIO = struct.Struct('!4sH')
 AUDIO_MAGIC = b'PBAU'
@@ -75,7 +77,7 @@ def name_message(name):
 
 
 def decode_hello(data):
-    """Return {name, controller, controller_connected, rtt, audio, delay}, or None if this isn't a hello."""
+    """Return {name, controller, controller_connected, rtt, audio, rumble, stable, delay}, or None if this isn't a hello."""
     if len(data) < HELLO.size or data[:4] != HELLO_MAGIC:
         return None
     _, connected, rtt = HELLO.unpack_from(data)
@@ -90,6 +92,7 @@ def decode_hello(data):
         'rtt': rtt,
         'audio': bool(flags & FEATURE_AUDIO),
         'rumble': bool(flags & FEATURE_RUMBLE),
+        'stable': bool(flags & FEATURE_STABLE),
         'delay': delay or None,
     }
 

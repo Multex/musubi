@@ -45,7 +45,7 @@ class HelloTest(unittest.TestCase):
     def test_reads_every_field(self):
         self.assertEqual(decode_hello(hello()), {
             'name': 'LM-X430', 'controller': 'Xbox Wireless Controller',
-            'controller_connected': True, 'rtt': 9, 'audio': False, 'rumble': False, 'delay': None,
+            'controller_connected': True, 'rtt': 9, 'audio': False, 'rumble': False, 'stable': False, 'delay': None,
         })
 
     def test_reads_the_features_after_the_names(self):
@@ -53,6 +53,11 @@ class HelloTest(unittest.TestCase):
         self.assertEqual(parsed['controller'], 'Xbox Wireless Controller')
         self.assertTrue(parsed['audio'])
         self.assertFalse(decode_hello(hello(controller=b'', features=0))['audio'])
+
+    def test_reads_the_stable_bit(self):
+        self.assertTrue(decode_hello(hello(features=musubi.FEATURE_AUDIO | musubi.FEATURE_STABLE))['stable'])
+        self.assertFalse(decode_hello(hello(features=musubi.FEATURE_AUDIO))['stable'])
+        self.assertLess(musubi.FEATURE_STABLE, 0x20)
 
     def test_reads_the_delay_when_present(self):
         parsed = decode_hello(hello(features=musubi.FEATURE_AUDIO, delay=130))
@@ -635,6 +640,26 @@ class PhoneAudioTest(unittest.TestCase):
     def _seqs(self, chunks):
         with mock.patch.object(audio.os, 'read', return_value=b''.join(chunks)):
             return [seq for seq, _ in self.sound.read()]
+
+    def test_stable_switches_to_7_5_ms_chunks_and_back_without_restarting(self):
+        self.sound.start()
+        pcm = bytes(range(1, 256)) * 30
+        with mock.patch.object(audio.os, 'read', side_effect=[pcm[:2000], pcm[2000:4000], pcm[4000:5000]]):
+            first = self.sound.read()
+            self.sound.set_stable(True)
+            second = self.sound.read()
+            self.sound.set_stable(False)
+            third = self.sound.read()
+        self.assertEqual([len(c) for _, c in first + second + third], [960, 960, 1440, 960])
+        self.assertEqual([seq for seq, _ in first + second + third], [0, 1, 2, 3])
+        self.assertEqual(b''.join(c for _, c in first + second + third), pcm[:4320])
+        self.assertEqual(self.pactl.calls, [audio.LOAD])
+
+    def test_stable_hangover_is_still_200_ms(self):
+        self.sound.start()
+        self.sound.set_stable(True)
+        sound, zero = b'\x01' * audio.STABLE_CHUNK, bytes(audio.STABLE_CHUNK)
+        self.assertEqual(len(self._seqs([sound] + [zero] * audio.HANGOVER)), 1 + audio.HANGOVER * audio.CHUNK // audio.STABLE_CHUNK)
 
     def test_silence_stops_after_the_hangover_and_sound_resumes_at_once(self):
         self.sound.start()

@@ -64,6 +64,7 @@ import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -141,6 +142,8 @@ public class MainActivity extends Activity {
     // Below 0x20, so 0.5.x desktops drop it from the controller name as a control character.
     private static final byte FEATURE_AUDIO = 1;
     private static final byte FEATURE_RUMBLE = 2;
+    // Most stable: asks the PC for 7.5 ms packets instead of 5.
+    private static final byte FEATURE_STABLE = 4;
     // Magic, sequence number, then PCM, matching AUDIO in musubi.py.
     private static final byte[] AUDIO_MAGIC = {'P', 'B', 'A', 'U'};
     private static final int AUDIO_HEADER = AUDIO_MAGIC.length + 2;
@@ -211,6 +214,11 @@ public class MainActivity extends Activity {
     private volatile boolean soundOn;
     // Force the phone's own speaker instead of following the system route (Android 6+).
     private volatile boolean speaker;
+    // The "Most stable" sound buffer, pref sound_buffer = "stable"; else lowest delay.
+    private volatile boolean stableSound;
+    // Settings shows "measuring the new delay" from a buffer switch until the next reading.
+    private boolean measuringNewDelay;
+    private boolean settingsSoundLive;
     // The connected earbuds or wired headphones, or null. UI thread only.
     private String earbuds;
     private boolean earbudsWired;
@@ -282,7 +290,7 @@ public class MainActivity extends Activity {
     private PadView padView;
     private StickPreview stickPreview;
     private float rumbleStrong, rumbleWeak;
-    private TextView readout, pcDetail, settingsPing, soundName, soundDetail;
+    private TextView readout, pcDetail, settingsPing, settingsSoundNow, soundName, soundDetail;
     private TextView earbudsName, earbudsDetail, soundReadout, soundStatus;
     private HeadphonesView headphones;
 
@@ -353,6 +361,10 @@ public class MainActivity extends Activity {
         deadzone = prefs.getInt("deadzone", 0) / 100f;
         soundOn = prefs.getBoolean("sound", false);
         speaker = prefs.getBoolean("speaker", false);
+        stableSound = "stable".equals(prefs.getString("sound_buffer", "low"));
+        synchronized (audioLock) {
+            audio.setSteady(stableSound);
+        }
         // Registered for the app's whole life, since the sound also plays in the background.
         registerReceiver(noisyReceiver, new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
         refreshOutput();
@@ -618,11 +630,16 @@ public class MainActivity extends Activity {
         out.putShort((short) Math.min(rttMs, 65535));
         out.put(names);
         out.put((byte) 0);
-        out.put((byte) ((soundOn ? FEATURE_AUDIO : 0) | FEATURE_RUMBLE));
+        out.put((byte) ((soundOn ? FEATURE_AUDIO : 0) | FEATURE_RUMBLE | (stableSound ? FEATURE_STABLE : 0)));
         // Same figure as the Headphones page; 0 means no reading.
-        int delay = soundOn && delayMs >= 0 ? Math.round((rttMs / 2 + delayMs) / 10f) * 10 : 0;
+        int delay = soundOn ? Math.max(soundDelay(), 0) : 0;
         out.putShort((short) Math.min(delay, 65535));
         return out.array();
+    }
+
+    /** The network's half of the ping plus delayMs, to 10 ms, or -1 before the first reading. */
+    private int soundDelay() {
+        return delayMs < 0 ? -1 : Math.round((rttMs / 2 + delayMs) / 10f) * 10;
     }
 
     private static String shorten(String name) {
@@ -1298,6 +1315,7 @@ public class MainActivity extends Activity {
             CharSequence ping = pcUseText(savedPc());
             if (!ping.toString().contentEquals(settingsPing.getText())) settingsPing.setText(ping);
         }
+        if (settingsSoundNow != null) updateSoundNow();
         updateSound();
         updateReadout(true);
         if ((screen == CONTROLLERS || screen == HOME) && autoGameMode && deviceId != -1 && currentPc() != null
@@ -1361,7 +1379,7 @@ public class MainActivity extends Activity {
         if (headphones == null) return;
         boolean lost = shownPcState == LOST, waiting = soundOn && !useSpeaker() && earbuds == null;
         boolean arriving = soundOn && !lost && soundArriving();
-        String delay = delayMs < 0 ? null : "Delay ≈ " + Math.round((rttMs / 2 + delayMs) / 10f) * 10 + " ms";
+        String delay = delayMs < 0 ? null : "Delay ≈ " + soundDelay() + " ms";
         headphones.setMode(!soundOn ? HeadphonesView.OFF : waiting ? HeadphonesView.NONE : HeadphonesView.ON);
         headphones.setContentDescription(!soundOn ? "Headphones, sound off" : waiting ? "Headphones, no earbuds connected"
             : arriving ? "Headphones, sound arriving" : "Headphones, nothing playing");
@@ -1439,6 +1457,7 @@ public class MainActivity extends Activity {
         readout = null;
         pcDetail = null;
         settingsPing = null;
+        settingsSoundNow = null;
         soundName = null;
         soundDetail = null;
         earbudsName = null;
@@ -2197,6 +2216,18 @@ public class MainActivity extends Activity {
             () -> applyGameWindow(screen == GAME)));
         generalSection.addView(prefRow("Play in the background", "PC sound keeps playing after you leave Musubi. Controllers wait until you're back.", "background", null));
 
+        LinearLayout soundSection = column();
+        settingsSoundLive = soundOn && soundArriving();
+        soundSection.addView(sectionHeading("Sound", settingsSoundLive, ICON_ARROW_DOWN, null));
+        soundSection.addView(bufferRow("Lowest delay", "Best on good Wi-Fi or a USB cable.", false));
+        soundSection.addView(bufferRow("Most stable", "For choppy Wi-Fi. Waits a bit longer and sends fewer, bigger packets.", true));
+        settingsSoundNow = mono("");
+        settingsSoundNow.setTextColor(ACTIVE);
+        settingsSoundNow.setPadding(dp(36), dp(4), 0, dp(2));
+        settingsSoundNow.setVisibility(View.GONE);
+        soundSection.addView(settingsSoundNow);
+        updateSoundNow();
+
         LinearLayout controllerSection = column();
         controllerSection.addView(sectionHeading("Controllers", controller, ICON_ARROW_UP, controller ? "1 connected" : null));
         TextView layouts = text("Button layouts", 15, TEXT);
@@ -2298,7 +2329,7 @@ public class MainActivity extends Activity {
         aboutSection.addView(version);
 
         LinearLayout body = column();
-        View[] sections = {pcSection, generalSection, controllerSection, gameSection, aboutSection};
+        View[] sections = {pcSection, generalSection, soundSection, controllerSection, gameSection, aboutSection};
         for (int i = 0; i < sections.length; i++) {
             if (i > 0) body.addView(cordLine(BORDER), buttonParams(1));
             sections[i].setPadding(dp(16), dp(16), dp(16), dp(12));
@@ -2307,6 +2338,75 @@ public class MainActivity extends Activity {
         // The 44dp deadzone slider already carries its own air below the track.
         controllerSection.setPadding(dp(16), dp(16), dp(16), dp(4));
         return withHeader("Settings", null, () -> show(HOME), body);
+    }
+
+    /** One sound buffer choice: a 20dp ring, bone with a dot when chosen, like the canvas. */
+    private View bufferRow(String title, String note, boolean stable) {
+        boolean chosen = stable == stableSound;
+        LinearLayout row = clickableRow(() -> setStableSound(stable), title + ", " + note);
+        row.setMinimumHeight(dp(56));
+        FrameLayout dot = new FrameLayout(this);
+        GradientDrawable ring = new GradientDrawable();
+        ring.setShape(GradientDrawable.OVAL);
+        ring.setStroke(dp(2), chosen ? TEXT : IDLE);
+        dot.setBackground(ring);
+        if (chosen) {
+            View fill = new View(this);
+            GradientDrawable inner = new GradientDrawable();
+            inner.setShape(GradientDrawable.OVAL);
+            inner.setColor(TEXT);
+            fill.setBackground(inner);
+            dot.addView(fill, new FrameLayout.LayoutParams(dp(10), dp(10), Gravity.CENTER));
+        }
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(20), dp(20));
+        dotParams.leftMargin = dotParams.rightMargin = dp(4);
+        row.addView(dot, dotParams);
+        LinearLayout text = column();
+        text.setPadding(dp(12), dp(4), 0, dp(4));
+        TextView name = text(title, 15, TEXT);
+        name.setTypeface(medium());
+        text.addView(name);
+        text.addView(settingsNote(note));
+        row.addView(text, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+            @Override
+            public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                info.setClassName(RadioButton.class.getName());
+                info.setCheckable(true);
+                info.setChecked(chosen);
+            }
+        });
+        return row;
+    }
+
+    private void setStableSound(boolean on) {
+        if (on == stableSound) return;
+        stableSound = on;
+        prefs.edit().putString("sound_buffer", on ? "stable" : "low").apply();
+        // Refills to the new target at once instead of drifting there a frame at a time; the next hello switches the PC's packets.
+        synchronized (audioLock) {
+            audio.setSteady(on);
+            audio.reset();
+        }
+        delayMs = -1;
+        measuringNewDelay = true;
+        render();
+    }
+
+    /** The amber "Now:" line under the choices, only while sound plays; touches the view only when its text changes. */
+    private void updateSoundNow() {
+        boolean playing = soundOn && soundArriving();
+        if (playing != settingsSoundLive) {
+            render();
+            return;
+        }
+        int delay = soundDelay();
+        if (delay >= 0) measuringNewDelay = false;
+        String now = !playing ? "" : delay >= 0 ? "Now: delay ≈ " + delay + " ms" : measuringNewDelay ? "Now: measuring the new delay…" : "";
+        if (now.contentEquals(settingsSoundNow.getText())) return;
+        settingsSoundNow.setText(now);
+        settingsSoundNow.setVisibility(now.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
     private Button testButton() {

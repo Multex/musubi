@@ -16,6 +16,8 @@ final class AudioBuffer {
     static final int START_MS = 20;
     // Three packets: at two the cable still cut out every 20 to 25 s.
     static final int MIN_MS = 15;
+    // Most stable: start and floor for choppy Wi-Fi and the PC's 7.5 ms packets; the target still adapts above it.
+    static final int STEADY_MIN_MS = 50;
     // Screen-off Wi-Fi can batch packets for close to 100 ms; past that a glitch beats the delay.
     static final int MAX_MS = 100;
     // Screen-off Wi-Fi bursts are rare, so any decay shrank the target between them; about 100 ms had no cuts.
@@ -44,6 +46,7 @@ final class AudioBuffer {
     private int target = START_MS * BYTES_PER_MS;
     private boolean filling = true;
     private boolean background;
+    private boolean steady;
     private boolean lastSilent;
     private int expected = -1;
     private int stable;
@@ -144,7 +147,7 @@ final class AudioBuffer {
         if (stable >= STABLE_MS * BYTES_PER_MS) {
             // Steering then trims the level to the new target, or the jump cuts it if far over.
             if (need != Integer.MAX_VALUE && need > CUSHION_MS * BYTES_PER_MS) {
-                target = Math.max(target - need + CUSHION_MS * BYTES_PER_MS, MIN_MS * BYTES_PER_MS);
+                target = Math.max(target - need + CUSHION_MS * BYTES_PER_MS, (steady ? STEADY_MIN_MS : MIN_MS) * BYTES_PER_MS);
             }
             need = Integer.MAX_VALUE;
             stable = 0;
@@ -153,15 +156,27 @@ final class AudioBuffer {
     }
 
     /**
-     * Background holds BACKGROUND_MS; foreground restarts adaptive from START_MS, and the jump cut
+     * Background holds BACKGROUND_MS; foreground restarts adaptive from its start, and the jump cut
      * trims the excess level at the next window.
      */
     void setBackground(boolean on) {
         if (on == background) return;
         background = on;
-        target = (on ? BACKGROUND_MS : START_MS) * BYTES_PER_MS;
+        target = (on ? BACKGROUND_MS : startMs()) * BYTES_PER_MS;
         stable = 0;
         need = Integer.MAX_VALUE;
+    }
+
+    /** Most stable on or off; the foreground target restarts from the mode's start. */
+    void setSteady(boolean on) {
+        steady = on;
+        if (!background) target = startMs() * BYTES_PER_MS;
+        stable = 0;
+        need = Integer.MAX_VALUE;
+    }
+
+    private int startMs() {
+        return steady ? STEADY_MIN_MS : START_MS;
     }
 
     boolean background() {

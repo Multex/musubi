@@ -245,6 +245,7 @@ def run_service():
                         send_status()
             bridge.on_tick()
             sync_sound(sound, sound_enabled[0] and bridge.wants_audio())
+            sound.set_stable(bool((bridge.hello or {}).get('stable')))
             now = time.monotonic()
             if watching[0]:
                 pair = levels.poll(now)

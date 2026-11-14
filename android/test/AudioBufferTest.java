@@ -238,6 +238,25 @@ public class AudioBufferTest {
         check(track.setBackground(false) == 0, "a track already at its minimum is left alone");
 
         buffer = new AudioBuffer();
+        buffer.setSteady(true);
+        check(buffer.target() == AudioBuffer.STEADY_MIN_MS * MS, "most stable starts at its floor");
+        byte[] big = new byte[2 * AudioBuffer.CHUNK];
+        java.util.Arrays.fill(big, (byte) 1);
+        seq = 0;
+        for (int i = 0; i < AudioBuffer.STEADY_MIN_MS / 10; i++, seq++) check(buffer.push(seq, big, 0, big.length), "a 10 ms packet is queued");
+        for (int i = 0; i < 3 * pulls / 2; i++, seq++) {
+            buffer.push(seq, big, 0, big.length);
+            check(buffer.pull(out) == AudioBuffer.CHUNK && buffer.pull(out) == AudioBuffer.CHUNK, "10 ms packets play as 5 ms writes");
+        }
+        check(buffer.target() == AudioBuffer.STEADY_MIN_MS * MS && buffer.underruns == 0 && buffer.dropped == 0
+            && buffer.duplicated == 0, "most stable holds its floor through stable periods");
+        buffer.setBackground(true);
+        buffer.setBackground(false);
+        check(buffer.target() == AudioBuffer.STEADY_MIN_MS * MS, "back from the background most stable restarts at its floor");
+        buffer.setSteady(false);
+        check(buffer.target() == AudioBuffer.START_MS * MS, "lowest delay restarts at the start target");
+
+        buffer = new AudioBuffer();
         seq = fill(buffer, 0, 4);
         String line = null;
         for (int i = 0; i < AudioBuffer.STATS_EVERY_MS / 5 && line == null; i++) {

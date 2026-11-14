@@ -9,6 +9,8 @@ RATE = 48000
 CHANNELS = 2
 # 5 ms of 16-bit stereo per packet, which fits the phone's 2048-byte UDP buffer.
 CHUNK = RATE * CHANNELS * 2 * 5 // 1000
+# 7.5 ms for a phone set to "Most stable": a third fewer packets, and 1440 bytes still fit one Wi-Fi frame (10 ms would split in two).
+STABLE_CHUNK = CHUNK * 3 // 2
 # A null sink's monitor gives exact zeros while nothing plays, so those chunks aren't worth sending.
 SILENCE = bytes(CHUNK)
 # 200 ms of zeros still go out, so a short pause between sounds doesn't make the phone stop and refill.
@@ -20,10 +22,10 @@ CAPTURE = ['parec', '-d', f'{SINK}.monitor', '--raw', '--format=s16le', f'--rate
            f'--channels={CHANNELS}', '--latency-msec=5']
 
 
-def split_chunks(buffered):
+def split_chunks(buffered, size=CHUNK):
     """Return (whole chunks, leftover bytes)."""
-    end = len(buffered) - len(buffered) % CHUNK
-    return [buffered[i:i + CHUNK] for i in range(0, end, CHUNK)], buffered[end:]
+    end = len(buffered) - len(buffered) % size
+    return [buffered[i:i + size] for i in range(0, end, size)], buffered[end:]
 
 
 class Levels:
@@ -72,6 +74,16 @@ class PhoneAudio:
         self.seq = 0
         self.quiet = HANGOVER
         self.failed = False
+        self.chunk = CHUNK
+        self.silence = SILENCE
+        self.hangover = HANGOVER
+
+    def set_stable(self, on):
+        """Only the packet size changes, so parec and the sink carry on; the leftover bytes start the next packet."""
+        self.chunk = STABLE_CHUNK if on else CHUNK
+        if len(self.silence) != self.chunk:
+            self.silence = bytes(self.chunk)
+            self.hangover = HANGOVER * CHUNK // self.chunk
 
     def _pactl(self, *args):
         return self.run(['pactl', *args], capture_output=True, text=True, check=True, timeout=5).stdout
@@ -121,18 +133,18 @@ class PhoneAudio:
         return [self.capture.stdout] if self.capture is not None else []
 
     def read(self):
-        """The PCM worth sending, as 5 ms chunks with their sequence numbers."""
+        """The PCM worth sending, as 5 or 7.5 ms chunks with their sequence numbers."""
         data = os.read(self.capture.stdout.fileno(), 65536)
         if not data:
             self._fail(RuntimeError('parec stopped'))
             self.stop()
             return []
-        chunks, self.buffered = split_chunks(self.buffered + data)
+        chunks, self.buffered = split_chunks(self.buffered + data, self.chunk)
         numbered = []
         for chunk in chunks:
-            if chunk != SILENCE:
+            if chunk != self.silence:
                 self.quiet = 0
-            elif self.quiet < HANGOVER:
+            elif self.quiet < self.hangover:
                 self.quiet += 1
             else:
                 continue
