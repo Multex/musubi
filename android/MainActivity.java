@@ -258,6 +258,8 @@ public class MainActivity extends Activity {
     private InputManager inputManager;
     private AudioManager audioManager;
     private SharedPreferences prefs;
+    /** Read by ControllerReceiver, which skips its notification while Musubi is on screen. */
+    static volatile boolean onScreen;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private final List<Pc> pcs = new ArrayList<>();
@@ -355,6 +357,7 @@ public class MainActivity extends Activity {
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         prefs = getPreferences(MODE_PRIVATE);
+        ControllerReceiver.createChannel(this);
         autoGameMode = prefs.getBoolean("autoGameMode", true);
         vibration = prefs.getBoolean("vibration", true);
         vibrationStrength = prefs.getInt("vibration_strength", 100);
@@ -377,6 +380,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        onScreen = true;
+        ControllerReceiver.cancel(this);
+        // Notifications may have been allowed in Android's settings meanwhile.
+        if (screen == SETTINGS) render();
         lastTouch = SystemClock.uptimeMillis();
         // Coming back from the background keeps the same socket, threads and AudioTrack.
         leaveBackground();
@@ -396,6 +403,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        onScreen = false;
         handler.removeCallbacks(tick);
         handler.removeCallbacks(finishCapture);
         capture.clear();
@@ -2215,6 +2223,20 @@ public class MainActivity extends Activity {
         generalSection.addView(prefRow("Keep the screen on", "While Musubi is open. Game mode always keeps it on.", "keep_screen",
             () -> applyGameWindow(screen == GAME)));
         generalSection.addView(prefRow("Play in the background", "PC sound keeps playing after you leave Musubi. Controllers wait until you're back.", "background", null));
+        boolean blocked = Build.VERSION.SDK_INT >= 24
+            && !((android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE)).areNotificationsEnabled();
+        LinearLayout notificationsOff = column();
+        generalSection.addView(prefRow("Ask to open Musubi", "Shows a notification when a paired controller turns on.", "ask_open",
+            () -> notificationsOff.setVisibility(blocked && prefs.getBoolean("ask_open", true) ? View.VISIBLE : View.GONE)));
+        if (blocked) {
+            TextView warning = settingsNote("Android has notifications off for Musubi, so this can't show.");
+            warning.setTextColor(ALERT);
+            notificationsOff.addView(warning);
+            notificationsOff.addView(spaced(button("Allow notifications", SECONDARY, this::openNotificationSettings), 44));
+            notificationsOff.setPadding(0, 0, 0, dp(4));
+            notificationsOff.setVisibility(prefs.getBoolean("ask_open", true) ? View.VISIBLE : View.GONE);
+            generalSection.addView(notificationsOff);
+        }
 
         LinearLayout soundSection = column();
         settingsSoundLive = soundOn && soundArriving();
@@ -2491,6 +2513,18 @@ public class MainActivity extends Activity {
         previewParams.bottomMargin = dp(8);
         box.addView(preview, previewParams);
         return box;
+    }
+
+    private void openNotificationSettings() {
+        Intent intent = Build.VERSION.SDK_INT >= 26
+            ? new Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, getPackageName())
+            : new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", getPackageName(), null));
+        try {
+            startActivity(intent);
+        } catch (ActivityNotFoundException noScreen) {
+            Toast.makeText(this, "Couldn't open Android's settings for Musubi", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private LinearLayout prefRow(String title, String note, String key, Runnable changed) {
