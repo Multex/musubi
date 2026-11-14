@@ -1791,32 +1791,21 @@ public class MainActivity extends Activity {
         title.setPadding(0, 0, 0, dp(8));
         panel.addView(title);
         boolean onCable = currentPc() == usbPc;
-        for (int i = 0; i < pcs.size(); i++) {
+        if (onCable) {
+            // The cable always wins while it's plugged in, so Wi-Fi rows here would look like they do nothing.
+            panel.addView(pcRow(usbPc.name, "USB cable", true, dialog::dismiss));
+            TextView note = settingsNote("Unplug the cable to use Wi-Fi.");
+            note.setPadding(dp(34), dp(4), dp(8), dp(4));  // Lines up with the PC name, past the dot.
+            panel.addView(note);
+        }
+        for (int i = 0; !onCable && i < pcs.size(); i++) {
             int index = i;
             Pc pc = pcs.get(i);
-            boolean active = !onCable && i == selectedPc;
-            LinearLayout row = clickableRow(() -> {
+            panel.addView(pcRow(pc.name, pc.ip, !onCable && i == selectedPc, () -> {
                 selectPc(index);
                 dialog.dismiss();
                 render();
-            }, pc.name + ", " + pc.ip + (active ? ", in use" : ""));
-            row.setPadding(dp(8), dp(6), dp(8), dp(6));
-            View dot = new View(this);
-            GradientDrawable circle = new GradientDrawable();
-            circle.setShape(GradientDrawable.OVAL);
-            if (active) circle.setColor(ACTIVE);
-            else circle.setStroke(dp(2), IDLE);
-            dot.setBackground(circle);
-            LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(14), dp(14));
-            dotParams.rightMargin = dp(12);
-            row.addView(dot, dotParams);
-            LinearLayout labels = column();
-            TextView name = text(pc.name, 15, active ? ACTIVE : TEXT);
-            name.setTypeface(medium());
-            labels.addView(name);
-            labels.addView(mono(pc.ip + (active ? " · In use" : "")));
-            row.addView(labels, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
-            panel.addView(row);
+            }));
         }
         panel.addView(spaced(button("Manage PCs", SECONDARY, () -> {
             dialog.dismiss();
@@ -1827,6 +1816,27 @@ public class MainActivity extends Activity {
         if (dialog.getWindow() != null) {
             dialog.getWindow().setBackgroundDrawable(new ColorDrawable(0));
         }
+    }
+
+    private LinearLayout pcRow(String title, String detail, boolean active, Runnable pick) {
+        LinearLayout row = clickableRow(pick, title + ", " + detail + (active ? ", in use" : ""));
+        row.setPadding(dp(8), dp(6), dp(8), dp(6));
+        View dot = new View(this);
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        if (active) circle.setColor(ACTIVE);
+        else circle.setStroke(dp(2), IDLE);
+        dot.setBackground(circle);
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(14), dp(14));
+        dotParams.rightMargin = dp(12);
+        row.addView(dot, dotParams);
+        LinearLayout labels = column();
+        TextView name = text(title, 15, active ? ACTIVE : TEXT);
+        name.setTypeface(medium());
+        labels.addView(name);
+        labels.addView(mono(detail + (active ? " · In use" : "")));
+        row.addView(labels, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return row;
     }
 
     private View buildGame() {
