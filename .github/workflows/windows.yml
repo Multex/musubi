@@ -68,8 +68,8 @@ jobs:
           name: Musubi-test
           path: dist/*.exe
 
-  # An experiment: the Linux GTK window packaged for Windows. It is separate, so it can fail without touching the exes.
-  gtk:
+  # The real app: hub.py is the receiver, and the Linux GTK window runs as its child process.
+  app:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +81,6 @@ jobs:
           # shortcut: the download is pinned by release only, add a SHA256 check like the ViGEmClient one before this ships to users
           (Get-FileHash gtk.zip -Algorithm SHA256).Hash
           7z x gtk.zip -oC:\gtk | Out-Null
-          Get-ChildItem C:\gtk -Recurse -Filter *.whl | ForEach-Object { $_.FullName }
           $wheel = (Get-ChildItem C:\gtk -Recurse -Filter 'pygobject*.whl' | Select-Object -First 1).Name
           # The wheels only fit the Python they were built with.
           if ($wheel -notmatch 'cp3(\d+)') { throw "No PyGObject wheel found: $wheel" }
@@ -90,43 +89,72 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.gtk.outputs.python }}
-      - name: Build the GTK test
+      - name: Get ViGEmClient.dll
         shell: pwsh
         run: |
-          pip install pyinstaller
+          $url = 'https://raw.githubusercontent.com/yannbouteiller/vgamepad/74318af82918336f8c8f311f4cfb26cdda0dccab/vgamepad/win/vigem/client/x64/ViGEmClient.dll'
+          Invoke-WebRequest $url -OutFile desktop/windows/ViGEmClient.dll
+          $hash = (Get-FileHash desktop/windows/ViGEmClient.dll -Algorithm SHA256).Hash
+          if ($hash -ne '2BF0CB1D809039573C922737D298A1653D4DBC61408060FF45A9BCFDE82E97D2') { throw "ViGEmClient.dll changed: $hash" }
+      # Without the driver the pad test skips itself and the app shows the pad error, so this may fail.
+      - name: Install the ViGEmBus driver
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          Invoke-WebRequest 'https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe' -OutFile vigembus.exe
+          Start-Process ./vigembus.exe -ArgumentList '/exenoui', '/qn', '/norestart' -Wait
+      - name: Install GTK's Python wheels
+        shell: pwsh
+        run: |
+          pip install pyinstaller PyAudioWPatch
           Get-ChildItem C:\gtk\wheels -Include 'pygobject*.whl', 'pycairo*.whl' -Recurse | ForEach-Object { pip install --force-reinstall $_.FullName }
           # Python no longer looks on PATH for the DLLs a module needs, so every Python started here is told where GTK's are.
           $site = python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
           "import os; os.add_dll_directory(r'C:\gtk\bin')" | Out-File -Encoding ascii (Join-Path $site 'gtk.pth')
           python -c "import gi; gi.require_version('Gtk', '4.0'); from gi.repository import Gtk; print('GTK', Gtk.get_major_version(), Gtk.get_minor_version(), Gtk.get_micro_version())"
           if ($LASTEXITCODE) { throw 'Python cannot load GTK.' }
-          pyinstaller --noconfirm desktop/windows/gtk_spike.spec
-          "{0:N1} MB unpacked" -f ((Get-ChildItem dist/Musubi-gtk-test -Recurse | Measure-Object Length -Sum).Sum / 1MB)
-      - name: Start the GTK test with each renderer
+      - run: python -m unittest discover -s desktop/tests -p 'test_win*.py' -v
+      - run: python -m unittest discover -s desktop/tests -p 'test_hub.py' -v
+      - name: Build the app
+        shell: pwsh
+        run: |
+          "BUILD = '$("${{ github.sha }}".Substring(0, 7))'" | Out-File desktop/windows/build.py -Encoding utf8
+          pyinstaller --noconfirm desktop/windows/musubi.spec
+          "{0:N1} MB unpacked" -f ((Get-ChildItem dist/Musubi -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+      - name: Run the app with a pretend phone
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          $log = "$env:LOCALAPPDATA/musubi/gtk-test.log"
+          # An unknown phone only waits for approval, so this one is allowed already, in the file the app reads.
+          python -c "import sys; sys.path.insert(0, 'desktop'); import core; core.save_config({'phones': {'127.0.0.1': 'Fake phone'}, 'tray': True, 'sound_enabled': True}); print(core.CONFIG_FILE)"
+          $hub = Start-Process dist/Musubi/Musubi.exe -PassThru
+          Start-Sleep 5
+          $phone = Start-Process python -ArgumentList 'desktop/tests/fake_phone.py', '12' -PassThru -NoNewWindow
+          Start-Sleep 7
           New-Item -ItemType Directory screens | Out-Null
-          $env:MUSUBI_TEST_SECONDS = '14'
-          foreach ($renderer in 'cairo', 'gl') {
-            $env:GSK_RENDERER = $renderer
-            $test = Start-Process dist/Musubi-gtk-test/Musubi-gtk-test.exe -PassThru
-            Start-Sleep 7
-            $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
-            $picture = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
-            [System.Drawing.Graphics]::FromImage($picture).CopyFromScreen($screen.Left, $screen.Top, 0, 0, $picture.Size)
-            $picture.Save("$PWD/screens/$renderer.png")
-            if (-not $test.WaitForExit(60000)) { Stop-Process $test; Get-Content $log; throw "The GTK test did not close by itself with $renderer." }
-          }
-          Get-Content $log
-          if (-not (Select-String -Path $log -Pattern 'after 10 s' -Quiet)) { throw 'The GTK window never opened.' }
+          $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          $picture = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
+          [System.Drawing.Graphics]::FromImage($picture).CopyFromScreen($screen.Left, $screen.Top, 0, 0, $picture.Size)
+          $picture.Save("$PWD/screens/app.png")
+          $phone.WaitForExit()
+          # Closing the window by hand can't be scripted simply, so its process goes, and the hub must follow by itself.
+          $windows = Get-CimInstance Win32_Process -Filter "Name = 'Musubi.exe' AND ParentProcessId = $($hub.Id)"
+          if (-not $windows) { throw 'The window process was not running.' }
+          $windows | ForEach-Object { Stop-Process -Id $_.ProcessId }
+          $closed = $hub.WaitForExit(10000)
+          $logs = "$env:LOCALAPPDATA/musubi"
+          Get-Content "$logs/musubi.log", "$logs/musubi-window.log" -ErrorAction SilentlyContinue
+          if (-not $closed) { Stop-Process $hub; throw 'The hub kept running after its window was gone.' }
+          if (-not (Select-String -Path "$logs/musubi.log" -Pattern 'listening' -Quiet)) { throw 'The app never started listening.' }
+          if (-not (Select-String -Path "$logs/musubi.log" -Pattern 'first packet' -Quiet)) { throw 'No packet arrived from the pretend phone.' }
+          if (-not (Select-String -Path "$logs/musubi-window.log" -Pattern 'window shown' -Quiet)) { throw 'The window never opened.' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Musubi-gtk-screen
+          name: Musubi-app-screen
           path: screens
       - uses: actions/upload-artifact@v4
         with:
-          name: Musubi-gtk-test
-          path: dist/Musubi-gtk-test
+          name: Musubi-app
+          path: dist/Musubi
