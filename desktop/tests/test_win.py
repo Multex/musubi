@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import paths  # noqa: F401
 import core
@@ -102,7 +103,7 @@ class ConsoleTest(unittest.TestCase):
     def test_a_stall_from_a_connected_phone_is_logged(self):
         self.allow()
         self.send(hello())
-        self.console.last_packet = time.perf_counter() - 1
+        self.console.last_packet = time.perf_counter() - 2
         with self.assertLogs('musubi', 'WARNING') as logs:
             self.send(hello())
         self.assertIn('gap', logs.output[0])
@@ -129,6 +130,25 @@ class ConsoleTest(unittest.TestCase):
 
 class XInputState(ctypes.Structure):
     _fields_ = [('packet', ctypes.c_ulong), ('pad', win_pad.Report)]
+
+
+class PlugTest(unittest.TestCase):
+    def pad(self, plug_results):
+        lib = mock.MagicMock()
+        lib.vigem_connect.return_value = win_pad.SUCCESS
+        lib.vigem_target_x360_register_notification.return_value = win_pad.SUCCESS
+        lib.vigem_target_add.side_effect = plug_results
+        with mock.patch.object(win_pad, 'load', return_value=lib):
+            return win_pad.Pad(lambda large, small: None), lib
+
+    def test_a_plug_in_that_times_out_is_tried_again_on_a_new_connection(self):
+        pad, lib = self.pad([0xE0000007, win_pad.SUCCESS])
+        self.assertEqual((lib.vigem_target_add.call_count, lib.vigem_disconnect.call_count), (2, 1))
+        self.assertTrue(pad.target)
+
+    def test_it_gives_up_after_three_tries(self):
+        with self.assertRaisesRegex(OSError, 'plug in the virtual pad'):
+            self.pad([0xE0000007] * 3)
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'needs Windows')
