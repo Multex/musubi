@@ -76,13 +76,14 @@ button.primary { min-height: 32px; min-width: 112px; background: #E6DEC8; color:
 button.primary:hover { background: #F4EDDA; }
 button.primary:active { background: #CFC7B2; }
 button.plain { border: none; }
+button.down { background: #E6DEC8; color: #0D0C0A; border-color: #E6DEC8; font-weight: 700; }
+button.down:hover { background: #F4EDDA; }
+button.down:active { background: #CFC7B2; }
 button.back-btn { min-height: 28px; padding: 4px 6px; border: none; border-radius: 6px; }
 button.sidebar-item { min-height: 36px; padding: 4px 8px; border: none; border-radius: 6px; }
 button.sidebar-item:disabled { color: #E6DEC8; border: none; opacity: 1; }
 button.sidebar-item.selected, button.plain.selected { background: #171512; }
-.mic-item { min-height: 36px; padding: 4px 8px; }
 button.overview-row { min-height: 68px; padding: 8px 0; border: none; border-radius: 6px; }
-.overview-static { min-height: 68px; padding: 8px 0; }
 .hairline { background: #332E28; min-height: 1px; }
 button.row { padding: 6px 0; border: none; border-radius: 6px; }
 button.row:hover, button.row:active { background: none; }
@@ -447,9 +448,22 @@ def block(caption, value, detail=None, detail_css='detail', divided=False):
     return box
 
 
+def mic_state(mic, phone_name):
+    """(drawing mode, short state, Overview detail, Mic page status, Mic page detail) for the hello's mic byte."""
+    if mic == 1:
+        return 'on', 'Live', 'Live as Musubi mic', f'From {phone_name}', 'Live'
+    if mic == 2:
+        return 'muted', 'Muted', 'Musubi mic sends silence', f'From {phone_name}', 'Muted, sending silence'
+    if mic == 3:
+        return ('paused', 'Paused on the phone', 'Its sound plays on the speaker', f'Paused on {phone_name}',
+                'Its sound plays on the speaker. Allow the mic there, or use headphones.')
+    return 'off', 'Off', 'Turn it on here or on the phone', 'Mic is off', 'Turn it on here or on the phone'
+
+
 class HeadphonesArea(Gtk.DrawingArea):
     """Flat headphones drawing from the 300 x 266 coordinates in Headphones-Solid.dc.html."""
     WIDTH, HEIGHT = 300, 266
+    DIM_MODE = 'none'
 
     def __init__(self, width=80, mode='off'):
         super().__init__(valign=Gtk.Align.CENTER)
@@ -458,7 +472,7 @@ class HeadphonesArea(Gtk.DrawingArea):
         self.left = 0.0
         self.right = 0.0
         self.timer_id = None
-        self.set_opacity(0.4 if mode == 'none' else 1.0)
+        self.set_opacity(0.4 if mode == self.DIM_MODE else 1.0)
         self.sync_accessible()
         self.set_draw_func(self.draw)
 
@@ -479,7 +493,7 @@ class HeadphonesArea(Gtk.DrawingArea):
             if mode != 'on':
                 self.left = 0.0
                 self.right = 0.0
-            self.set_opacity(0.4 if mode == 'none' else 1.0)
+            self.set_opacity(0.4 if mode == self.DIM_MODE else 1.0)
             self.sync_accessible()
             self.queue_draw()
 
@@ -582,6 +596,93 @@ class HeadphonesArea(Gtk.DrawingArea):
 
         self.label(cr, 'L', 41, 254, 13, TEXT if left > 0 else MUTED)
         self.label(cr, 'R', 259, 254, 13, TEXT if right > 0 else MUTED)
+
+
+class MicArea(HeadphonesArea):
+    """Mic drawing from the 200 x 180 coordinates in Mic-Drawing.dc.html. Its one level lives in `left`."""
+    WIDTH, HEIGHT = 200, 180
+    DIM_MODE = 'paused'
+
+    def sync_accessible(self):
+        label = {'muted': 'Mic, muted', 'off': 'Mic, off', 'paused': 'Mic, paused'}.get(self.mode)
+        self.update_property([Gtk.AccessibleProperty.LABEL],
+                             [label or ('Mic, hearing you' if self.left > 0 else 'Mic, quiet')])
+
+    def draw(self, _area, cr, width, height, _data=None):
+        scale = min(width / self.WIDTH, height / self.HEIGHT)
+        cr.translate((width - self.WIDTH * scale) / 2, (height - self.HEIGHT * scale) / 2)
+        cr.scale(scale, scale)
+        level = self.left if self.mode == 'on' else 0.0
+        grey = IDLE if self.mode == 'on' else LATER
+        cr.set_line_cap(1)
+        cr.set_line_join(1)
+
+        cr.set_source_rgb(*ACTIVE)
+        cr.set_line_width(4)
+        for radius, shown in ((62, level > 0.15), (78, level > 0.55)):
+            if shown:
+                for start in (-math.pi / 6, 5 * math.pi / 6):
+                    cr.new_sub_path()
+                    cr.arc(100, 65, radius, start, start + math.pi / 3)
+                    cr.stroke()
+
+        cr.set_source_rgb(*grey)
+        cr.set_line_width(9)
+        cr.move_to(56, 70)
+        cr.line_to(56, 80)
+        cr.arc_negative(100, 80, 44, math.pi, 0)
+        cr.line_to(144, 70)
+        cr.move_to(100, 124)
+        cr.line_to(100, 154)
+        cr.move_to(74, 156)
+        cr.line_to(126, 156)
+        cr.stroke()
+
+        # The voice fills the capsule itself from the bottom, cut to its shape, not a pill of its own.
+        self.rounded(cr, 72, 10, 56, 104, 28)
+        cr.fill_preserve()
+        cr.save()
+        cr.clip()
+        cr.rectangle(72, 114 - 104 * level, 56, 104 * level)
+        cr.set_source_rgb(*ACTIVE)
+        cr.fill()
+        cr.restore()
+
+        if self.mode == 'muted':
+            for color, line in ((BACKGROUND, 16), (MUTED, 7)):
+                cr.set_source_rgb(*color)
+                cr.set_line_width(line)
+                cr.move_to(40, 20)
+                cr.line_to(160, 160)
+                cr.stroke()
+
+
+class MuteGlyph(Gtk.DrawingArea):
+    """The 16px mic on the Mute button, crossed out while the button offers to mute."""
+
+    def __init__(self):
+        super().__init__(valign=Gtk.Align.CENTER)
+        self.set_size_request(16, 16)
+        self.muted = False
+        self.set_draw_func(self.draw)
+
+    def draw(self, _area, cr, width, height, _data=None):
+        cr.scale(width / 20, height / 20)
+        cr.set_source_rgb(*(BACKGROUND if self.muted else TEXT if self.is_sensitive() else MUTED))
+        HeadphonesArea.rounded(cr, 7, 2, 6, 10, 3)
+        cr.fill()
+        cr.set_line_width(1.8)
+        cr.set_line_cap(1)
+        cr.new_sub_path()
+        cr.arc_negative(10, 9, 5.5, math.pi, 0)
+        cr.move_to(10, 14.5)
+        cr.line_to(10, 18)
+        cr.stroke()
+        if not self.muted:
+            cr.set_line_width(2)
+            cr.move_to(3, 3)
+            cr.line_to(17, 17)
+            cr.stroke()
 
 
 class Chevron(Gtk.DrawingArea):
@@ -711,15 +812,13 @@ class CordNode(Gtk.DrawingArea):
             cr.arc(cx, cy, 10, 0, 2 * math.pi)
             cr.set_source_rgb(*BACKGROUND)
             cr.fill_preserve()
-            if self.state == 'idle':
+            if self.state == 'muted':
+                cr.set_source_rgb(*ACTIVE)
+                arrow = ACTIVE
+            else:
                 cr.set_source_rgb(*IDLE)
                 arrow = MUTED
-            else:
-                cr.set_dash([3, 2])
-                cr.set_source_rgb(*LATER)
-                arrow = IDLE
             cr.stroke()
-            cr.set_dash([])
         sign = 1 if self.direction == 'down' else -1
         cr.set_line_width(1.8)
         cr.set_line_cap(1)
@@ -819,6 +918,17 @@ class App(Gtk.Application):
         self.sound_value = None
         self.sound_detail = None
         self.sound_delay = None
+        self.overview_mic_row = None
+        self.overview_mic_area = None
+        self.overview_mic_value = None
+        self.overview_mic_detail = None
+        self.mic_switch = None
+        self.mic_mute = None
+        self.mic_mute_glyph = None
+        self.mic_mute_label = None
+        self.mic_area = None
+        self.mic_status = None
+        self.mic_detail = None
         self.readout = None
         self.blocked = set()
         self.firewall_dismissed = False
@@ -840,6 +950,8 @@ class App(Gtk.Application):
         self.sound_btn = None
         self.sound_caption = None
         self.mic_node = None
+        self.mic_btn = None
+        self.mic_caption = None
         self.settings_btn = None
         self.stop_btn = None
         self.pad = None
@@ -848,6 +960,7 @@ class App(Gtk.Application):
         self.overview_panel = None
         self.controllers_panel = None
         self.sound_panel = None
+        self.mic_panel = None
         self.settings_panel = None
         self.phones_panel = None
         self.local_ip, self.network = None, None
@@ -947,16 +1060,19 @@ class App(Gtk.Application):
         self.items_box.append(sound_row)
 
         mic_row = Gtk.Box(spacing=6)
-        self.mic_node = CordNode('down', has_line_below=False, state='later')
+        self.mic_node = CordNode('down', has_line_below=False)
         mic_row.append(self.mic_node)
-        mic_box = column(1, 'mic-item')
+        self.mic_btn = Gtk.Button(hexpand=True)
+        self.mic_btn.add_css_class('plain')
+        self.mic_btn.add_css_class('sidebar-item')
+        mic_box = column(1)
         mic_box.set_valign(Gtk.Align.CENTER)
-        mic_box.set_hexpand(True)
-        mic_title = text('Mic', 'body', ellipsize=True)
-        mic_title.add_css_class('muted')
-        mic_box.append(mic_title)
-        mic_box.append(text('Coming later', 'caption', ellipsize=True))
-        mic_row.append(mic_box)
+        mic_box.append(text('Mic', 'body', ellipsize=True))
+        self.mic_caption = text('Needs a phone', 'caption', ellipsize=True)
+        mic_box.append(self.mic_caption)
+        self.mic_btn.set_child(mic_box)
+        self.mic_btn.connect('clicked', lambda _: self.select_item('mic'))
+        mic_row.append(self.mic_btn)
         self.items_box.append(mic_row)
 
         sidebar.append(self.items_box)
@@ -1010,6 +1126,12 @@ class App(Gtk.Application):
         sound_scroller.set_child(self.sound_panel)
         self.pages.add_named(sound_scroller, 'sound')
 
+        mic_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
+        self.mic_panel = column(0)
+        self.mic_panel.set_vexpand(True)
+        mic_scroller.set_child(self.mic_panel)
+        self.pages.add_named(mic_scroller, 'mic')
+
         state_scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
         self.panel = column(0)
         self.panel.set_vexpand(True)
@@ -1036,7 +1158,7 @@ class App(Gtk.Application):
         if self.window is None:
             return
         want = (self.window.get_visible()
-                and self.pages.get_visible_child_name() in ('overview', 'controllers', 'sound'))
+                and self.pages.get_visible_child_name() in ('overview', 'controllers', 'sound', 'mic'))
         if want != self.watching:
             self.watching = want
             self.send({'watch': want})
@@ -1086,6 +1208,10 @@ class App(Gtk.Application):
             for area in (self.overview_headphones, self.sound_headphones):
                 if area is not None:
                     area.set_levels(event['l'], event['r'])
+        elif kind == 'mic_level':
+            for area in (self.overview_mic_area, self.mic_area):
+                if area is not None:
+                    area.set_levels(event['level'], 0.0)
         elif kind == 'state':
             self.error, self.stopped, self.ignored = event['error'], event['stopped'], set(event['ignored'])
             self.refresh()
@@ -1096,6 +1222,10 @@ class App(Gtk.Application):
         elif kind == 'status':
             self.status = {key: event.get(key) for key in (
                 'phone', 'pad', 'pad_error', 'pending', 'cable_error', 'sound_enabled')}
+            phone = self.status['phone']
+            # The hub saves the phone's mic choice; keeping it here stops this window's own saves from undoing that.
+            if phone and phone.get('mic') is not None:
+                self.config['mic'] = phone['mic'] != 0
             self.refresh()
 
     def sound_enabled(self):
@@ -1120,6 +1250,16 @@ class App(Gtk.Application):
         self.save_config()
         self.send({'sound': enabled})
         self.refresh()
+
+    def on_mic_switch(self, enabled):
+        phone = self.status['phone']
+        if phone and enabled != bool(phone.get('mic')):
+            self.send({'mic': 1 if enabled else 0})
+
+    def on_mic_mute(self):
+        phone = self.status['phone']
+        if phone and phone.get('mic') in (1, 2):
+            self.send({'mic': 1 if phone['mic'] == 2 else 2})
 
     def phone_name(self, phone):
         return self.config['phones'].get(phone['ip']) or phone['name'] or phone['ip']
@@ -1154,6 +1294,7 @@ class App(Gtk.Application):
             (self.header_btn, visible == 'overview'),
             (self.ctrl_btn, visible == 'controllers'),
             (self.sound_btn, visible == 'sound'),
+            (self.mic_btn, visible == 'mic'),
             (self.settings_btn, visible in ('settings', 'phones')),
         ):
             if active:
@@ -1182,24 +1323,29 @@ class App(Gtk.Application):
         has_phone = state == 'connected'
         controller_on = bool(has_phone and (phone['controller'] is not None or self.status['pad']))
         sound_on = bool(has_phone and self.sound_enabled() and phone.get('audio'))
+        mic = phone.get('mic') if has_phone else None
+        # Live, muted and paused all keep Musubi mic, so the cord runs down to it.
+        mic_on = bool(mic)
         players = 1 if controller_on else 0
 
-        seg1 = has_phone and (controller_on or sound_on)
-        seg2 = has_phone and sound_on
+        seg1 = has_phone and (controller_on or sound_on or mic_on)
+        seg2 = has_phone and (sound_on or mic_on)
 
         self.source_cord.set_state(dot, seg1, state == 'waiting')
         self.ctrl_node.set_state('live' if controller_on else 'idle', seg1, seg2)
-        self.sound_node.set_state('live' if sound_on else 'idle', seg2, False)
-        self.mic_node.set_state('later', False, False)
+        self.sound_node.set_state('live' if sound_on else 'idle', seg2, mic_on)
+        self.mic_node.set_state({1: 'live', 2: 'muted'}.get(mic, 'idle'), mic_on)
 
         self.ctrl_dots.set_players(players)
         self.ctrl_caption.set_label(f'{players} of 4 players' if has_phone else 'Needs a phone')
         self.sound_caption.set_label(('Playing' if sound_on else 'Off') if has_phone else 'Needs a phone')
+        self.mic_caption.set_label(mic_state(mic, '')[1] if has_phone else 'Needs a phone')
 
         self.items_box.set_opacity(1.0 if has_phone else 0.45)
         self.header_btn.set_sensitive(has_phone)
         self.ctrl_btn.set_sensitive(has_phone)
         self.sound_btn.set_sensitive(has_phone)
+        self.mic_btn.set_sensitive(has_phone)
         self.stop_btn.set_visible(not self.error and not self.stopped)
         self.update_selection()
 
@@ -1232,6 +1378,7 @@ class App(Gtk.Application):
             self.sound_link.set_label(self.link_line(phone))
         if phone:
             self.update_sound(phone)
+            self.update_mic(phone)
 
     def has_sound_delay(self, phone):
         delay = phone.get('delay')
@@ -1272,6 +1419,33 @@ class App(Gtk.Application):
         if self.sound_delay is not None:
             self.update_sound_delay(phone)
 
+    def update_mic(self, phone):
+        mic = phone.get('mic')
+        mode, short, overview_detail, status, detail = mic_state(mic, self.phone_name(phone))
+        for area in (self.overview_mic_area, self.mic_area):
+            if area is not None:
+                area.set_mode(mode)
+        if self.overview_mic_value is not None:
+            self.overview_mic_value.set_label(short)
+            self.overview_mic_detail.set_label(overview_detail)
+            self.overview_mic_row.update_property([Gtk.AccessibleProperty.LABEL], [f'Mic · to this PC, {short}'])
+        if self.mic_switch is not None and self.mic_switch.get_active() != bool(mic):
+            self.mic_switch.set_active(bool(mic))
+        if self.mic_mute is not None:
+            muted = mic == 2
+            self.mic_mute.set_sensitive(mic in (1, 2))
+            if muted:
+                self.mic_mute.add_css_class('down')
+            else:
+                self.mic_mute.remove_css_class('down')
+            self.mic_mute_label.set_label('Unmute' if muted else 'Mute')
+            self.mic_mute.update_property([Gtk.AccessibleProperty.LABEL], ['Unmute' if muted else 'Mute'])
+            self.mic_mute_glyph.muted = muted
+            self.mic_mute_glyph.queue_draw()
+        if self.mic_status is not None:
+            self.mic_status.set_label(status)
+            self.mic_detail.set_label(detail)
+
     @staticmethod
     def link_line(phone):
         link = 'USB cable' if phone['ip'] == 'usb' else 'Wi-Fi'
@@ -1296,11 +1470,23 @@ class App(Gtk.Application):
         self.sound_value = None
         self.sound_detail = None
         self.sound_delay = None
+        self.overview_mic_row = None
+        self.overview_mic_area = None
+        self.overview_mic_value = None
+        self.overview_mic_detail = None
+        self.mic_switch = None
+        self.mic_mute = None
+        self.mic_mute_glyph = None
+        self.mic_mute_label = None
+        self.mic_area = None
+        self.mic_status = None
+        self.mic_detail = None
         self.readout = None
         self.clear_box(self.panel)
         self.clear_box(self.overview_panel)
         self.clear_box(self.controllers_panel)
         self.clear_box(self.sound_panel)
+        self.clear_box(self.mic_panel)
 
     def main_page_name(self):
         pending = self.pending_phones()
@@ -1325,6 +1511,7 @@ class App(Gtk.Application):
             self.panel_overview(phone)
             self.panel_controllers(phone)
             self.panel_sound(phone)
+            self.panel_mic(phone)
         else:
             self.panel_waiting()
         if not in_settings:
@@ -1418,18 +1605,23 @@ class App(Gtk.Application):
         rows.append(self.overview_sound_row)
         rows.append(hairline())
 
-        mic_row = Gtk.Box(spacing=12)
-        mic_row.add_css_class('overview-static')
-        mic_row.set_size_request(-1, 84)
         mic_labels = column(2)
         mic_labels.set_hexpand(True)
         mic_labels.set_valign(Gtk.Align.CENTER)
         mic_labels.append(text('Mic · to this PC', 'caption', ellipsize=True))
-        mic_value = text('Coming later', 'value', ellipsize=True)
-        mic_value.add_css_class('muted')
-        mic_labels.append(mic_value)
-        mic_row.append(mic_labels)
-        rows.append(mic_row)
+        self.overview_mic_value = text('', 'value', ellipsize=True)
+        mic_labels.append(self.overview_mic_value)
+        self.overview_mic_detail = text('', 'detail', wrap=True)
+        self.overview_mic_detail.set_max_width_chars(36)
+        mic_labels.append(self.overview_mic_detail)
+        self.overview_mic_area = MicArea(width=80)
+        self.overview_mic_row = self.overview_row(
+            mic_labels,
+            self.overview_mic_area,
+            lambda: self.select_item('mic'),
+            'Mic · to this PC',
+        )
+        rows.append(self.overview_mic_row)
 
         self.overview_panel.append(rows)
         self.overview_panel.append(spacer())
@@ -1525,6 +1717,86 @@ class App(Gtk.Application):
         body.append(right)
         self.sound_panel.append(body)
         self.sound_panel.append(spacer())
+
+    def panel_mic(self, phone):
+        """Filled in by update_mic, which also follows each status the phone sends."""
+        self.mic_panel.append(text('Mic', 'page-title'))
+        self.mic_panel.append(spacer())
+
+        body = Gtk.Box(spacing=24)
+        body.set_valign(Gtk.Align.CENTER)
+
+        left = column(0)
+        left.set_hexpand(True)
+        left.set_valign(Gtk.Align.CENTER)
+
+        switch_row = Gtk.Box(spacing=12)
+        switch_labels = column(2)
+        switch_labels.set_hexpand(True)
+        switch_title = text('Musubi mic on this PC', 'row-title', wrap=True)
+        switch_title.set_max_width_chars(30)
+        switch_detail = text('Same switch as on the phone. Off removes Musubi mic.', 'detail', wrap=True)
+        switch_detail.set_max_width_chars(36)
+        switch_labels.append(switch_title)
+        switch_labels.append(switch_detail)
+        switch_row.append(switch_labels)
+        self.mic_switch = Gtk.Switch(active=bool(phone.get('mic')), valign=Gtk.Align.CENTER)
+        self.mic_switch.update_property([Gtk.AccessibleProperty.LABEL], ['Musubi mic on this PC'])
+        self.mic_switch.connect('notify::active', lambda widget, _: self.on_mic_switch(widget.get_active()))
+        switch_row.append(self.mic_switch)
+        left.append(switch_row)
+
+        mute_row = Gtk.Box(spacing=12)
+        mute_row.set_margin_top(12)
+        mute_labels = column(2)
+        mute_labels.set_hexpand(True)
+        mute_labels.append(text('Mute', 'row-title'))
+        mute_detail = text('Discord keeps Musubi mic, but hears silence', 'detail', wrap=True)
+        mute_detail.set_max_width_chars(36)
+        mute_labels.append(mute_detail)
+        mute_row.append(mute_labels)
+        mute_content = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
+        self.mic_mute_glyph = MuteGlyph()
+        self.mic_mute_label = Gtk.Label(label='Mute')
+        mute_content.append(self.mic_mute_glyph)
+        mute_content.append(self.mic_mute_label)
+        self.mic_mute = Gtk.Button(child=mute_content, valign=Gtk.Align.CENTER)
+        self.mic_mute.set_size_request(120, 36)
+        self.mic_mute.connect('clicked', lambda _: self.on_mic_mute())
+        mute_row.append(self.mic_mute)
+        left.append(mute_row)
+
+        input_box = column(2, 'divider')
+        input_box.append(text('Input', 'caption', ellipsize=True))
+        input_detail = text('In Discord or your game, pick "Musubi mic" as the input.', 'detail', wrap=True)
+        input_detail.set_max_width_chars(40)
+        input_box.append(input_detail)
+        left.append(input_box)
+
+        right = column(4)
+        right.set_size_request(150, -1)
+        right.set_hexpand(False)
+        right.set_halign(Gtk.Align.CENTER)
+        right.set_valign(Gtk.Align.CENTER)
+
+        self.mic_area = MicArea(width=120)
+        self.mic_area.set_halign(Gtk.Align.CENTER)
+        right.append(self.mic_area)
+
+        self.mic_status = text('', 'value', wrap=True)
+        self.mic_status.set_margin_top(8)
+        self.mic_detail = text('', 'detail', wrap=True)
+        for label, width in ((self.mic_status, 18), (self.mic_detail, 20)):
+            label.set_max_width_chars(width)
+            label.set_xalign(0.5)
+            label.set_justify(Gtk.Justification.CENTER)
+            label.set_halign(Gtk.Align.FILL)
+            right.append(label)
+
+        body.append(left)
+        body.append(right)
+        self.mic_panel.append(body)
+        self.mic_panel.append(spacer())
 
     def panel_error(self):
         self.panel.append(spacer())

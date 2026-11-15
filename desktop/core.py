@@ -38,6 +38,9 @@ AUDIO_MAGIC = b'PBAU'
 # PC to phone: magic, strong and weak motor 0..65535, then ms left (0 = until the next message). Sent on change only.
 RUMBLE = struct.Struct('!4sHHH')
 RUMBLE_MAGIC = b'PBRM'
+# PC to phone: magic, then the mic switch shared with the phone: 0 off, 1 on, 2 on and muted. Phones skip messages they don't know.
+MIC_SET = struct.Struct('!4sB')
+MIC_SET_MAGIC = b'PBMS'
 # PC to phone over the cable: magic, then the PC name in UTF-8. Sent on every hello; Wi-Fi phones name PCs themselves.
 NAME_MAGIC = b'PBNM'
 RUMBLE_STOPPED = (0, 0, None)
@@ -109,6 +112,10 @@ def rumble_message(strong, weak, ms):
     return RUMBLE.pack(RUMBLE_MAGIC, strong, weak, ms)
 
 
+def mic_set_message(state):
+    return MIC_SET.pack(MIC_SET_MAGIC, state)
+
+
 class Bridge:
     """Drives one virtual pad from the first allowed phone that talks to it.
 
@@ -155,6 +162,8 @@ class Bridge:
                 'rtt': hello.get('rtt'),
                 'audio': hello.get('audio', False),
                 'delay': hello.get('delay'),
+                # None until the first hello, so nobody mistakes "not told yet" for "off".
+                'mic': hello.get('mic'),
             }
         return {
             'phone': phone,
@@ -324,6 +333,16 @@ class Bridge:
         except OSError:
             pass  # Like the ping echo, a failed send must never take the pad down.
 
+    def set_mic(self, state):
+        """Switch the phone's mic (0 off, 1 on, 2 muted). The status shows it at once; the phone's next hello confirms or corrects it."""
+        if self.hello is None:
+            return
+        self.send_to_phone(mic_set_message(state))
+        # A paused mic stays paused: only the phone knows when its speaker stops.
+        if state == 0 or self.hello.get('mic') != 3:
+            self.hello = {**self.hello, 'mic': state}
+        self.on_status()
+
     def wants_audio(self):
         """Sound goes to the active phone, on either link, once it said it can play it.
 
@@ -375,13 +394,14 @@ def sync_sound(sound, wanted):
 
 
 def load_config(path=CONFIG_FILE):
-    config = {'phones': {}, 'tray': True, 'sound_enabled': True}
+    config = {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False}
     try:
         stored = json.loads(path.read_text())
         # shortcut: phones are identified by IP, so a phone whose IP changes asks for approval again, add pairing keys if that gets annoying.
         config['phones'] = {str(ip): str(name) for ip, name in stored.get('phones', {}).items()}
         config['tray'] = bool(stored.get('tray', True))
         config['sound_enabled'] = bool(stored.get('sound_enabled', True))
+        config['mic'] = bool(stored.get('mic', False))
     except FileNotFoundError:
         pass
     except (OSError, ValueError, AttributeError):

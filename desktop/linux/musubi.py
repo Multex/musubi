@@ -166,6 +166,19 @@ def run_console(phone_ip):
         bridge.close()
 
 
+def sync_mic(mic, hello, wanted):
+    """Musubi mic exists while the phone's hello says its mic is on. With no hello, `wanted` (the last choice) keeps it
+    for apps like Discord. Returns the new choice."""
+    if hello is not None:
+        wanted = hello['mic'] != 0
+    if wanted:
+        mic.load()
+    else:
+        mic.stop()
+        mic.failed = False  # Turning the mic off and on again retries a device that failed.
+    return wanted
+
+
 def run_service():
     """Backend for gui.py: commands on stdin, one JSON event per line on stdout."""
     out = sys.stdout.fileno()
@@ -182,6 +195,7 @@ def run_service():
     watching = [False]
     last_input = [0.0, None]
     sound_enabled = [True]
+    mic_wanted = [False]
 
     def send_status():
         cable_error = link.error if link else 'Install python-pyusb to connect phones with a cable.'
@@ -203,8 +217,14 @@ def run_service():
     def on_rumble(strong, weak):
         write_event(out, {'event': 'rumble', 'strong': strong, 'weak': weak})
 
+    def on_mic(seq, pcm):
+        mic.feed(seq, pcm)
+        if watching[0] and pcm and not len(pcm) % 2:
+            mic_level.add(pcm)
+
     mic = audio.PhoneMic()
-    bridge = Bridge(sock, [], send_status, on_input, on_rumble, send_usb=link.send if link else None, on_mic=mic.feed)
+    mic_level = audio.Levels(channels=1)
+    bridge = Bridge(sock, [], send_status, on_input, on_rumble, send_usb=link.send if link else None, on_mic=on_mic)
     sound = audio.PhoneAudio()
     sound.remove_stale()
     mic.remove_stale()
@@ -245,10 +265,12 @@ def run_service():
                     if 'sound' in command:
                         sound_enabled[0] = bool(command['sound'])
                         send_status()
+                    if 'mic_keep' in command:
+                        mic_wanted[0] = bool(command['mic_keep'])
+                    if command.get('mic') in (0, 1, 2):
+                        bridge.set_mic(command['mic'])
             bridge.on_tick()
-            # shortcut: the device isn't remembered across restarts, the PC mic switch step adds that.
-            if (bridge.hello or {}).get('mic'):
-                mic.load()
+            mic_wanted[0] = sync_mic(mic, bridge.hello, mic_wanted[0])
             sync_sound(sound, sound_enabled[0] and bridge.wants_audio())
             sound.set_stable(bool((bridge.hello or {}).get('stable')))
             now = time.monotonic()
@@ -256,6 +278,9 @@ def run_service():
                 pair = levels.poll(now)
                 if pair:
                     write_event(out, {'event': 'levels', 'l': pair[0], 'r': pair[1]})
+                level = mic_level.poll(now)
+                if level:
+                    write_event(out, {'event': 'mic_level', 'level': level[0]})
             # Trailing input after a throttled burst, so the drawing ends on the true state.
             if watching[0] and last_input[1] is not None and now - last_input[0] >= 1 / 30:
                 flush_input(now)

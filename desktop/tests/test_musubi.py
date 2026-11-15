@@ -217,6 +217,37 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(got, [(0x0102, b'\x07' * 480)])
         self.assertEqual((self.pads, inputs, bridge.pad), ([], [], None))
 
+    def test_the_mic_switch_message_is_magic_and_one_byte(self):
+        self.assertEqual([musubi.mic_set_message(state) for state in (0, 1, 2)],
+                         [b'PBMS\x00', b'PBMS\x01', b'PBMS\x02'])
+
+    def test_the_mic_is_unknown_until_the_first_hello(self):
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        self.assertIsNone(self.bridge.status()['phone']['mic'])
+        self.bridge.on_datagram(hello(features=0, delay=0, mic=2), self.PHONE)
+        self.assertEqual(self.bridge.status()['phone']['mic'], 2)
+
+    def test_set_mic_goes_to_the_phone_on_its_link_and_shows_at_once(self):
+        self.bridge.set_mic(1)
+        self.bridge.on_datagram(hello(features=0, delay=0, mic=0), self.PHONE)
+        moved = (self.PHONE[0], 6000)
+        self.bridge.on_datagram(self.PRESSED, moved)
+        calls = self.status_calls
+        self.bridge.set_mic(1)
+        self.assertEqual(self.sock.sent, [(b'PBMS\x01', moved)])
+        self.assertEqual((self.bridge.status()['phone']['mic'], self.status_calls), (1, calls + 1))
+        self.bridge.on_datagram(hello(features=0, delay=0, mic=0), (musubi.USB, 0))
+        self.usb_sent.clear()
+        self.bridge.set_mic(2)
+        self.assertEqual(self.usb_sent, [b'PBMS\x02'])
+
+    def test_a_paused_mic_stays_paused_until_it_is_turned_off(self):
+        self.bridge.on_datagram(hello(features=0, delay=0, mic=3), self.PHONE)
+        self.bridge.set_mic(2)
+        self.assertEqual(self.bridge.status()['phone']['mic'], 3)
+        self.bridge.set_mic(0)
+        self.assertEqual(self.bridge.status()['phone']['mic'], 0)
+
     def test_junk_from_strangers_isnt_a_phone(self):
         self.bridge.on_datagram(b'junk!', self.OTHER)
         self.assertEqual(self.bridge.status()['pending'], [])
@@ -581,6 +612,13 @@ class RumbleTest(unittest.TestCase):
 
 
 class LevelsTest(unittest.TestCase):
+    def test_mono_for_the_mic(self):
+        levels = audio.Levels(channels=1)
+        levels.add(struct.pack('<2h', 16384, -32768))
+        self.assertEqual(levels.poll(1.0), (1.0,))
+        self.assertEqual(levels.poll(2.0), (0.0,))
+        self.assertIsNone(levels.poll(3.0))
+
     def test_peaks_on_known_pcm(self):
         levels = audio.Levels()
         levels.add(pcm(0, 0))
@@ -741,6 +779,50 @@ class PhoneMicTest(unittest.TestCase):
         pactl = FakePactl(self.pactl.modules)
         audio.PhoneAudio(run=pactl, popen=mock.Mock()).remove_stale()
         self.assertEqual(pactl.calls[1:], [['pactl', 'unload-module', '8']])
+
+
+class SyncMicTest(unittest.TestCase):
+    """The choice run_service makes every loop, on a real PhoneMic."""
+
+    def setUp(self):
+        self.pactl = FakePactl()
+        self.mic = audio.PhoneMic(run=self.pactl, path=os.devnull)
+
+    def loads(self):
+        return sum(call[1] == 'load-module' for call in self.pactl.calls)
+
+    def unloads(self):
+        return sum(call[1] == 'unload-module' for call in self.pactl.calls)
+
+    def test_the_phone_decides_while_it_is_there(self):
+        for state in (1, 2, 3):
+            self.assertTrue(musubi.sync_mic(self.mic, {'mic': state}, False))
+        self.assertEqual((self.loads(), self.unloads()), (1, 0))
+        self.assertFalse(musubi.sync_mic(self.mic, {'mic': 0}, True))
+        self.assertEqual((self.loads(), self.unloads()), (1, 1))
+
+    def test_the_device_comes_back_after_the_phone_turns_it_off(self):
+        musubi.sync_mic(self.mic, {'mic': 1}, False)
+        musubi.sync_mic(self.mic, {'mic': 0}, True)
+        musubi.sync_mic(self.mic, {'mic': 1}, False)
+        self.assertEqual((self.loads(), self.unloads()), (2, 1))
+
+    def test_with_no_phone_the_last_choice_stays(self):
+        self.assertTrue(musubi.sync_mic(self.mic, None, True))
+        self.assertEqual(self.loads(), 1)
+        self.assertFalse(musubi.sync_mic(self.mic, None, False))
+        self.assertEqual(self.unloads(), 1)
+
+    def test_turning_it_off_and_on_retries_a_failed_device(self):
+        self.pactl.fail = True
+        with mock.patch('sys.stderr', new_callable=io.StringIO):
+            musubi.sync_mic(self.mic, {'mic': 1}, False)
+            musubi.sync_mic(self.mic, {'mic': 1}, True)
+        self.assertEqual(self.loads(), 1)
+        self.pactl.fail = False
+        musubi.sync_mic(self.mic, {'mic': 0}, True)
+        musubi.sync_mic(self.mic, {'mic': 1}, False)
+        self.assertEqual((self.loads(), self.mic.module), (2, '42'))
 
 
 class PhoneAudioTest(unittest.TestCase):

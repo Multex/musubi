@@ -162,6 +162,8 @@ public class MainActivity extends Activity {
     private static final int MIC_OFF = 0, MIC_LIVE = 1, MIC_MUTED = 2, MIC_PAUSED = 3;
     private static final int MIC_PERMISSION = 1;
     // Magic, then the PC name in UTF-8, matching NAME_MAGIC in core.py. Only sent over the cable.
+    // Magic, then 0 = mic off, 1 = on, 2 = on and muted, matching MIC_SET in core.py.
+    private static final byte[] MIC_CMD_MAGIC = {'P', 'B', 'M', 'S'};
     private static final byte[] NAME_MAGIC = {'P', 'B', 'N', 'M'};
     private static final String USB_PC_NAME = "PC on USB";
     // The PC repeats an endless rumble every second, so a lost stop can't leave the pad buzzing past this.
@@ -275,6 +277,8 @@ public class MainActivity extends Activity {
     private volatile boolean micAllowed;
     // Android refused the mic permission; the Mic page says so until it's granted. UI thread only.
     private boolean micDenied;
+    // The PC asked for muted while the permission prompt was up. UI thread only.
+    private boolean micAskMuted;
     // Why the mic last stopped by itself, shown on the Mic page until the switch is used. UI thread only.
     private String micError;
     // The loudest sample since the drawing last took it, 0 to 1.
@@ -736,6 +740,9 @@ public class MainActivity extends Activity {
                     rumble(deviceId, strong, weak, ms);
                     handler.post(() -> showRumble(strong, weak, ms));
                 }
+            } else if (length >= 5 && magic == ByteBuffer.wrap(MIC_CMD_MAGIC).getInt()) {
+                int command = in.get();
+                if (command >= 0 && command <= 2) handler.post(() -> onMicCommand(command));
             } else if (magic == ByteBuffer.wrap(NAME_MAGIC).getInt()) {
                 String name = shorten(new String(data, in.position(), in.remaining(), StandardCharsets.UTF_8)
                     .replaceAll("\\p{Cntrl}", "").trim());
@@ -1432,11 +1439,20 @@ public class MainActivity extends Activity {
         return soundOn && useSpeaker() && !micAllowed ? MIC_PAUSED : MIC_LIVE;
     }
 
-    private void switchMic(boolean on) {
+    /** The PC repeats its state, so only a change acts; the prompt can't show from the background. */
+    private void onMicCommand(int command) {
+        if (command == 0 ? !micOn : micOn && micMuted == (command == 2)) return;
+        if (command == 0 || onScreen || hasMicPermission()) switchMic(command != 0, command == 2);
+    }
+
+    private void switchMic(boolean on, boolean muted) {
         micError = null;
         if (!on) setMic(false, false);
-        else if (hasMicPermission()) setMic(true, false);
-        else requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, MIC_PERMISSION);
+        else if (hasMicPermission()) setMic(true, muted);
+        else {
+            micAskMuted = muted;
+            requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, MIC_PERMISSION);
+        }
     }
 
     private void allowMic() {
@@ -1482,7 +1498,7 @@ public class MainActivity extends Activity {
         if (requestCode != MIC_PERMISSION) return;
         if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
             micDenied = false;
-            setMic(true, false);
+            setMic(true, micAskMuted);
         } else {
             // After "Don't ask again" Android answers without showing anything, so the page says where to fix it.
             micDenied = true;
@@ -2213,7 +2229,7 @@ public class MainActivity extends Activity {
         toggle.setChecked(micOn);
         toggle.setContentDescription("Send my voice");
         toggle.setBackground(ripple(new ColorDrawable(0)));
-        toggle.setOnCheckedChangeListener((button, on) -> switchMic(on));
+        toggle.setOnCheckedChangeListener((button, on) -> switchMic(on, false));
         send.addView(toggle, gapped(56, 44));
         body.addView(divided(send));
 

@@ -32,37 +32,38 @@ def split_chunks(buffered, size=CHUNK):
 
 
 class Levels:
-    """Left and right peaks of the PCM sent, 0..1, at most `interval` apart.
+    """Peaks of each channel of the PCM, 0..1, at most `interval` apart.
 
     Peak because max() and min() over array slices run in C, so a 5 ms chunk costs a few microseconds.
     """
 
-    def __init__(self, interval=1 / 25):
+    def __init__(self, interval=1 / 25, channels=CHANNELS):
         self.interval = interval
-        self.peak = [0, 0]
+        self.channels = channels
+        self.peak = [0] * channels
         self.last = 0.0
         self.live = False
 
     def add(self, chunk):
         samples = array('h', chunk)
-        for side in (0, 1):
-            channel = samples[side::2]
+        for side in range(self.channels):
+            channel = samples[side::self.channels]
             self.peak[side] = max(self.peak[side], max(channel), -min(channel))
 
     def poll(self, now):
-        """Return (left, right) when one is due, a single (0, 0) once the sound has stopped, else None."""
+        """Return a peak per channel when one is due, a single all-zero one once the sound has stopped, else None."""
         if now - self.last < self.interval:
             return None
         self.last = now
-        left, right = self.peak
-        self.peak = [0, 0]
-        if left or right:
+        peaks = self.peak
+        self.peak = [0] * self.channels
+        if any(peaks):
             self.live = True
         elif self.live:
             self.live = False
         else:
             return None
-        return round(min(left / 32767, 1), 2), round(min(right / 32767, 1), 2)
+        return tuple(round(min(peak / 32767, 1), 2) for peak in peaks)
 
 
 class PhoneAudio:
