@@ -200,6 +200,11 @@ class BridgeTest(unittest.TestCase):
         self.bridge.on_datagram(b'junk!', self.OTHER)
         self.assertEqual(self.bridge.status()['pending'], [])
 
+    def test_junk_from_an_allowed_ip_doesnt_make_it_active(self):
+        self.bridge.on_datagram(bytes(58), self.PHONE)
+        self.assertIsNone(self.bridge.active)
+        self.assertEqual(self.pads, [])
+
     def test_strangers_cant_grow_the_pending_list_forever(self):
         for i in range(musubi.MAX_PENDING + 5):
             self.bridge.on_datagram(bytes(musubi.PING_SIZE), (f'10.0.0.{i}', 1))

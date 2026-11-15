@@ -233,6 +233,9 @@ class Bridge:
         if ip != USB and ip not in self.allowed:
             self._note_unknown(ip, data)
             return
+        # Junk from an allowed IP (a TV's stray packet) must not make it the active phone.
+        if decode_hello(data) is None and len(data) not in (PING_SIZE, PACKET.size):
+            return
         now = self.clock()
         if self.active != ip:
             # The cable takes over from Wi-Fi, and Wi-Fi from an unplugged cable. Both keep the hello so the pad doesn't drop out meanwhile.
