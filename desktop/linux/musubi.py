@@ -171,6 +171,9 @@ def sync_mic(mic, hello, wanted):
     for apps like Discord. Returns the new choice."""
     if hello is not None:
         wanted = hello['mic'] != 0
+        # A stopped mic restarts its numbering at 0, so a quick unmute must count as a new stream, not old packets.
+        if hello['mic'] != 1:
+            mic.last_seq = None
     if wanted:
         mic.load()
     else:

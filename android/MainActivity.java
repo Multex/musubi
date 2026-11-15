@@ -427,7 +427,10 @@ public class MainActivity extends Activity {
         onScreen = true;
         ControllerReceiver.cancel(this);
         // Notifications or the mic may have been allowed in Android's settings meanwhile.
-        if (micDenied && hasMicPermission()) micDenied = false;
+        boolean micAllowedByAndroid = hasMicPermission();
+        if (micAllowedByAndroid) micDenied = false;
+        // Android takes the mic back when the app closes ("Only this time"), so ask again.
+        else if (micOn && !micDenied) switchMic(true, micMuted);
         if (screen == SETTINGS || screen == MIC) render();
         lastTouch = SystemClock.uptimeMillis();
         // Coming back from the background keeps the same socket, threads and AudioTrack.
@@ -1437,7 +1440,7 @@ public class MainActivity extends Activity {
 
     /** Paused: the mic would pick up PC sound from the speaker, until "Allow anyway". */
     private int micState() {
-        if (!micOn) return MIC_OFF;
+        if (!micOn || !hasMicPermission()) return MIC_OFF;
         if (micMuted) return MIC_MUTED;
         return soundOn && useSpeaker() && !micAllowed ? MIC_PAUSED : MIC_LIVE;
     }
@@ -1527,7 +1530,7 @@ public class MainActivity extends Activity {
         synchronized (lock) {
             linked = target != null;
         }
-        boolean record = micState() == MIC_LIVE && (onScreen || backgrounded) && (linked || usbOut != null) && hasMicPermission();
+        boolean record = micState() == MIC_LIVE && (onScreen || backgrounded) && (linked || usbOut != null);
         if (record == (micThread != null)) return;
         Thread thread = record ? new Thread(this::micLoop, "musubi-mic") : null;
         micThread = thread;

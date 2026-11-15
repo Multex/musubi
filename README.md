@@ -133,6 +133,16 @@ It works over Wi-Fi and the USB cable, and keeps playing when you switch between
 
 **Delay:** Musubi's own part is about 70 ms. Bluetooth earbuds add their own delay on top, often 100 to 250 ms. If your earbuds have a game or low-latency mode, turn it on: on mine it cut the total from about 330 ms to about 150 ms.
 
+## Mic
+
+Musubi can send your voice to the PC through the phone's own mic. It shows up on the PC as an input called **Musubi mic**. Your earbuds keep their full sound, because Musubi never uses their mic. It's off by default.
+
+1. On the phone, open **Mic** from the Home screen and turn on **Send my voice**, or use the switch on the PC's Mic page.
+2. In Discord or your game, pick **Musubi mic** as the input.
+3. Tap **Mute** to keep **Musubi mic** selected while Discord hears silence. Game mode has a **Mute mic** button too.
+
+**Pause:** while the PC's sound plays on the phone speaker, the mic pauses, because it would pick up the game. Choose **Allow anyway** if you want it on regardless.
+
 ## Limits
 
 - **The controller needs the app on screen.** Android only gives controller input to the app in front, so if you leave the app, the PC releases every button after half a second. **Game mode** keeps the screen on but dim. Sound is different: it keeps playing in the background.
@@ -140,6 +150,7 @@ It works over Wi-Fi and the USB cable, and keeps playing when you switch between
 - **The guide button can't be remapped,** and it may not arrive at all, because Android can keep it for itself.
 - **One phone at a time.** If two allowed phones are on, the first one keeps the pad until it has been silent for 5 seconds.
 - **Use it only on a network you trust.** Packets are not encrypted or authenticated, and approval only checks the IP. Someone on your network who fakes an allowed phone's address could press buttons in your game.
+- **Your voice crosses the network unencrypted,** like the pad.
 
 ## Latency
 

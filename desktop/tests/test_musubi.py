@@ -807,6 +807,13 @@ class SyncMicTest(unittest.TestCase):
         musubi.sync_mic(self.mic, {'mic': 1}, False)
         self.assertEqual((self.loads(), self.unloads()), (2, 1))
 
+    def test_a_quick_unmute_counts_as_a_new_stream(self):
+        self.mic.last_seq = 500
+        musubi.sync_mic(self.mic, {'mic': 1}, False)
+        self.assertEqual(self.mic.last_seq, 500)
+        musubi.sync_mic(self.mic, {'mic': 2}, True)
+        self.assertIsNone(self.mic.last_seq)
+
     def test_with_no_phone_the_last_choice_stays(self):
         self.assertTrue(musubi.sync_mic(self.mic, None, True))
         self.assertEqual(self.loads(), 1)
