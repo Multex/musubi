@@ -325,6 +325,7 @@ public class MainActivity extends Activity {
     private int gameFrom = HOME;
     private int selectedPlayer = 1;
     private int shownPcState = -1;
+    private int shownGameMic = -1;
     private long lastTouch;
     private long lastUiUpdate;
     private String draftName = "", draftIp = "", formError;
@@ -1375,6 +1376,7 @@ public class MainActivity extends Activity {
             shownPcState = state;
             if (((screen == CONTROLLERS || screen == HOME || screen == HEADPHONES || screen == MIC) && currentPc() != null) || screen == GAME || screen == SETTINGS) render();
         }
+        if (screen == GAME && micState() != shownGameMic) render();
         if (pcDetail != null) pcDetail.setText(pcDetailText(state));
         if (settingsPing != null) {
             CharSequence ping = pcUseText(savedPc());
@@ -2106,22 +2108,41 @@ public class MainActivity extends Activity {
 
     private View buildGame() {
         LinearLayout root = column();
-        root.setGravity(Gravity.CENTER);
         root.setBackgroundColor(GAME_BG);
-        root.setClickable(true);
-        root.setContentDescription("Game mode. Tap to go back");
-        root.setOnClickListener(view -> show(gameFrom));
+        // Only this area goes back, so a tap on the mute bar below never does.
+        LinearLayout tap = column();
+        tap.setGravity(Gravity.CENTER);
+        tap.setClickable(true);
+        tap.setContentDescription("Game mode. Tap to go back");
+        tap.setOnClickListener(view -> show(gameFrom));
+        root.addView(tap, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
         Pc pc = currentPc();
         boolean lost = shownPcState == LOST;
         String status = lost ? "PC not responding"
             : (deviceName != null ? deviceName : "No controller") + " to " + (pc != null ? pc.name : "no PC");
         TextView line = text(status, 16, lost ? ALERT : MUTED);
         line.setGravity(Gravity.CENTER);
-        root.addView(line);
+        tap.addView(line);
+        int mic = shownGameMic = micState();
+        if (mic != MIC_OFF) {
+            TextView micLine = text(mic == MIC_LIVE ? "Mic live" : mic == MIC_MUTED ? "Mic muted" : "Mic paused · sound is on the speaker",
+                16, mic == MIC_LIVE ? ACTIVE : MUTED);
+            micLine.setGravity(Gravity.CENTER);
+            micLine.setPadding(0, dp(4), 0, 0);
+            tap.addView(micLine);
+        }
         TextView back = text("Tap to go back", 13, MUTED);
         back.setGravity(Gravity.CENTER);
         back.setPadding(0, dp(8), 0, 0);
-        root.addView(back);
+        tap.addView(back);
+        if (mic == MIC_LIVE || mic == MIC_MUTED) {
+            // The margin around the bar does nothing, so a near miss neither mutes nor leaves Game mode.
+            LinearLayout dock = column();
+            dock.setPadding(dp(16), 0, dp(16), dp(32));
+            dock.addView(button(mic == MIC_MUTED ? "Unmute mic" : "Mute mic", mic == MIC_MUTED ? PRIMARY : SECONDARY,
+                () -> setMic(true, !micMuted)), buttonParams(72));
+            root.addView(dock);
+        }
         return root;
     }
 
