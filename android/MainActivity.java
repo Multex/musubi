@@ -1,5 +1,6 @@
 package io.github.multex.musubi;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
@@ -28,8 +29,11 @@ import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioRecord;
 import android.media.AudioTimestamp;
 import android.media.AudioTrack;
+import android.media.audiofx.AutomaticGainControl;
+import android.media.MediaRecorder;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -150,6 +154,13 @@ public class MainActivity extends Activity {
     // Magic, strong and weak motor 0..65535, then ms (0 = until the next message), matching RUMBLE in musubi.py.
     private static final byte[] RUMBLE_MAGIC = {'P', 'B', 'R', 'M'};
     private static final int RUMBLE_SIZE = RUMBLE_MAGIC.length + 6;
+    // Magic, sequence number, then 5 ms of s16le mono 48 kHz PCM from the phone's mic.
+    private static final byte[] MIC_MAGIC = {'P', 'B', 'M', 'C'};
+    private static final int MIC_HEADER = MIC_MAGIC.length + 2;
+    private static final int MIC_BYTES = 480;
+    // The mic byte at the end of the hello.
+    private static final int MIC_OFF = 0, MIC_LIVE = 1, MIC_MUTED = 2;
+    private static final int MIC_PERMISSION = 1;
     // Magic, then the PC name in UTF-8, matching NAME_MAGIC in core.py. Only sent over the cable.
     private static final byte[] NAME_MAGIC = {'P', 'B', 'N', 'M'};
     private static final String USB_PC_NAME = "PC on USB";
@@ -253,6 +264,18 @@ public class MainActivity extends Activity {
     private UsbManager usbManager;
     private ParcelFileDescriptor usbFile;
     private volatile FileOutputStream usbOut;
+    // The mic thread writes to the cable too, so whole frames go out one at a time.
+    private final Object usbLock = new Object();
+    // The sender's socket; mic packets must leave from the same port, since the PC knows the phone by it.
+    private volatile DatagramSocket socket;
+    // Muted keeps the mic on for the PC but releases it on the phone.
+    private volatile boolean micOn, micMuted;
+    // Why the mic last stopped by itself, shown on Home until the next tap. UI thread only.
+    private String micError;
+    // Owns its AudioRecord and stops once this no longer points at it, like sender.
+    private volatile Thread micThread;
+    // A new mic thread waits here until the old one has released its AudioRecord.
+    private final Object micLock = new Object();
     private final Pc usbPc = new Pc(USB_PC_NAME, "Cable");
     private WifiManager.WifiLock wifiLock;
     private InputManager inputManager;
@@ -365,6 +388,8 @@ public class MainActivity extends Activity {
         soundOn = prefs.getBoolean("sound", false);
         speaker = prefs.getBoolean("speaker", false);
         stableSound = "stable".equals(prefs.getString("sound_buffer", "low"));
+        micOn = prefs.getBoolean("mic", false);
+        micMuted = prefs.getBoolean("mic_muted", false);
         synchronized (audioLock) {
             audio.setSteady(stableSound);
         }
@@ -395,6 +420,7 @@ public class MainActivity extends Activity {
             targetSince = lastTouch;
         }
         openAccessory();
+        updateMic();
         inputManager.registerInputDeviceListener(deviceListener, handler);
         updateController();
         handler.post(tick);
@@ -404,6 +430,8 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         onScreen = false;
+        // Recording from the background is a later step.
+        updateMic();
         handler.removeCallbacks(tick);
         handler.removeCallbacks(finishCapture);
         capture.clear();
@@ -568,6 +596,7 @@ public class MainActivity extends Activity {
         pingPacket.setPort(PORT);
         nextPing = 0;
         try (DatagramSocket socket = new DatagramSocket()) {
+            this.socket = socket;
             new Thread(() -> receiveLoop(socket), "musubi-receive").start();
             // A USB write blocks while the PC isn't reading, so an old sender can outlive onPause.
             while (running && sender == Thread.currentThread()) {
@@ -624,7 +653,9 @@ public class MainActivity extends Activity {
         frame[0] = (byte) (message.length >> 8);
         frame[1] = (byte) message.length;
         System.arraycopy(message, 0, frame, 2, message.length);
-        usb.write(frame);
+        synchronized (usbLock) {
+            usb.write(frame);
+        }
     }
 
     /** Tells the PC who this phone is, matching HELLO in musubi.py. */
@@ -632,7 +663,7 @@ public class MainActivity extends Activity {
         String controller = deviceName;
         byte[] names = (shorten(Build.MODEL) + "\0" + shorten(controller != null ? controller : ""))
             .getBytes(StandardCharsets.UTF_8);
-        ByteBuffer out = ByteBuffer.allocate(HELLO_MAGIC.length + 3 + names.length + 4);
+        ByteBuffer out = ByteBuffer.allocate(HELLO_MAGIC.length + 3 + names.length + 5);
         out.put(HELLO_MAGIC);
         out.put((byte) (controller != null ? 1 : 0));
         out.putShort((short) Math.min(rttMs, 65535));
@@ -642,6 +673,7 @@ public class MainActivity extends Activity {
         // Same figure as the Headphones page; 0 means no reading.
         int delay = soundOn ? Math.max(soundDelay(), 0) : 0;
         out.putShort((short) Math.min(delay, 65535));
+        out.put((byte) micState());
         return out.array();
     }
 
@@ -1314,6 +1346,8 @@ public class MainActivity extends Activity {
     private void refreshStatus() {
         int state = pcState();
         refreshOutput();
+        // Picks up the cable or a PC coming and going.
+        updateMic();
         if (state != shownPcState) {
             shownPcState = state;
             if (((screen == CONTROLLERS || screen == HOME || screen == HEADPHONES) && currentPc() != null) || screen == GAME || screen == SETTINGS) render();
@@ -1369,6 +1403,141 @@ public class MainActivity extends Activity {
         stopPlayer();
         refreshOutput();
         render();
+    }
+
+    private int micState() {
+        return !micOn ? MIC_OFF : micMuted ? MIC_MUTED : MIC_LIVE;
+    }
+
+    private void cycleMic() {
+        micError = null;
+        if (micState() == MIC_LIVE) setMic(true, true);
+        else if (micOn) setMic(false, false);
+        else if (hasMicPermission()) setMic(true, false);
+        else requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, MIC_PERMISSION);
+    }
+
+    private boolean hasMicPermission() {
+        return Build.VERSION.SDK_INT < 23
+            || checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        if (requestCode != MIC_PERMISSION) return;
+        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+            setMic(true, false);
+        } else {
+            // After "Don't ask again" Android answers without showing anything, so say where to fix it.
+            micError = "Musubi needs the mic permission, in Android's app settings";
+            render();
+        }
+    }
+
+    private void setMic(boolean on, boolean muted) {
+        micOn = on;
+        micMuted = muted;
+        prefs.edit().putBoolean("mic", on).putBoolean("mic_muted", muted).apply();
+        // The PC hears about it with the next hello instead of up to a second later.
+        nextPing = 0;
+        updateMic();
+        render();
+    }
+
+    /** Records only while live, on screen, allowed, and there's a PC to send to; otherwise the mic is released. */
+    private void updateMic() {
+        boolean linked;
+        synchronized (lock) {
+            linked = target != null;
+        }
+        boolean record = micState() == MIC_LIVE && onScreen && (linked || usbOut != null) && hasMicPermission();
+        if (record == (micThread != null)) return;
+        Thread thread = record ? new Thread(this::micLoop, "musubi-mic") : null;
+        micThread = thread;
+        if (thread != null) thread.start();
+    }
+
+    /** Sends each 5 ms chunk the moment it's read, on the sender's socket or the cable. */
+    private void micLoop() {
+        Thread self = Thread.currentThread();
+        String error = null;
+        synchronized (micLock) {
+            AudioRecord record = null;
+            AutomaticGainControl gain = null;
+            try {
+                int size = AudioRecord.getMinBufferSize(AUDIO_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                // Unlike VOICE_COMMUNICATION, this leaves Bluetooth earbuds on A2DP and doesn't squash the voice.
+                record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, AUDIO_RATE,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(size, MIC_BYTES));
+                if (record.getState() != AudioRecord.STATE_INITIALIZED) throw new IllegalStateException("The mic didn't open");
+                // VOICE_RECOGNITION has no gain control, so speech from a desk is far too quiet without this.
+                try {
+                    if (AutomaticGainControl.isAvailable()) {
+                        gain = AutomaticGainControl.create(record.getAudioSessionId());
+                        if (gain != null) gain.setEnabled(true);
+                    }
+                } catch (RuntimeException ignored) {
+                    // The mic works without it, just quieter.
+                }
+                // Otherwise connected earbuds may become the input and leave A2DP.
+                if (Build.VERSION.SDK_INT >= 23) {
+                    for (AudioDeviceInfo device : audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+                        if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
+                            record.setPreferredDevice(device);
+                            break;
+                        }
+                    }
+                }
+                record.startRecording();
+                if (record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                    throw new IllegalStateException("Another app is using the mic");
+                }
+                // The cable's length prefix comes first, so both transports send this one array.
+                byte[] frame = new byte[2 + MIC_HEADER + MIC_BYTES];
+                ByteBuffer.wrap(frame).putShort((short) (MIC_HEADER + MIC_BYTES)).put(MIC_MAGIC);
+                DatagramPacket packet = new DatagramPacket(frame, 2, MIC_HEADER + MIC_BYTES);
+                packet.setPort(PORT);
+                for (int sequence = 0; micThread == self; sequence++) {
+                    // Bytes, so the PCM is already little-endian.
+                    int read = record.read(frame, 2 + MIC_HEADER, MIC_BYTES);
+                    if (read != MIC_BYTES) throw new IllegalStateException("The mic stopped recording (" + read + ")");
+                    frame[6] = (byte) (sequence >> 8);
+                    frame[7] = (byte) sequence;
+                    FileOutputStream usb = usbOut;
+                    InetAddress address;
+                    synchronized (lock) {
+                        address = target;
+                    }
+                    DatagramSocket udp = socket;
+                    try {
+                        if (usb != null) {
+                            synchronized (usbLock) {
+                                usb.write(frame);
+                            }
+                        } else if (address != null && udp != null) {
+                            packet.setAddress(address);
+                            udp.send(packet);
+                        }
+                    } catch (IOException lost) {
+                        // One chunk is 5 ms of sound; the sender already reports a broken link.
+                    }
+                }
+            } catch (RuntimeException ex) {
+                error = ex.getMessage() != null ? ex.getMessage() : "The mic didn't open";
+            } finally {
+                if (gain != null) gain.release();
+                if (record != null) record.release();
+            }
+        }
+        if (error != null) {
+            String reason = error;
+            handler.post(() -> {
+                if (micThread != self) return;
+                micThread = null;
+                micError = reason;
+                setMic(false, false);
+            });
+        }
     }
 
     private boolean soundLive() {
@@ -1608,18 +1777,20 @@ public class MainActivity extends Activity {
         sound.addView(headphones, gapped(60, 60));
         sound.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
-        LinearLayout mic = row();
+        // Temporary until the Mic page: each tap goes off, live, muted, off.
+        String micTitle = micOn ? micMuted ? "Muted" : "Live" : "Off";
+        LinearLayout mic = clickableRow(this::cycleMic, "Mic, " + micTitle + ", tap to change");
         mic.setMinimumHeight(dp(64));
         mic.setPadding(dp(4), dp(6), dp(4), dp(6));
-        LinearLayout micText = featureText("Mic · to PC", "Coming later", MUTED);
-        micText.addView(detail("A spot for the next feature. Not built yet."));
+        LinearLayout micText = featureText("Mic · to PC", micTitle, TEXT);
+        micText.addView(detail(micError != null ? micError : "Shows up on the PC as Musubi mic"));
         mic.addView(micText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout features = column();
         features.setAlpha(lost ? 0.45f : 1);
         features.addView(strand(toControllers, 26, node(answering && players > 0 ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), 24, toSound, controllers, true));
         features.addView(strand(toSound, 26, node(soundLive ? NODE_LIVE : NODE_IDLE, ICON_ARROW_DOWN), 24, BORDER, sound, true));
-        features.addView(strand(BORDER, 26, node(NODE_LATER, ICON_ARROW_UP), 24, 0, mic, true));
+        features.addView(strand(BORDER, 26, node(answering && micState() == MIC_LIVE ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), 24, 0, mic, true));
 
         LinearLayout cord = column();
         cord.setPadding(dp(16), dp(16), dp(16), 0);

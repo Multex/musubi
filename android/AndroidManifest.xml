@@ -7,6 +7,7 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
     <application android:label="Musubi" android:icon="@mipmap/ic_launcher" android:theme="@style/Theme.Musubi">
         <!-- configChanges: pairing a pad changes "keyboard" and would otherwise restart the activity. -->

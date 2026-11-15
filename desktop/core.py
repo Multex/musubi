@@ -22,7 +22,7 @@ PACKET = struct.Struct('!I8h')
 NEUTRAL = PACKET.pack(0, *[0] * 8)
 # The app times the echo of these to tell whether the PC is answering.
 PING_SIZE = 8
-# Magic, controller connected, ping in ms, then "phone name\0controller name\0" a features byte and a 16-bit sound delay in ms (0 = none). Sent once a second.
+# Magic, controller connected, ping in ms, then "phone name\0controller name\0" a features byte, a 16-bit sound delay in ms (0 = none) and the mic state (0 off, 1 live, 2 muted, 3 paused). Sent once a second.
 HELLO = struct.Struct('!4sBH')
 HELLO_MAGIC = b'PBHI'
 # Feature bits stay below 0x20: 0.5.x desktops read the byte as part of the controller name and drop it as a control character.
@@ -30,6 +30,8 @@ FEATURE_AUDIO = 1
 FEATURE_RUMBLE = 2
 # "Most stable": the phone asks for 7.5 ms audio packets instead of 5.
 FEATURE_STABLE = 4
+# Phone to PC: magic, 16-bit sequence number, then 5 ms of mono 48 kHz s16le PCM (480 bytes).
+MIC_MAGIC = b'PBMC'
 # PC to phone: magic, sequence number, then PCM.
 AUDIO = struct.Struct('!4sH')
 AUDIO_MAGIC = b'PBAU'
@@ -77,7 +79,7 @@ def name_message(name):
 
 
 def decode_hello(data):
-    """Return {name, controller, controller_connected, rtt, audio, rumble, stable, delay}, or None if this isn't a hello."""
+    """Return {name, controller, controller_connected, rtt, audio, rumble, stable, delay, mic}, or None if this isn't a hello."""
     if len(data) < HELLO.size or data[:4] != HELLO_MAGIC:
         return None
     _, connected, rtt = HELLO.unpack_from(data)
@@ -85,6 +87,7 @@ def decode_hello(data):
     controller, _, features = rest.partition(b'\0')
     flags = features[0] if features else 0
     delay = int.from_bytes(features[1:3], 'big') if len(features) >= 3 else 0
+    mic = features[3] if len(features) >= 4 and features[3] <= 3 else 0
     return {
         'name': clean_name(phone),
         'controller': clean_name(controller),
@@ -94,6 +97,7 @@ def decode_hello(data):
         'rumble': bool(flags & FEATURE_RUMBLE),
         'stable': bool(flags & FEATURE_STABLE),
         'delay': delay or None,
+        'mic': mic,
     }
 
 
@@ -112,13 +116,14 @@ class Bridge:
     """
 
     def __init__(self, sock, allowed, on_status, on_input=None, on_rumble=None, make_pad=None, clock=time.monotonic,
-                 send_usb=None):
+                 send_usb=None, on_mic=None):
         self.sock = sock
         self.send_usb = send_usb
         self.allowed = set(allowed)
         self.on_status = on_status
         self.on_input = on_input
         self.on_rumble = on_rumble
+        self.on_mic = on_mic
         self.make_pad = make_pad
         self.clock = clock
         self.pad = None
@@ -250,6 +255,10 @@ class Bridge:
         # The app opens a new socket, so a new port, each time it resumes.
         self.addr = addr
 
+        if data.startswith(MIC_MAGIC) and len(data) >= 6:
+            if self.on_mic:
+                self.on_mic(int.from_bytes(data[4:6], 'big'), data[6:])
+            return
         hello = decode_hello(data)
         if hello is not None:
             if hello != self.hello:

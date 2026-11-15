@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+import fcntl
 import io
+import os
 import struct
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -33,19 +36,20 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(axes, [0] * 8)
 
 
-def hello(phone=b'LM-X430', controller=b'Xbox Wireless Controller', connected=True, rtt=9, features=None, delay=None):
+def hello(phone=b'LM-X430', controller=b'Xbox Wireless Controller', connected=True, rtt=9, features=None, delay=None, mic=None):
     """Without features, this is the hello of a 0.5.x app."""
     packet = HELLO.pack(HELLO_MAGIC, connected, rtt) + phone + b'\0' + controller
     if features is None:
         return packet
-    return packet + b'\0' + bytes([features]) + (b'' if delay is None else delay.to_bytes(2, 'big'))
+    return (packet + b'\0' + bytes([features]) + (b'' if delay is None else delay.to_bytes(2, 'big'))
+            + (b'' if mic is None else bytes([mic])))
 
 
 class HelloTest(unittest.TestCase):
     def test_reads_every_field(self):
         self.assertEqual(decode_hello(hello()), {
             'name': 'LM-X430', 'controller': 'Xbox Wireless Controller',
-            'controller_connected': True, 'rtt': 9, 'audio': False, 'rumble': False, 'stable': False, 'delay': None,
+            'controller_connected': True, 'rtt': 9, 'audio': False, 'rumble': False, 'stable': False, 'delay': None, 'mic': 0,
         })
 
     def test_reads_the_features_after_the_names(self):
@@ -66,6 +70,11 @@ class HelloTest(unittest.TestCase):
         self.assertIsNone(decode_hello(hello(features=musubi.FEATURE_AUDIO, delay=0))['delay'])
         self.assertIsNone(decode_hello(hello(features=musubi.FEATURE_AUDIO))['delay'])
         self.assertIsNone(decode_hello(hello())['delay'])
+
+    def test_reads_the_mic_state_and_clamps_junk(self):
+        for byte, state in [(0, 0), (1, 1), (2, 2), (3, 3), (4, 0), (255, 0)]:
+            self.assertEqual(decode_hello(hello(features=0, delay=0, mic=byte))['mic'], state)
+        self.assertEqual(decode_hello(hello(features=0, delay=0))['mic'], 0)
 
     def test_older_desktops_dont_show_the_features_in_the_controller_name(self):
         # 0.5.x took everything after the first \0 as the controller name.
@@ -195,6 +204,18 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.sock.sent, [])
         self.assertEqual(self.pads, [])
         self.assertEqual(self.bridge.status()['pending'], [{'ip': self.OTHER[0], 'name': 'SM-A125M'}])
+
+    def test_mic_packets_go_to_on_mic_and_leave_the_pad_alone(self):
+        got = []
+        bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status, make_pad=self.make_pad,
+                        clock=lambda: self.now, on_mic=lambda seq, pcm: got.append((seq, pcm)))
+        inputs = []
+        bridge.on_input = inputs.append
+        bridge.on_datagram(b'PBMC\x01\x02' + b'\x07' * 480, self.PHONE)
+        bridge.on_datagram(b'PBMC\x00', self.PHONE)
+        bridge.on_datagram(b'PBMC\x00\x09' + b'\x07' * 480, self.OTHER)
+        self.assertEqual(got, [(0x0102, b'\x07' * 480)])
+        self.assertEqual((self.pads, inputs, bridge.pad), ([], [], None))
 
     def test_junk_from_strangers_isnt_a_phone(self):
         self.bridge.on_datagram(b'junk!', self.OTHER)
@@ -618,6 +639,108 @@ class FakePactl:
             raise FileNotFoundError('pactl')
         out = '42\n' if args[1] == 'load-module' else self.modules if args[1] == 'list' else ''
         return subprocess.CompletedProcess(args, 0, out, '')
+
+
+class PhoneMicTest(unittest.TestCase):
+    def setUp(self):
+        self.pactl = FakePactl()
+        self.now = 0.0
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, 'musubi-mic')
+        self.mic = audio.PhoneMic(run=self.pactl, clock=lambda: self.now, path=self.path)
+        self.pcm = bytes(range(240)) * 2
+        self.read = None
+
+    def _fifo(self):
+        """What the module does on load: make the pipe and hold its read end."""
+        os.mkfifo(self.path)
+        self.read = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, self.read)
+
+    def _received(self):
+        try:
+            return os.read(self.read, 1 << 20)
+        except BlockingIOError:
+            return b''
+
+    def test_the_device_is_a_mono_pipe_source_with_its_description_in_one_argument(self):
+        self.mic.load()
+        self.mic.load()
+        self.assertEqual(self.pactl.calls, [[
+            'pactl', 'load-module', 'module-pipe-source', 'source_name=musubi_mic', f'file={self.path}',
+            'format=s16le', 'rate=48000', 'channels=1', 'source_properties="device.description=\\"Musubi mic\\""']])
+
+    def test_nothing_is_opened_before_the_device_is_loaded(self):
+        self._fifo()
+        self.mic.feed(1, self.pcm)
+        self.assertIsNone(self.mic.fd)
+        self.assertEqual(self._received(), b'')
+
+    def test_the_pipe_is_opened_on_the_first_packet_that_finds_a_reader_and_kept_small(self):
+        self.mic.load()
+        self.mic.feed(1, self.pcm)
+        self.assertEqual((self.mic.fd, self.mic.failed), (None, False))
+        self._fifo()
+        self.mic.feed(2, self.pcm)
+        self.assertEqual(self._received(), self.pcm)
+        self.assertEqual(fcntl.fcntl(self.mic.fd, 1032), audio.MIC_PIPE_BYTES)
+
+    def test_old_and_repeated_numbers_are_dropped_and_the_wrap_is_followed(self):
+        self._fifo()
+        self.mic.load()
+        for seq in (0xfffe, 0xfffe, 0xfffd, 0xffff, 0, 1, 0xffff):
+            self.mic.feed(seq, self.pcm)
+        self.assertEqual(len(self._received()), 4 * len(self.pcm))
+
+    def test_a_gap_makes_a_low_number_a_new_stream(self):
+        self._fifo()
+        self.mic.load()
+        self.mic.feed(500, self.pcm)
+        self.now = 0.4
+        self.mic.feed(3, self.pcm)
+        self.now = 0.9
+        self.mic.feed(3, self.pcm)
+        self.mic.feed(4, self.pcm)
+        self.assertEqual(len(self._received()), 3 * len(self.pcm))
+
+    def test_a_full_pipe_drops_the_chunk_instead_of_blocking(self):
+        self._fifo()
+        self.mic.load()
+        for seq in range(300):
+            self.mic.feed(seq, self.pcm)
+        self.assertLess(len(self._received()), 300 * len(self.pcm))
+        self.assertFalse(self.mic.failed)
+
+    def test_a_dead_pipe_gives_up_and_unloads_the_device(self):
+        self._fifo()
+        self.mic.load()
+        self.mic.feed(1, self.pcm)
+        os.close(self.read)
+        self.read = os.open(os.devnull, os.O_RDONLY)
+        with mock.patch('sys.stderr', new_callable=io.StringIO):
+            self.mic.feed(2, self.pcm)
+        self.assertTrue(self.mic.failed)
+        self.assertEqual((self.mic.fd, self.mic.module), (None, None))
+        self.assertEqual(self.pactl.calls[-1], ['pactl', 'unload-module', '42'])
+
+    def test_stop_closes_the_pipe_and_unloads_the_device(self):
+        self._fifo()
+        self.mic.load()
+        self.mic.feed(1, self.pcm)
+        self.mic.stop()
+        self.assertEqual((self.mic.fd, self.mic.module), (None, None))
+        self.assertEqual(self.pactl.calls[-1], ['pactl', 'unload-module', '42'])
+
+    def test_remove_stale_matches_only_its_own_source_name(self):
+        self.pactl.modules = ('7\tmodule-pipe-source\tsource_name=musubi_mic file=/run/x format=s16le\n'
+                              '8\tmodule-null-sink\tsink_name=musubi sink_properties=device.description=Musubi\n'
+                              '9\tmodule-pipe-source\tsource_name=musubi_mic2\n')
+        self.mic.remove_stale()
+        self.assertEqual(self.pactl.calls[1:], [['pactl', 'unload-module', '7']])
+        pactl = FakePactl(self.pactl.modules)
+        audio.PhoneAudio(run=pactl, popen=mock.Mock()).remove_stale()
+        self.assertEqual(pactl.calls[1:], [['pactl', 'unload-module', '8']])
 
 
 class PhoneAudioTest(unittest.TestCase):

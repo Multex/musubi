@@ -203,9 +203,11 @@ def run_service():
     def on_rumble(strong, weak):
         write_event(out, {'event': 'rumble', 'strong': strong, 'weak': weak})
 
-    bridge = Bridge(sock, [], send_status, on_input, on_rumble, send_usb=link.send if link else None)
+    mic = audio.PhoneMic()
+    bridge = Bridge(sock, [], send_status, on_input, on_rumble, send_usb=link.send if link else None, on_mic=mic.feed)
     sound = audio.PhoneAudio()
     sound.remove_stale()
+    mic.remove_stale()
     levels = audio.Levels()
     # SystemExit runs the finally below, so a terminated service doesn't leave its sink behind.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -244,6 +246,9 @@ def run_service():
                         sound_enabled[0] = bool(command['sound'])
                         send_status()
             bridge.on_tick()
+            # shortcut: the device isn't remembered across restarts, the PC mic switch step adds that.
+            if (bridge.hello or {}).get('mic'):
+                mic.load()
             sync_sound(sound, sound_enabled[0] and bridge.wants_audio())
             sound.set_stable(bool((bridge.hello or {}).get('stable')))
             now = time.monotonic()
@@ -259,6 +264,7 @@ def run_service():
                 next_status = now + 1
                 send_status()
     finally:
+        mic.stop()
         sound.stop()
         bridge.close()
 
