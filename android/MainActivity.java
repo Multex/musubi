@@ -159,7 +159,7 @@ public class MainActivity extends Activity {
     private static final int MIC_HEADER = MIC_MAGIC.length + 2;
     private static final int MIC_BYTES = 480;
     // The mic byte at the end of the hello.
-    private static final int MIC_OFF = 0, MIC_LIVE = 1, MIC_MUTED = 2;
+    private static final int MIC_OFF = 0, MIC_LIVE = 1, MIC_MUTED = 2, MIC_PAUSED = 3;
     private static final int MIC_PERMISSION = 1;
     // Magic, then the PC name in UTF-8, matching NAME_MAGIC in core.py. Only sent over the cable.
     private static final byte[] NAME_MAGIC = {'P', 'B', 'N', 'M'};
@@ -194,12 +194,13 @@ public class MainActivity extends Activity {
     private static final String REPO = "https://github.com/Multex/musubi";
 
     // CONTROLLERS is the controllers page, opened from HOME.
-    private static final int CONTROLLERS = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6, HEADPHONES = 7;
+    private static final int CONTROLLERS = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6, HEADPHONES = 7, MIC = 8;
     private static final int CONNECTING = 0, RESPONDING = 1, LOST = 2;
     private static final int PRIMARY = 0, SECONDARY = 1, PLAIN = 2;
     private static final int ICON_DOWN = 0, ICON_RIGHT = 1, ICON_LEFT = 2, ICON_ARROW_UP = 3, ICON_ARROW_DOWN = 4;
     private static final int ICON_SQUARE = 5, ICON_HALF = 6, ICON_INFO = 7, ICON_SLIDERS = 8;
-    private static final int NODE_LIVE = 0, NODE_IDLE = 1, NODE_LATER = 2;
+    // NODE_MUTED: an amber ring, for the mic that is still there on the PC but sends silence.
+    private static final int NODE_LIVE = 0, NODE_IDLE = 1, NODE_MUTED = 2;
     // How often the player thread re-measures the delay, in 5 ms chunks.
     private static final int DELAY_EVERY = 50;
 
@@ -270,8 +271,21 @@ public class MainActivity extends Activity {
     private volatile DatagramSocket socket;
     // Muted keeps the mic on for the PC but releases it on the phone.
     private volatile boolean micOn, micMuted;
-    // Why the mic last stopped by itself, shown on Home until the next tap. UI thread only.
+    // "Allow anyway" with PC sound on the speaker; not saved, and cleared when the mic turns off.
+    private volatile boolean micAllowed;
+    // Android refused the mic permission; the Mic page says so until it's granted. UI thread only.
+    private boolean micDenied;
+    // Why the mic last stopped by itself, shown on the Mic page until the switch is used. UI thread only.
     private String micError;
+    // The loudest sample since the drawing last took it, 0 to 1.
+    private volatile float micPeak;
+    private final MicView.Source micLevel = () -> {
+        if (this.micThread == null) return -1;
+        float peak = micPeak;
+        micPeak = 0;
+        return peak;
+    };
+    private MicView micView;
     // Owns its AudioRecord and stops once this no longer points at it, like sender.
     private volatile Thread micThread;
     // A new mic thread waits here until the old one has released its AudioRecord.
@@ -407,8 +421,9 @@ public class MainActivity extends Activity {
         super.onResume();
         onScreen = true;
         ControllerReceiver.cancel(this);
-        // Notifications may have been allowed in Android's settings meanwhile.
-        if (screen == SETTINGS) render();
+        // Notifications or the mic may have been allowed in Android's settings meanwhile.
+        if (micDenied && hasMicPermission()) micDenied = false;
+        if (screen == SETTINGS || screen == MIC) render();
         lastTouch = SystemClock.uptimeMillis();
         // Coming back from the background keeps the same socket, threads and AudioTrack.
         leaveBackground();
@@ -1348,9 +1363,10 @@ public class MainActivity extends Activity {
         refreshOutput();
         // Picks up the cable or a PC coming and going.
         updateMic();
+        if (micView != null && micThread != null) micView.start();
         if (state != shownPcState) {
             shownPcState = state;
-            if (((screen == CONTROLLERS || screen == HOME || screen == HEADPHONES) && currentPc() != null) || screen == GAME || screen == SETTINGS) render();
+            if (((screen == CONTROLLERS || screen == HOME || screen == HEADPHONES || screen == MIC) && currentPc() != null) || screen == GAME || screen == SETTINGS) render();
         }
         if (pcDetail != null) pcDetail.setText(pcDetailText(state));
         if (settingsPing != null) {
@@ -1392,6 +1408,7 @@ public class MainActivity extends Activity {
         // The PC hears about it with the next hello instead of up to a second later.
         nextPing = 0;
         refreshOutput();
+        updateMic();
         render();
     }
 
@@ -1402,19 +1419,57 @@ public class MainActivity extends Activity {
         // The route is chosen when the track is built, so the next packet builds one for the new output.
         stopPlayer();
         refreshOutput();
+        // The speaker may pause the mic, or stop pausing it.
+        nextPing = 0;
+        updateMic();
         render();
     }
 
+    /** Paused: the mic would pick up PC sound from the speaker, until "Allow anyway". */
     private int micState() {
-        return !micOn ? MIC_OFF : micMuted ? MIC_MUTED : MIC_LIVE;
+        if (!micOn) return MIC_OFF;
+        if (micMuted) return MIC_MUTED;
+        return soundOn && useSpeaker() && !micAllowed ? MIC_PAUSED : MIC_LIVE;
     }
 
-    private void cycleMic() {
+    private void switchMic(boolean on) {
         micError = null;
-        if (micState() == MIC_LIVE) setMic(true, true);
-        else if (micOn) setMic(false, false);
+        if (!on) setMic(false, false);
         else if (hasMicPermission()) setMic(true, false);
         else requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, MIC_PERMISSION);
+    }
+
+    private void allowMic() {
+        micAllowed = true;
+        nextPing = 0;
+        updateMic();
+        render();
+    }
+
+    /** Styled like the Switch PC dialog. */
+    private void confirmAllowMic() {
+        AlertDialog dialog = new AlertDialog.Builder(this).create();
+        LinearLayout panel = dialogPanel("Use the mic with the speaker on?");
+        TextView body = text("People on the call may hear your game through the mic. This lasts until you turn the mic off.", 14, TEXT);
+        body.setLineSpacing(0, 1.45f);
+        panel.addView(body);
+        LinearLayout.LayoutParams allowParams = buttonParams(48);
+        allowParams.topMargin = dp(20);
+        panel.addView(button("Allow anyway", PRIMARY, () -> {
+            dialog.dismiss();
+            allowMic();
+        }), allowParams);
+        panel.addView(spaced(button("Cancel", SECONDARY, dialog::dismiss), 44));
+        showPanel(dialog, panel);
+    }
+
+    private void openAppSettings() {
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", getPackageName(), null)));
+        } catch (ActivityNotFoundException missing) {
+            Toast.makeText(this, "This phone has no app settings to open", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private boolean hasMicPermission() {
@@ -1426,10 +1481,11 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         if (requestCode != MIC_PERMISSION) return;
         if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+            micDenied = false;
             setMic(true, false);
         } else {
-            // After "Don't ask again" Android answers without showing anything, so say where to fix it.
-            micError = "Musubi needs the mic permission, in Android's app settings";
+            // After "Don't ask again" Android answers without showing anything, so the page says where to fix it.
+            micDenied = true;
             render();
         }
     }
@@ -1437,6 +1493,7 @@ public class MainActivity extends Activity {
     private void setMic(boolean on, boolean muted) {
         micOn = on;
         micMuted = muted;
+        if (!on) micAllowed = false;
         prefs.edit().putBoolean("mic", on).putBoolean("mic_muted", muted).apply();
         // The PC hears about it with the next hello instead of up to a second later.
         nextPing = 0;
@@ -1444,7 +1501,7 @@ public class MainActivity extends Activity {
         render();
     }
 
-    /** Records only while live, on screen, allowed, and there's a PC to send to; otherwise the mic is released. */
+    /** Records only while live (not muted or paused), on screen, allowed, and there's a PC to send to; otherwise the mic is released. */
     private void updateMic() {
         boolean linked;
         synchronized (lock) {
@@ -1501,6 +1558,11 @@ public class MainActivity extends Activity {
                     // Bytes, so the PCM is already little-endian.
                     int read = record.read(frame, 2 + MIC_HEADER, MIC_BYTES);
                     if (read != MIC_BYTES) throw new IllegalStateException("The mic stopped recording (" + read + ")");
+                    int peak = 0;
+                    for (int i = 2 + MIC_HEADER; i < frame.length; i += 2) {
+                        peak = Math.max(peak, Math.abs((short) (frame[i] & 0xFF | frame[i + 1] << 8)));
+                    }
+                    micPeak = Math.max(micPeak, Math.min(1, peak / 32767f));
                     frame[6] = (byte) (sequence >> 8);
                     frame[7] = (byte) sequence;
                     FileOutputStream usb = usbOut;
@@ -1642,6 +1704,7 @@ public class MainActivity extends Activity {
         soundReadout = null;
         soundStatus = null;
         headphones = null;
+        micView = null;
         if (screen != EDIT_PC && screen != HOME) formError = null;
         applyGameWindow(screen == GAME);
         shownPcState = pcState();
@@ -1653,6 +1716,7 @@ public class MainActivity extends Activity {
             case SETTINGS: setContentView(buildSettings()); break;
             case EDIT_PC: setContentView(buildEditPc()); break;
             case HEADPHONES: setContentView(buildHeadphones()); break;
+            case MIC: setContentView(buildMic()); break;
             default: setContentView(currentPc() != null ? buildControllers(currentPc()) : buildMain()); break;
         }
         renderedScreen = screen;
@@ -1714,8 +1778,10 @@ public class MainActivity extends Activity {
         boolean lost = shownPcState == LOST, answering = shownPcState == RESPONDING;
         boolean soundLive = soundLive();
         int players = deviceId != -1 ? 1 : 0;
-        // Below the last live feature the cord is always off.
-        int toControllers = answering ? ACTIVE : BORDER, toSound = soundLive ? ACTIVE : BORDER;
+        int mic = micState();
+        // Below the last live feature the cord is always off; a paused or muted mic still counts.
+        int toMic = answering && mic != MIC_OFF ? ACTIVE : BORDER;
+        int toControllers = answering ? ACTIVE : BORDER, toSound = soundLive || toMic == ACTIVE ? ACTIVE : BORDER;
 
         LinearLayout pcBlock = column();
         pcBlock.setPadding(0, 0, 0, dp(16));
@@ -1777,20 +1843,22 @@ public class MainActivity extends Activity {
         sound.addView(headphones, gapped(60, 60));
         sound.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
-        // Temporary until the Mic page: each tap goes off, live, muted, off.
-        String micTitle = micOn ? micMuted ? "Muted" : "Live" : "Off";
-        LinearLayout mic = clickableRow(this::cycleMic, "Mic, " + micTitle + ", tap to change");
-        mic.setMinimumHeight(dp(64));
-        mic.setPadding(dp(4), dp(6), dp(4), dp(6));
+        String micTitle = mic == MIC_LIVE ? "Phone mic" : mic == MIC_MUTED ? "Muted" : mic == MIC_PAUSED ? "Paused" : "Off";
+        LinearLayout micRow = clickableRow(() -> show(MIC), "Mic, " + micTitle + ", open");
+        micRow.setMinimumHeight(dp(64));
+        micRow.setPadding(dp(4), dp(6), dp(4), dp(6));
         LinearLayout micText = featureText("Mic · to PC", micTitle, TEXT);
-        micText.addView(detail(micError != null ? micError : "Shows up on the PC as Musubi mic"));
-        mic.addView(micText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        micText.addView(mono(mic == MIC_LIVE ? "Live as Musubi mic" : mic == MIC_MUTED ? "Musubi mic sends silence"
+            : mic == MIC_PAUSED ? "Sound is on the speaker" : "Uses the phone's own mic"));
+        micRow.addView(micText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        micRow.addView(micDrawing(mic), gapped(60, 54));
+        micRow.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
         LinearLayout features = column();
         features.setAlpha(lost ? 0.45f : 1);
         features.addView(strand(toControllers, 26, node(answering && players > 0 ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), 24, toSound, controllers, true));
-        features.addView(strand(toSound, 26, node(soundLive ? NODE_LIVE : NODE_IDLE, ICON_ARROW_DOWN), 24, BORDER, sound, true));
-        features.addView(strand(BORDER, 26, node(answering && micState() == MIC_LIVE ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), 24, 0, mic, true));
+        features.addView(strand(toSound, 26, node(soundLive ? NODE_LIVE : NODE_IDLE, ICON_ARROW_DOWN), 24, toMic, sound, true));
+        features.addView(strand(toMic, 26, micNode(mic), 24, 0, micRow, true));
 
         LinearLayout cord = column();
         cord.setPadding(dp(16), dp(16), dp(16), 0);
@@ -1844,11 +1912,10 @@ public class MainActivity extends Activity {
             shape.setColor(ACTIVE);
         } else {
             shape.setColor(BACKGROUND);
-            if (kind == NODE_IDLE) shape.setStroke(dp(2), IDLE);
-            else shape.setStroke(dp(2), LATER, dp(3), dp(2));
+            shape.setStroke(dp(2), kind == NODE_MUTED ? ACTIVE : IDLE);
         }
         node.setBackground(shape);
-        int arrow = kind == NODE_LIVE ? BACKGROUND : kind == NODE_IDLE ? MUTED : IDLE;
+        int arrow = kind == NODE_LIVE ? BACKGROUND : kind == NODE_MUTED ? ACTIVE : MUTED;
         node.addView(new IconView(this, icon, arrow),
             new FrameLayout.LayoutParams(dp(12), dp(12), Gravity.CENTER));
         return node;
@@ -1951,17 +2018,7 @@ public class MainActivity extends Activity {
     /** Always the dialog, even with one PC: its "Manage PCs" button is the way to add another. */
     private void switchPc() {
         AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout panel = column();
-        panel.setPadding(dp(16), dp(16), dp(16), dp(16));
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(SURFACE);
-        background.setStroke(dp(1), BORDER);
-        background.setCornerRadius(dp(6));
-        panel.setBackground(background);
-        TextView title = text("Switch PC", 18, TEXT);
-        title.setTypeface(medium());
-        title.setPadding(0, 0, 0, dp(8));
-        panel.addView(title);
+        LinearLayout panel = dialogPanel("Switch PC");
         boolean onCable = currentPc() == usbPc;
         if (onCable) {
             // The cable always wins while it's plugged in, so Wi-Fi rows here would look like they do nothing.
@@ -1983,6 +2040,26 @@ public class MainActivity extends Activity {
             dialog.dismiss();
             show(SETTINGS);
         }), 44));
+        showPanel(dialog, panel);
+    }
+
+    /** A dialog's surface panel with its title; showPanel puts it on screen. */
+    private LinearLayout dialogPanel(String heading) {
+        LinearLayout panel = column();
+        panel.setPadding(dp(16), dp(16), dp(16), dp(16));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(SURFACE);
+        background.setStroke(dp(1), BORDER);
+        background.setCornerRadius(dp(6));
+        panel.setBackground(background);
+        TextView title = text(heading, 18, TEXT);
+        title.setTypeface(medium());
+        title.setPadding(0, 0, 0, dp(8));
+        panel.addView(title);
+        return panel;
+    }
+
+    private void showPanel(AlertDialog dialog, View panel) {
         dialog.setView(panel);
         dialog.show();
         if (dialog.getWindow() != null) {
@@ -2089,6 +2166,105 @@ public class MainActivity extends Activity {
         about.addView(aboutNote);
         body.addView(divided(about));
         return withHeader("Headphones", node(soundLive() ? NODE_LIVE : NODE_IDLE, ICON_ARROW_DOWN), () -> show(HOME), body);
+    }
+
+    /** Laid out like the Headphones page: the state, the drawing, the switch, then Mute or what keeps the mic from working. */
+    private View buildMic() {
+        int mic = micState();
+        boolean live = mic == MIC_LIVE, muted = mic == MIC_MUTED, paused = mic == MIC_PAUSED, denied = micDenied;
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(16), dp(16), dp(16));
+        body.addView(text("Phone mic", 12, MUTED));
+        TextView title = text(denied ? "No mic permission" : live ? "Phone mic" : muted ? "Muted" : paused ? "Paused" : "Off",
+            16, denied ? ALERT : TEXT);
+        title.setTypeface(medium());
+        title.setPadding(0, dp(6), 0, 0);
+        body.addView(title);
+        TextView sub = detail(denied ? "Android blocked Musubi from using the mic."
+            : mic == MIC_OFF ? (micError != null ? micError : "Uses the phone's own mic, so your earbuds keep their full sound.")
+            : paused ? "PC sound plays on the phone speaker, so the mic would pick up your game."
+            : muted ? "Musubi mic stays picked in Discord but sends silence."
+            : soundOn && useSpeaker() ? "On while PC sound plays on the speaker. People on the call may hear your game."
+            : "The phone's own mic. Your earbuds keep their full sound.");
+        sub.setPadding(0, dp(6), 0, 0);
+        body.addView(sub);
+
+        FrameLayout stage = new FrameLayout(this);
+        stage.setPadding(0, dp(16), 0, dp(8));
+        MicView drawing = micDrawing(denied ? MIC_PAUSED : mic);
+        if (denied) drawing.setContentDescription("Mic, not allowed");
+        stage.addView(drawing, new FrameLayout.LayoutParams(dp(200), dp(180), Gravity.CENTER));
+        body.addView(stage, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        TextView readout = mono(denied ? "Mic not allowed" : live ? "Hearing you" : muted ? "Muted"
+            : paused ? "Mic paused" : "Turn on to send your voice");
+        readout.setTextColor(denied ? ALERT : live ? ACTIVE : MUTED);
+        readout.setGravity(Gravity.CENTER);
+        readout.setPadding(0, 0, 0, dp(8));
+        body.addView(readout);
+
+        LinearLayout send = row();
+        LinearLayout sendText = column();
+        TextView sendTitle = text("Send my voice", 16, TEXT);
+        sendTitle.setTypeface(medium());
+        sendText.addView(sendTitle);
+        sendText.addView(mono(micOn ? "Shows up on the PC as Musubi mic" : "Off here and on the PC"));
+        send.addView(sendText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        SwitchView toggle = new SwitchView(this);
+        toggle.setChecked(micOn);
+        toggle.setContentDescription("Send my voice");
+        toggle.setBackground(ripple(new ColorDrawable(0)));
+        toggle.setOnCheckedChangeListener((button, on) -> switchMic(on));
+        send.addView(toggle, gapped(56, 44));
+        body.addView(divided(send));
+
+        LinearLayout action = column();
+        if (paused) {
+            action.addView(button("Play on headphones", SECONDARY, () -> setSpeaker(false)), buttonParams(44));
+            action.addView(hint("Moves PC sound off the speaker"));
+            action.addView(spaced(button("Allow anyway", SECONDARY, this::confirmAllowMic), 44));
+        } else if (denied) {
+            action.addView(button("Allow the mic", SECONDARY, this::openAppSettings), buttonParams(44));
+            action.addView(hint("Opens Musubi in the phone's settings"));
+        } else {
+            Button mute = button(muted ? "Unmute" : "Mute", muted ? PRIMARY : SECONDARY, () -> setMic(true, !micMuted));
+            if (!micOn) {
+                mute.setEnabled(false);
+                mute.setAlpha(0.5f);
+            }
+            action.addView(mute, buttonParams(48));
+        }
+        body.addView(divided(action));
+
+        LinearLayout tip = column();
+        tip.addView(text("On the PC", 12, MUTED));
+        TextView tipNote = detail("In Discord or your game, pick “Musubi mic” as the input.");
+        tipNote.setPadding(0, dp(8), 0, 0);
+        tip.addView(tipNote);
+        body.addView(divided(tip));
+        return withHeader("Mic", micNode(mic), () -> show(HOME), body);
+    }
+
+    /** Amber only while the PC answers: filled when live, a ring when muted. */
+    private View micNode(int mic) {
+        boolean answering = shownPcState == RESPONDING;
+        return node(answering && mic == MIC_LIVE ? NODE_LIVE : answering && mic == MIC_MUTED ? NODE_MUTED : NODE_IDLE, ICON_ARROW_UP);
+    }
+
+    private MicView micDrawing(int mic) {
+        micView = new MicView(this, micLevel);
+        micView.setMode(mic == MIC_LIVE ? MicView.ON : mic == MIC_MUTED ? MicView.MUTED : mic == MIC_PAUSED ? MicView.PAUSED : MicView.OFF);
+        micView.setContentDescription(mic == MIC_LIVE ? "Mic, live" : mic == MIC_MUTED ? "Mic, muted"
+            : mic == MIC_PAUSED ? "Mic, paused" : "Mic, off");
+        micView.start();
+        return micView;
+    }
+
+    /** The small centred line under a button, like "Opens the phone's Bluetooth settings". */
+    private TextView hint(String value) {
+        TextView view = text(value, 12, MUTED);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(0, dp(6), 0, 0);
+        return view;
     }
 
     /** Spec 4.3. Until multi-pad ships only player 1 is real; players 2 to 4 are placeholders. */
