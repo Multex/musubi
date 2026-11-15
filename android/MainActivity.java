@@ -450,8 +450,6 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         onScreen = false;
-        // Recording from the background is a later step.
-        updateMic();
         handler.removeCallbacks(tick);
         handler.removeCallbacks(finishCapture);
         capture.clear();
@@ -464,6 +462,8 @@ public class MainActivity extends Activity {
         // Connected, so keep the PC's sound playing; the sender keeps the neutral pad alive on the PC.
         if (prefs.getBoolean("background", true) && pcState() == RESPONDING) enterBackground();
         else stopAll();
+        // After the background state is settled: the mic keeps going only in background mode.
+        updateMic();
     }
 
     @Override
@@ -477,6 +477,7 @@ public class MainActivity extends Activity {
     private void stopAll() {
         if (!running) return;
         leaveBackground();
+        updateMic();
         running = false;
         sender.interrupt();
         wifiLock.release();
@@ -517,7 +518,7 @@ public class MainActivity extends Activity {
     /** Starts the service, or updates its notification when the cable comes or goes. */
     private void showKeepAlive() {
         startService(new Intent(this, KeepAliveService.class).putExtra(KeepAliveService.EXTRA_PC, currentPc().name)
-            .putExtra(KeepAliveService.EXTRA_SOUND, soundOn));
+            .putExtra(KeepAliveService.EXTRA_SOUND, soundOn).putExtra(KeepAliveService.EXTRA_MIC, micState() == MIC_LIVE));
     }
 
     /** Android only lists the accessory once Musubi on the PC has switched the phone over. */
@@ -1516,16 +1517,17 @@ public class MainActivity extends Activity {
         // The PC hears about it with the next hello instead of up to a second later.
         nextPing = 0;
         updateMic();
+        if (backgrounded) showKeepAlive();
         render();
     }
 
-    /** Records only while live (not muted or paused), on screen, allowed, and there's a PC to send to; otherwise the mic is released. */
+    /** Records only while live (not muted or paused), on screen or in background mode, allowed, and there's a PC to send to; otherwise the mic is released. */
     private void updateMic() {
         boolean linked;
         synchronized (lock) {
             linked = target != null;
         }
-        boolean record = micState() == MIC_LIVE && onScreen && (linked || usbOut != null) && hasMicPermission();
+        boolean record = micState() == MIC_LIVE && (onScreen || backgrounded) && (linked || usbOut != null) && hasMicPermission();
         if (record == (micThread != null)) return;
         Thread thread = record ? new Thread(this::micLoop, "musubi-mic") : null;
         micThread = thread;

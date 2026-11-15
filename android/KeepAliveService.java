@@ -15,6 +15,7 @@ public class KeepAliveService extends Service {
     static final String ACTION_STOP = "io.github.multex.musubi.STOP";
     static final String EXTRA_PC = "pc";
     static final String EXTRA_SOUND = "sound";
+    static final String EXTRA_MIC = "mic";
     private static final String CHANNEL = "background";
 
     private PowerManager.WakeLock wakeLock;
@@ -44,14 +45,18 @@ public class KeepAliveService extends Service {
         // The build makes no R class, so the icon is looked up by name.
         builder.setSmallIcon(getResources().getIdentifier("ic_stat_musubi", "drawable", getPackageName()))
             .setContentTitle("Connected to " + intent.getStringExtra(EXTRA_PC))
-            .setContentText(intent.getBooleanExtra(EXTRA_SOUND, true)
-                ? "Sound keeps playing. Open Musubi to use the controller."
-                : "PC sound is off. Open Musubi to use the controller.")
+            .setContentText(contentText(intent.getBooleanExtra(EXTRA_SOUND, true), intent.getBooleanExtra(EXTRA_MIC, false)))
             .setContentIntent(open)
             .setOngoing(true)
             .addAction(0, "Stop", stop);
         startForeground(1, builder.build());
         return START_NOT_STICKY;
+    }
+
+    private static String contentText(boolean sound, boolean mic) {
+        if (mic) return (sound ? "Sound and mic keep going." : "Mic keeps going.") + " Open Musubi to use the controller.";
+        return sound ? "Sound keeps playing. Open Musubi to use the controller."
+            : "PC sound is off. Open Musubi to use the controller.";
     }
 
     private Intent stopIntent() {
