@@ -2249,10 +2249,12 @@ public class MainActivity extends Activity {
         TextView sendTitle = text("Send my voice", 16, TEXT);
         sendTitle.setTypeface(medium());
         sendText.addView(sendTitle);
-        sendText.addView(mono(micOn ? "Shows up on the PC as Musubi mic" : "Off here and on the PC"));
+        // Without the permission the mic is off for the PC too, even though the wish to have it on is kept.
+        boolean shownOn = mic != MIC_OFF;
+        sendText.addView(mono(shownOn ? "Shows up on the PC as Musubi mic" : "Off here and on the PC"));
         send.addView(sendText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         SwitchView toggle = new SwitchView(this);
-        toggle.setChecked(micOn);
+        toggle.setChecked(shownOn);
         toggle.setContentDescription("Send my voice");
         toggle.setBackground(ripple(new ColorDrawable(0)));
         toggle.setOnCheckedChangeListener((button, on) -> switchMic(on, false));
