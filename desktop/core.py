@@ -248,7 +248,7 @@ class Bridge:
             self._note_unknown(ip, data)
             return
         # Junk from an allowed IP (a TV's stray packet) must not make it the active phone.
-        if decode_hello(data) is None and len(data) not in (PING_SIZE, PACKET.size):
+        if decode_hello(data) is None and len(data) not in (PING_SIZE, PACKET.size) and not data.startswith(MIC_MAGIC):
             return
         now = self.clock()
         if self.active != ip:
