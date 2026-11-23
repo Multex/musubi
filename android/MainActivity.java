@@ -306,8 +306,6 @@ public class MainActivity extends Activity {
     private final List<Pc> pcs = new ArrayList<>();
     private int selectedPc;
     private boolean autoGameMode;
-    private volatile boolean vibration = true;
-    private volatile int vibrationStrength = 100;
 
     private static final int MAX_PLAYERS = PlayerSlots.MAX;
 
@@ -320,6 +318,8 @@ public class MainActivity extends Activity {
         ButtonMap map = defaultMap();
         // Stick deadzone radius, 0..1; read once per motion event.
         volatile float deadzone;
+        volatile boolean vibration = true;
+        volatile int vibrationStrength = 100;
         int axisButtons;
         String unmapped;
         int held;
@@ -428,8 +428,6 @@ public class MainActivity extends Activity {
         prefs = getPreferences(MODE_PRIVATE);
         ControllerReceiver.createChannel(this);
         autoGameMode = prefs.getBoolean("autoGameMode", true);
-        vibration = prefs.getBoolean("vibration", true);
-        vibrationStrength = prefs.getInt("vibration_strength", 100);
         soundOn = prefs.getBoolean("sound", false);
         speaker = prefs.getBoolean("speaker", false);
         stableSound = "stable".equals(prefs.getString("sound_buffer", "low"));
@@ -837,14 +835,17 @@ public class MainActivity extends Activity {
                 onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
             } else if (length >= RUMBLE_SIZE && magic == ByteBuffer.wrap(RUMBLE_MAGIC).getInt()) {
                 // The pad's input doesn't reach the PC from the background, so neither does its rumble.
-                if (running && !backgrounded && vibration) {
-                    int scale = vibrationStrength;
-                    int strong = (in.getShort() & 0xffff) * scale / 100, weak = (in.getShort() & 0xffff) * scale / 100, ms = in.getShort() & 0xffff;
+                if (running && !backgrounded) {
+                    int rawStrong = in.getShort() & 0xffff, rawWeak = in.getShort() & 0xffff, ms = in.getShort() & 0xffff;
                     int index = in.hasRemaining() ? (in.get() & 0xff) : 0;
                     if (index < MAX_PLAYERS) {
                         PadSlot slot = slots[index];
-                        rumble(slot.deviceId, strong, weak, ms);
-                        handler.post(() -> showRumble(slot, strong, weak, ms));
+                        if (slot.vibration) {
+                            int scale = slot.vibrationStrength;
+                            int strong = rawStrong * scale / 100, weak = rawWeak * scale / 100;
+                            rumble(slot.deviceId, strong, weak, ms);
+                            handler.post(() -> showRumble(slot, strong, weak, ms));
+                        }
                     }
                 }
             } else if (length >= 5 && magic == ByteBuffer.wrap(MIC_CMD_MAGIC).getInt()) {
@@ -1181,20 +1182,6 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private boolean anyCanVibrate() {
-        for (PadSlot slot : slots) {
-            if (slot.connected() && canVibrate(slot.deviceId)) return true;
-        }
-        return false;
-    }
-
-    private boolean anyCanVaryStrength() {
-        for (PadSlot slot : slots) {
-            if (slot.connected() && canVaryStrength(slot.deviceId)) return true;
-        }
-        return false;
-    }
-
     private static void fill(ByteBuffer out, int held, short[] axes) {
         out.putInt(held & WIRE_BUTTONS);
         for (int i = 0; i < 4; i++) {
@@ -1295,6 +1282,51 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static String vibrationKey(PadSlot slot) {
+        return "vibration:" + slot.descriptor;
+    }
+
+    private static String strengthKey(PadSlot slot) {
+        return "vibration_strength:" + slot.descriptor;
+    }
+
+    private void loadVibration(PadSlot slot) {
+        slot.vibration = slot.descriptor == null || prefs.getBoolean(vibrationKey(slot), true);
+        int pct = slot.descriptor != null ? prefs.getInt(strengthKey(slot), 100) : 100;
+        slot.vibrationStrength = Math.max(10, Math.min(100, pct));
+    }
+
+    private void saveVibration(PadSlot slot, boolean on) {
+        slot.vibration = on;
+        if (!on) {
+            rumble(slot.deviceId, 0, 0, 0);
+            showRumble(slot, 0, 0, 0);
+        }
+        if (slot.descriptor == null) return;
+        prefs.edit().putBoolean(vibrationKey(slot), on).apply();
+        for (PadSlot s : slots) {
+            if (s != slot && slot.descriptor.equals(s.descriptor)) {
+                s.vibration = on;
+                if (!on) {
+                    rumble(s.deviceId, 0, 0, 0);
+                    showRumble(s, 0, 0, 0);
+                }
+            }
+        }
+    }
+
+    private void saveVibrationStrength(PadSlot slot, int strength) {
+        strength = Math.max(10, Math.min(100, strength));
+        slot.vibrationStrength = strength;
+        if (slot.descriptor == null) return;
+        prefs.edit().putInt(strengthKey(slot), strength).apply();
+        for (PadSlot s : slots) {
+            if (s != slot && slot.descriptor.equals(s.descriptor)) {
+                s.vibrationStrength = strength;
+            }
+        }
+    }
+
     private void updateController() {
         if (findControllers() && (screen == CONTROLLERS || screen == CONTROLLER_SETTINGS || screen == HOME || screen == SETTINGS || screen == GAME)) {
             render();
@@ -1317,6 +1349,7 @@ public class MainActivity extends Activity {
         slot.stickYAxis = onlyRx ? MotionEvent.AXIS_RY : MotionEvent.AXIS_RZ;
         loadMap(slot);
         loadDeadzone(slot);
+        loadVibration(slot);
     }
 
     private boolean findControllers() {
@@ -1345,6 +1378,8 @@ public class MainActivity extends Activity {
                     slot.descriptor = null;
                     slot.axisButtons = 0;
                     slot.deadzone = 0;
+                    slot.vibration = true;
+                    slot.vibrationStrength = 100;
                     clearInput(slot);
                     changed = true;
                 }
@@ -2675,10 +2710,51 @@ public class MainActivity extends Activity {
         title.setTypeface(medium());
         body.addView(title);
         body.addView(detail("Saved for this controller only."));
+        body.addView(divided(vibrationSection(slot)));
         body.addView(divided(deadzoneRow(slot)));
         LinearLayout root = (LinearLayout) withHeader("Player " + selectedPlayer, playerBadge(selectedPlayer), () -> show(CONTROLLERS), body);
         ((LinearLayout) root.getChildAt(0)).getChildAt(0).setContentDescription("Back to Controllers");
         return root;
+    }
+
+    private LinearLayout vibrationSection(PadSlot slot) {
+        LinearLayout section = column();
+        boolean stuck = !canVibrate(slot.deviceId);
+        LinearLayout row = row();
+        row.setMinimumHeight(dp(52));
+        row.setPadding(0, dp(4), 0, dp(4));
+        LinearLayout text = column();
+        TextView title = text("Vibration", 15, TEXT);
+        title.setTypeface(medium());
+        text.addView(title);
+        text.addView(settingsNote(stuck ? "Needs a newer Android to vibrate" : "Rumble from games"));
+        row.addView(text, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        SwitchView toggle = new SwitchView(this);
+        toggle.setChecked(slot.vibration);
+        toggle.setContentDescription("Vibration");
+        toggle.setBackground(ripple(new ColorDrawable(0)));
+        if (stuck) {
+            toggle.setEnabled(false);
+            toggle.setAlpha(0.5f);
+        } else {
+            toggle.setOnCheckedChangeListener((view, checked) -> {
+                saveVibration(slot, checked);
+                render();
+            });
+        }
+        row.addView(toggle, gapped(56, 44));
+        section.addView(row);
+        if (slot.vibration && !stuck) {
+            if (canVaryStrength(slot.deviceId)) {
+                section.addView(strengthRow(slot));
+            } else {
+                LinearLayout testRow = row();
+                testRow.setPadding(0, dp(8), 0, 0);
+                testRow.addView(testButton(slot));
+                section.addView(testRow);
+            }
+        }
+        return section;
     }
 
     /** Number over label; the selected tab gets the surface fill and a cream bottom edge, like the output tabs. */
@@ -2940,7 +3016,6 @@ public class MainActivity extends Activity {
 
         int players = connectedCount();
         boolean controller = players > 0;
-        PadSlot first = firstConnected();
         LinearLayout generalSection = column();
         generalSection.addView(sectionHeading("General", false, ICON_SLIDERS, null));
         generalSection.addView(prefRow("Keep the screen on", "While Musubi is open. Game mode always keeps it on.", "keep_screen",
@@ -2975,46 +3050,19 @@ public class MainActivity extends Activity {
 
         LinearLayout controllerSection = column();
         controllerSection.addView(sectionHeading("Controllers", controller, ICON_ARROW_UP, controller ? players + " connected" : null));
-        TextView layouts = text("Button layouts", 15, TEXT);
+        TextView layouts = text("Per-controller settings", 15, TEXT);
         layouts.setTypeface(medium());
         layouts.setPadding(0, dp(4), 0, 0);
         controllerSection.addView(layouts);
-        controllerSection.addView(settingsNote("Each controller keeps its own layout and stick deadzone. Change them from Controllers, on each player's tab."));
+        controllerSection.addView(settingsNote("Each controller keeps its own button layout, vibration, and stick deadzone. Change them from Controllers, on each player's tab."));
         boolean canReset = anyCustomMap();
-        Button reset = button("Reset layout", SECONDARY, () -> {
+        Button reset = button("Reset button layouts", SECONDARY, () -> {
             resetConnectedLayouts();
             render();
         });
         reset.setEnabled(canReset);
         reset.setAlpha(canReset ? 1 : 0.5f);
         controllerSection.addView(spaced(reset, 44));
-        boolean stuck = controller && !anyCanVibrate();
-        String stuckNote = players == 1 && first != null
-            ? first.deviceName + " needs a newer Android to vibrate"
-            : "Connected controllers need a newer Android to vibrate";
-        LinearLayout vibrationRow = prefRow("Vibration", stuck ? stuckNote : "Rumble from games", "vibration",
-            () -> {
-                vibration = prefs.getBoolean("vibration", true);
-                render();
-            });
-        if (stuck) {
-            View toggle = vibrationRow.getChildAt(1);
-            toggle.setEnabled(false);
-            toggle.setAlpha(0.5f);
-        }
-        vibrationRow.setPadding(0, dp(12), 0, dp(6));
-        controllerSection.addView(vibrationRow);
-        boolean strength = false;
-        if (vibration && !stuck) {
-            if (!controller || anyCanVaryStrength()) {
-                controllerSection.addView(strengthRow(controller));
-                strength = true;
-            } else {
-                LinearLayout testRow = row();
-                testRow.addView(testButton());
-                controllerSection.addView(testRow);
-            }
-        }
 
         LinearLayout gameSection = column();
         gameSection.addView(sectionHeading("Game mode", false, ICON_HALF, null));
@@ -3085,8 +3133,6 @@ public class MainActivity extends Activity {
             sections[i].setPadding(dp(16), dp(16), dp(16), dp(12));
             body.addView(sections[i]);
         }
-        // The 44dp strength slider already carries its own air below the track.
-        if (strength) controllerSection.setPadding(dp(16), dp(16), dp(16), dp(4));
         return withHeader("Settings", null, () -> show(HOME), body);
     }
 
@@ -3159,12 +3205,11 @@ public class MainActivity extends Activity {
         settingsSoundNow.setVisibility(now.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
-    private Button testButton() {
+    private Button testButton(PadSlot slot) {
         Button test = button("Test", SECONDARY, () -> {
-            int level = 65535 * vibrationStrength / 100;
-            for (PadSlot slot : slots) {
-                if (slot.connected()) rumble(slot.deviceId, level, level, 500);
-            }
+            int level = 65535 * slot.vibrationStrength / 100;
+            rumble(slot.deviceId, level, level, 500);
+            showRumble(slot, level, level, 500);
         });
         test.setContentDescription("Test vibration");
         test.setPadding(dp(14), 0, dp(14), 0);
@@ -3172,29 +3217,26 @@ public class MainActivity extends Activity {
         return test;
     }
 
-    private LinearLayout strengthRow(boolean withTest) {
+    private LinearLayout strengthRow(PadSlot slot) {
         LinearLayout box = column();
         box.setPadding(0, dp(8), 0, 0);
         LinearLayout labels = row();
         TextView name = text("Strength", 15, TEXT);
         name.setTypeface(medium());
         labels.addView(name, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView value = mono(vibrationStrength + "%");
+        TextView value = mono(slot.vibrationStrength + "%");
         value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         labels.addView(value);
-        if (withTest) {
-            Button test = testButton();
-            ((LinearLayout.LayoutParams) test.getLayoutParams()).leftMargin = dp(12);
-            labels.addView(test);
-        }
+        Button test = testButton(slot);
+        ((LinearLayout.LayoutParams) test.getLayoutParams()).leftMargin = dp(12);
+        labels.addView(test);
         box.addView(labels);
 
-        StrengthView bar = new StrengthView(this, "Vibration strength", 10, 100, 10, vibrationStrength, true);
+        StrengthView bar = new StrengthView(this, "Vibration strength", 10, 100, 10, slot.vibrationStrength, true);
         bar.setListener(new StrengthView.Listener() {
             @Override public void onChange(int strength) {
-                vibrationStrength = strength;
+                saveVibrationStrength(slot, strength);
                 value.setText(strength + "%");
-                prefs.edit().putInt("vibration_strength", strength).apply();
             }
             @Override public void onHold(boolean held) {
                 value.setTextColor(held ? ACTIVE : MUTED);
