@@ -8,12 +8,12 @@
   <strong>Use your phone as the Bluetooth hub your PC doesn't have.</strong>
 </p>
 
-Pair a Bluetooth gamepad with an Android phone, and your Linux PC gets a virtual Xbox 360 pad that games treat as a normal controller. Since 0.6.0 it also works the other way: your PC's sound can play on the earbuds paired with the phone. I built it because my PC has no Bluetooth and I had an old phone lying around.
+Pair up to four Bluetooth gamepads with an Android phone, and your Linux PC gets a virtual Xbox 360 pad for each one that games treat as a normal controller. Since 0.6.0 it also works the other way: your PC's sound can play on the earbuds paired with the phone. I built it because my PC has no Bluetooth and I had an old phone lying around.
 
 <p align="center">
-  <img src="docs/assets/home.png" alt="Musubi Home screen on Android showing the connected PC, 1 of 4 players, and active headphones with a 170 ms delay." width="250">
+  <img src="docs/assets/home.png" alt="Musubi Home screen on Android showing the connected PC over Wi-Fi, 2 of 4 players, sound on the phone speaker with a 170 ms delay, and the mic off." width="250">
   &nbsp;
-  <img src="docs/assets/controller.png" alt="Musubi Controllers page on Android: player 1 connected, the left stick tilted in amber, and rumble waves beside both grips." width="250">
+  <img src="docs/assets/controller.png" alt="Musubi Controllers page on Android: players 1 and 2 connected, player 2's Xbox pad with the left stick, L1 and A lit in amber, and Remap and Settings buttons below." width="250">
   &nbsp;
   <img src="docs/assets/headphones.png" alt="Musubi Headphones screen on Android with amber level meters and wave showing sound arriving over Wi-Fi." width="250">
 </p>
@@ -28,7 +28,7 @@ That's what this app does. Your Bluetooth devices and your PC can't reach each o
 
 ## What you need
 
-- A Linux PC with Python 3, `python-evdev` and access to `/dev/uinput`. Windows and macOS won't work, because the virtual pad depends on `uinput`. The desktop app also needs GTK 4 and PyGObject. Sound on the phone needs `pactl` and `parec`, which come with PipeWire's PulseAudio support on most desktops.
+- A Linux PC with Python 3, `python-evdev` and access to `/dev/uinput`. macOS won't work, because the virtual pad depends on `uinput`. A [Windows version](#windows-version) is in progress. The desktop app also needs GTK 4 and PyGObject. Sound on the phone needs `pactl` and `parec`, which come with PipeWire's PulseAudio support on most desktops.
 - An Android phone with the app open while you play. The app declares Android 5.0 or newer, but it has only run on those four phones.
 - A Bluetooth gamepad that Android recognizes as a gamepad.
 - The phone and the PC on the same network, or a USB cable between them.
@@ -99,13 +99,13 @@ python3 desktop/linux/musubi.py 192.168.1.10
 ## Desktop app
 
 <p align="center">
-  <img src="docs/assets/desktop.png" alt="Musubi on a Linux PC: the Overview page with a Motorola phone on the USB cable, 1 of 4 players connected, and sound playing on the phone with amber levels in the headphone cups." width="700">
+  <img src="docs/assets/desktop.png" alt="Musubi on a Linux PC: the Overview page with a Motorola phone on Wi-Fi, 2 of 4 players connected, sound playing on the phone with an 80 ms delay, and the mic off." width="700">
 </p>
 
-- **Sidebar:** shows the connected phone, its link (Wi-Fi or USB cable) and ping, with pages for **Overview**, **Controllers** and **Sound on phone**.
-- **Overview:** the phone, the controller and the sound at a glance. **Controllers** shows the live pad, and **Sound on phone** shows the PC's sound levels and can turn sound off from the PC.
+- **Sidebar:** shows the connected phone, its link (Wi-Fi or USB cable) and ping, with pages for **Overview**, **Controllers**, **Sound on phone** and **Mic**.
+- **Overview:** the phone, the controllers, the sound and the mic at a glance. **Controllers** has tabs for players 1 to 4 with a live pad drawing for each, and **Sound on phone** shows the PC's sound levels and can turn sound off from the PC.
 - **Allowed phones:** a new phone asks for your approval once. Manage them in **Settings > Manage phones**. Phones are recognized by IP, so reserve the address in your router if you can, or the phone will ask again when it changes. If you ignore or remove a phone, the waiting screen offers **Allow** for as long as that phone keeps trying to connect.
-- **Virtual controller:** it only exists while a controller is connected to the phone, so games don't see a pad you can't use.
+- **Virtual controllers:** each player's virtual pad only exists while that controller is connected to the phone, so games don't see a pad you can't use.
 - **Start with my PC:** this adds a systemd user service in **Settings**. It needs a desktop session that starts `graphical-session.target`. If yours doesn't, the app shows the command to add to your desktop's startup instead.
 - **Tray:** if your desktop has a tray, closing the window keeps Musubi running there. Without one, closing the window quits.
 
@@ -115,11 +115,13 @@ python3 desktop/linux/musubi.py 192.168.1.10
   <img src="docs/assets/remap.png" alt="The remap setup on step 1 of 16: the A button is highlighted on the drawing, with Back, Skip and Cancel buttons beside it." width="700">
 </p>
 
-On the **Controllers** page, tap **Remap** and press each button as the app asks, or tap **Skip** for the ones your pad doesn't have. You can try the layout before saving it. Each controller keeps its own layout, and **Reset** goes back to the default. Sticks can't be remapped.
+On the **Controllers** page, pick a player tab, tap **Remap** and press each button as the app asks, or tap **Skip** for the ones your pad doesn't have. You can try the layout before saving it. Each controller keeps its own layout, and **Reset** goes back to the default. Sticks can't be remapped.
 
 ## Vibration
 
-When a game rumbles the controller, the phone makes your real pad vibrate, with the strong and weak motors kept apart. Waves on the controller drawing show it, on the phone and on the PC. It depends on the pad: Android has to be able to vibrate it over Bluetooth. If yours can't, the Controllers page says so.
+When a game rumbles a controller, the phone makes that real pad vibrate, with the strong and weak motors kept apart. Waves on the controller drawing show it, on the phone and on the PC. It depends on the pad: Android has to be able to vibrate it over Bluetooth. If yours can't, the Controllers page says so.
+
+Each controller keeps its own vibration toggle, strength and stick deadzone. Tap **Settings** on its player tab in **Controllers** to change them, test the motors on that pad, or watch both sticks live while setting a deadzone.
 
 ## Headphones
 
@@ -146,9 +148,9 @@ Musubi can send your voice to the PC through the phone's own mic. It shows up on
 ## Limits
 
 - **The controller needs the app on screen.** Android only gives controller input to the app in front, so if you leave the app, the PC releases every button after half a second. **Game mode** keeps the screen on but dim. Sound is different: it keeps playing in the background.
-- **One pad at a time.** Two pads paired with the phone would be merged into one. *(for now)* Bluetooth earbuds that pretend to be a controller for their media buttons are ignored so they don't take the controller spot.
+- **Up to four pads per phone.** Each paired controller gets a stable player slot from 1 to 4. Bluetooth earbuds that pretend to be a controller for their media buttons are ignored so they don't take a controller slot.
 - **The guide button can't be remapped,** and it may not arrive at all, because Android can keep it for itself.
-- **One phone at a time.** If two allowed phones are on, the first one keeps the pad until it has been silent for 5 seconds.
+- **One phone at a time.** If two allowed phones are on, the first one keeps the pads until it has been silent for 5 seconds.
 - **Use it only on a network you trust.** Packets are not encrypted or authenticated, and approval only checks the IP. Someone on your network who fakes an allowed phone's address could press buttons in your game.
 - **Your voice crosses the network unencrypted,** like the pad.
 
@@ -194,15 +196,19 @@ sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
 
 Any program you run can then create virtual input devices, so remove the rule if you stop using Musubi.
 
+## Windows version
+
+Work in progress on the [`windows`](https://github.com/Multex/musubi/tree/windows) branch. I can't really work actively on it because I don't have a Windows installation, so it's been difficult to test things. I won't just tell Claude to make a Windows port either, because without testing it myself I'd be breaking my own [AI disclosure](#ai-disclosure). So it will take time until I can test it actively.
+
 ## How it works
 
-Each controller packet is 20 bytes and holds the whole pad state: 11 button bits, then 8 axes (`!I8h` in `desktop/core.py`). The app sends one on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases everything.
+Each controller state is 20 bytes: 11 button bits, then 8 axes (`!I8h` in `desktop/core.py`). Player 1 sends those 20 bytes directly for compatibility with older receivers, and players 2 to 4 prefix them with `PBIN` and the slot index (`!4sBI8h`). The app sends a packet on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases that slot.
 
-Once a second the app also sends an 8-byte ping, and the receiver echoes it back to allowed phones. That is how the app knows the PC is answering and what the round trip takes. It also sends a hello packet with the phone's model, the controller's name, that ping time, and a feature flag for sound.
+Once a second the app also sends an 8-byte ping, and the receiver echoes it back to allowed phones. That is how the app knows the PC is answering and what the round trip takes. It also sends a `PBHI` hello packet with the phone's model, connected controller slots and names, that ping time, sound delay, mic state, and feature flags.
 
 When the phone announces that **Play PC sound** is on, the PC loads a virtual `Musubi` output (`module-null-sink` via `pactl` in `desktop/linux/audio.py`) and captures 48 kHz 16-bit stereo PCM in 5 ms chunks with `parec`. Each chunk goes back over the same UDP socket (or USB cable) with a 2-byte sequence number (`!4sH`). After 200 ms of silence the PC stops sending chunks until sound plays again. On the phone, an adaptive jitter buffer (`android/AudioBuffer.java`) feeds a low-latency `AudioTrack`, and a foreground service (`android/KeepAliveService.java`) keeps the sound going in the background.
 
-When a game sends force feedback to the virtual pad, the PC sends the strong and weak motor levels and the duration back to the phone (`!4sHHH`), and the phone drives the pad's motors (both motors on Android 12 and newer, one on older versions).
+When a game sends force feedback to a virtual pad, the PC sends a `PBRM` message with the strong and weak motor levels and the duration (`!4sHHH`, plus the slot byte for players 2 to 4), and the phone drives that pad's motors (both motors on Android 12 and newer, one on older versions).
 
 Over a USB cable the phone uses Android Open Accessory instead of Wi-Fi. The PC asks the phone to switch modes (`desktop/linux/cable.py`), and then the same packets travel over USB, each one starting with its length in 2 bytes.
 
@@ -220,7 +226,7 @@ The virtual pad uses the same IDs and layout as the kernel's `xpad` driver, so g
 
 The result is `android/build/musubi.apk`. The first build creates `android/debug.keystore`, which stays out of git. Keep that file: Android refuses updates signed with a different key.
 
-`build.sh` also runs the button map and audio buffer tests. Run the PC tests with:
+`build.sh` also runs the Android unit tests (button map, audio buffer, deadzone and player slots). Run the PC tests with:
 
 ```sh
 python3 -m unittest discover -s desktop/tests
