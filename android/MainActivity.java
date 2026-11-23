@@ -200,7 +200,7 @@ public class MainActivity extends Activity {
     private static final String REPO = "https://github.com/Multex/musubi";
 
     // CONTROLLERS is the controllers page, opened from HOME.
-    private static final int CONTROLLERS = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6, HEADPHONES = 7, MIC = 8;
+    private static final int CONTROLLERS = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6, HEADPHONES = 7, MIC = 8, CONTROLLER_SETTINGS = 9;
     private static final int CONNECTING = 0, RESPONDING = 1, LOST = 2;
     private static final int PRIMARY = 0, SECONDARY = 1, PLAIN = 2;
     private static final int ICON_DOWN = 0, ICON_RIGHT = 1, ICON_LEFT = 2, ICON_ARROW_UP = 3, ICON_ARROW_DOWN = 4;
@@ -308,8 +308,6 @@ public class MainActivity extends Activity {
     private boolean autoGameMode;
     private volatile boolean vibration = true;
     private volatile int vibrationStrength = 100;
-    // Stick deadzone radius, 0..1; read once per motion event.
-    private volatile float deadzone;
 
     private static final int MAX_PLAYERS = PlayerSlots.MAX;
 
@@ -320,6 +318,8 @@ public class MainActivity extends Activity {
         String descriptor;
         int stickXAxis = MotionEvent.AXIS_Z, stickYAxis = MotionEvent.AXIS_RZ;
         ButtonMap map = defaultMap();
+        // Stick deadzone radius, 0..1; read once per motion event.
+        volatile float deadzone;
         int axisButtons;
         String unmapped;
         int held;
@@ -360,6 +360,7 @@ public class MainActivity extends Activity {
 
     private PadView padView;
     private StickPreview stickPreview;
+    private PadSlot stickPreviewSlot;
     private TextView readout, pcDetail, settingsPing, settingsSoundNow, soundName, soundDetail;
     private TextView earbudsName, earbudsDetail, soundReadout, soundStatus;
     private HeadphonesView headphones;
@@ -429,7 +430,6 @@ public class MainActivity extends Activity {
         autoGameMode = prefs.getBoolean("autoGameMode", true);
         vibration = prefs.getBoolean("vibration", true);
         vibrationStrength = prefs.getInt("vibration_strength", 100);
-        deadzone = prefs.getInt("deadzone", 0) / 100f;
         soundOn = prefs.getBoolean("sound", false);
         speaker = prefs.getBoolean("speaker", false);
         stableSound = "stable".equals(prefs.getString("sound_buffer", "low"));
@@ -627,6 +627,8 @@ public class MainActivity extends Activity {
             show(gameFrom);
         } else if (screen == REMAP || screen == REMAP_DONE) {
             if (screen == REMAP_DONE) loadMap(slots[remapSlot]);
+            show(CONTROLLERS);
+        } else if (screen == CONTROLLER_SETTINGS) {
             show(CONTROLLERS);
         } else {
             show(HOME);
@@ -1167,7 +1169,7 @@ public class MainActivity extends Activity {
     }
 
     private PadSlot shownSlot() {
-        if (screen == CONTROLLERS) return slots[selectedPlayer - 1];
+        if (screen == CONTROLLERS || screen == CONTROLLER_SETTINGS) return slots[selectedPlayer - 1];
         if (screen == REMAP || screen == REMAP_DONE) return slots[remapSlot];
         return activeSlot();
     }
@@ -1226,6 +1228,7 @@ public class MainActivity extends Activity {
             lock.notify();
         }
         slot.rawLx = slot.rawLy = slot.rawRx = slot.rawRy = 0;
+        if (stickPreview != null && slot == stickPreviewSlot) stickPreview.setSticks(0, 0, 0, 0);
         slot.unmapped = null;
         if (slot == shownSlot()) pushPadState();
     }
@@ -1258,8 +1261,42 @@ public class MainActivity extends Activity {
         clearInput(slot);
     }
 
+    private static String deadzoneKey(PadSlot slot) {
+        return "deadzone:" + slot.descriptor;
+    }
+
+    private void loadDeadzone(PadSlot slot) {
+        int pct = slot.descriptor != null ? prefs.getInt(deadzoneKey(slot), 0) : 0;
+        slot.deadzone = Math.max(0, Math.min(30, pct)) / 100f;
+    }
+
+    private void applyDeadzone(PadSlot slot) {
+        synchronized (lock) {
+            Deadzone.apply(slot.axes, 0, slot.rawLx, slot.rawLy, slot.deadzone);
+            Deadzone.apply(slot.axes, 2, slot.rawRx, slot.rawRy, slot.deadzone);
+            slot.dirty = true;
+            dirty = true;
+            lock.notify();
+        }
+    }
+
+    private void saveDeadzone(PadSlot slot, int percent) {
+        percent = Math.max(0, Math.min(30, percent));
+        float zone = percent / 100f;
+        slot.deadzone = zone;
+        applyDeadzone(slot);
+        if (slot.descriptor == null) return;
+        prefs.edit().putInt(deadzoneKey(slot), percent).apply();
+        for (PadSlot s : slots) {
+            if (s != slot && slot.descriptor.equals(s.descriptor)) {
+                s.deadzone = zone;
+                applyDeadzone(s);
+            }
+        }
+    }
+
     private void updateController() {
-        if (findControllers() && (screen == CONTROLLERS || screen == HOME || screen == SETTINGS || screen == GAME)) {
+        if (findControllers() && (screen == CONTROLLERS || screen == CONTROLLER_SETTINGS || screen == HOME || screen == SETTINGS || screen == GAME)) {
             render();
         }
     }
@@ -1279,6 +1316,7 @@ public class MainActivity extends Activity {
         slot.stickXAxis = onlyRx ? MotionEvent.AXIS_RX : MotionEvent.AXIS_Z;
         slot.stickYAxis = onlyRx ? MotionEvent.AXIS_RY : MotionEvent.AXIS_RZ;
         loadMap(slot);
+        loadDeadzone(slot);
     }
 
     private boolean findControllers() {
@@ -1306,6 +1344,7 @@ public class MainActivity extends Activity {
                     slot.deviceName = null;
                     slot.descriptor = null;
                     slot.axisButtons = 0;
+                    slot.deadzone = 0;
                     clearInput(slot);
                     changed = true;
                 }
@@ -1323,6 +1362,10 @@ public class MainActivity extends Activity {
         if ((screen == REMAP || screen == REMAP_DONE) && !slots[remapSlot].connected()) {
             handler.removeCallbacks(finishCapture);
             capture.clear();
+            screen = CONTROLLERS;
+            changed = true;
+        }
+        if (screen == CONTROLLER_SETTINGS && !slots[selectedPlayer - 1].connected()) {
             screen = CONTROLLERS;
             changed = true;
         }
@@ -1410,8 +1453,8 @@ public class MainActivity extends Activity {
         slot.rawLy = event.getAxisValue(MotionEvent.AXIS_Y);
         slot.rawRx = event.getAxisValue(slot.stickXAxis);
         slot.rawRy = event.getAxisValue(slot.stickYAxis);
-        if (stickPreview != null) stickPreview.setSticks(slot.rawLx, slot.rawLy, slot.rawRx, slot.rawRy);
-        float d = deadzone;
+        if (stickPreview != null && slot == stickPreviewSlot) stickPreview.setSticks(slot.rawLx, slot.rawLy, slot.rawRx, slot.rawRy);
+        float d = slot.deadzone;
         synchronized (lock) {
             Deadzone.apply(slot.axes, 0, slot.rawLx, slot.rawLy, d);
             Deadzone.apply(slot.axes, 2, slot.rawRx, slot.rawRy, d);
@@ -1934,6 +1977,7 @@ public class MainActivity extends Activity {
         scroller = null;
         padView = null;
         stickPreview = null;
+        stickPreviewSlot = null;
         readout = null;
         pcDetail = null;
         settingsPing = null;
@@ -1958,6 +2002,7 @@ public class MainActivity extends Activity {
             case EDIT_PC: setContentView(buildEditPc()); break;
             case HEADPHONES: setContentView(buildHeadphones()); break;
             case MIC: setContentView(buildMic()); break;
+            case CONTROLLER_SETTINGS: setContentView(buildControllerSettings()); break;
             default: setContentView(currentPc() != null ? buildControllers(currentPc()) : buildMain()); break;
         }
         renderedScreen = screen;
@@ -2568,7 +2613,11 @@ public class MainActivity extends Activity {
             padView = pad;
             pad.setRumble(slot.rumbleStrong, slot.rumbleWeak);
             readout = status;
-            body.addView(button("Remap", SECONDARY, this::startRemap), buttonParams(44));
+            LinearLayout actions = pair(
+                button("Remap", SECONDARY, this::startRemap),
+                button("Settings", SECONDARY, () -> show(CONTROLLER_SETTINGS)));
+            ((LinearLayout.LayoutParams) actions.getLayoutParams()).topMargin = 0;
+            body.addView(actions);
         } else {
             pad.setAlpha(0.35f);
             body.addView(button("Pair a new controller", SECONDARY, () -> {
@@ -2599,6 +2648,36 @@ public class MainActivity extends Activity {
         header.getChildAt(0).setContentDescription("Back to " + pc.name);
         header.addView(new View(this), weighted(0, 0));
         header.addView(mono(players + " of 4"));
+        return root;
+    }
+
+    private View playerBadge(int n) {
+        TextView badge = text(String.valueOf(n), 12, BACKGROUND);
+        badge.setTypeface(Typeface.DEFAULT_BOLD);
+        badge.setGravity(Gravity.CENTER);
+        badge.setIncludeFontPadding(false);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setShape(GradientDrawable.OVAL);
+        shape.setColor(ACTIVE);
+        badge.setBackground(shape);
+        return badge;
+    }
+
+    private View buildControllerSettings() {
+        PadSlot slot = slots[selectedPlayer - 1];
+        if (!slot.connected()) {
+            screen = CONTROLLERS;
+            return currentPc() != null ? buildControllers(currentPc()) : buildMain();
+        }
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(16), dp(16), dp(16));
+        TextView title = text(slot.deviceName, 16, TEXT);
+        title.setTypeface(medium());
+        body.addView(title);
+        body.addView(detail("Saved for this controller only."));
+        body.addView(divided(deadzoneRow(slot)));
+        LinearLayout root = (LinearLayout) withHeader("Player " + selectedPlayer, playerBadge(selectedPlayer), () -> show(CONTROLLERS), body);
+        ((LinearLayout) root.getChildAt(0)).getChildAt(0).setContentDescription("Back to Controllers");
         return root;
     }
 
@@ -2900,7 +2979,7 @@ public class MainActivity extends Activity {
         layouts.setTypeface(medium());
         layouts.setPadding(0, dp(4), 0, 0);
         controllerSection.addView(layouts);
-        controllerSection.addView(settingsNote("Each controller keeps its own layout. Change one from Controllers, on its player, with Remap."));
+        controllerSection.addView(settingsNote("Each controller keeps its own layout and stick deadzone. Change them from Controllers, on each player's tab."));
         boolean canReset = anyCustomMap();
         Button reset = button("Reset layout", SECONDARY, () -> {
             resetConnectedLayouts();
@@ -2925,16 +3004,17 @@ public class MainActivity extends Activity {
         }
         vibrationRow.setPadding(0, dp(12), 0, dp(6));
         controllerSection.addView(vibrationRow);
+        boolean strength = false;
         if (vibration && !stuck) {
             if (!controller || anyCanVaryStrength()) {
                 controllerSection.addView(strengthRow(controller));
+                strength = true;
             } else {
                 LinearLayout testRow = row();
                 testRow.addView(testButton());
                 controllerSection.addView(testRow);
             }
         }
-        controllerSection.addView(deadzoneRow(controller));
 
         LinearLayout gameSection = column();
         gameSection.addView(sectionHeading("Game mode", false, ICON_HALF, null));
@@ -3005,8 +3085,8 @@ public class MainActivity extends Activity {
             sections[i].setPadding(dp(16), dp(16), dp(16), dp(12));
             body.addView(sections[i]);
         }
-        // The 44dp deadzone slider already carries its own air below the track.
-        controllerSection.setPadding(dp(16), dp(16), dp(16), dp(4));
+        // The 44dp strength slider already carries its own air below the track.
+        if (strength) controllerSection.setPadding(dp(16), dp(16), dp(16), dp(4));
         return withHeader("Settings", null, () -> show(HOME), body);
     }
 
@@ -3124,47 +3204,39 @@ public class MainActivity extends Activity {
         return box;
     }
 
-    private LinearLayout deadzoneRow(boolean controller) {
+    private LinearLayout deadzoneRow(PadSlot slot) {
         LinearLayout box = column();
         box.setPadding(0, dp(8), 0, 0);
         LinearLayout labels = row();
         TextView name = text("Stick deadzone", 15, TEXT);
         name.setTypeface(medium());
         labels.addView(name, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
-        int percent = Math.round(deadzone * 100);
+        int percent = Math.round(slot.deadzone * 100);
         TextView value = mono(percent == 0 ? "Off" : percent + "%");
         value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         labels.addView(value);
         box.addView(labels);
         box.addView(settingsNote("Ignores small stick moves, for a stick that drifts."));
 
-        PadSlot previewSlot = activeSlot();
-        StickPreview preview = new StickPreview(this, controller);
-        preview.setDeadzone(deadzone);
-        if (previewSlot != null) preview.setSticks(previewSlot.rawLx, previewSlot.rawLy, previewSlot.rawRx, previewSlot.rawRy);
-        preview.setVisibility(View.GONE);
+        StickPreview preview = new StickPreview(this, true);
+        preview.setDeadzone(slot.deadzone);
+        preview.setSticks(slot.rawLx, slot.rawLy, slot.rawRx, slot.rawRy);
+        stickPreview = preview;
+        stickPreviewSlot = slot;
         StrengthView bar = new StrengthView(this, "Stick deadzone", 0, 30, 1, percent, false);
         bar.setListener(new StrengthView.Listener() {
             @Override public void onChange(int next) {
-                deadzone = next / 100f;
+                saveDeadzone(slot, next);
                 value.setText(next == 0 ? "Off" : next + "%");
-                preview.setDeadzone(deadzone);
-                prefs.edit().putInt("deadzone", next).apply();
+                preview.setDeadzone(slot.deadzone);
             }
             @Override public void onHold(boolean held) {
                 value.setTextColor(held ? ACTIVE : MUTED);
-                preview.setVisibility(held ? View.VISIBLE : View.GONE);
-                stickPreview = held ? preview : null;
-                if (held) {
-                    PadSlot live = activeSlot();
-                    if (live != null) preview.setSticks(live.rawLx, live.rawLy, live.rawRx, live.rawRy);
-                    else preview.setSticks(0, 0, 0, 0);
-                }
             }
         });
         box.addView(bar, buttonParams(44));
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        previewParams.topMargin = dp(4);
+        previewParams.topMargin = dp(6);
         previewParams.bottomMargin = dp(8);
         box.addView(preview, previewParams);
         return box;
@@ -3816,7 +3888,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Both sticks at their raw position, with the deadzone drawn as a dashed disc. Shown while the deadzone slider is held. */
+    /** Both sticks at their raw position, with the deadzone drawn as a dashed disc. Shown under the deadzone slider. */
     private static final class StickPreview extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint dashed = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -3827,7 +3899,7 @@ public class MainActivity extends Activity {
         private float zone, lx, ly, rx, ry;
         private String text = "";
         private int shownPercent = -1;
-        private boolean shownIgnored;
+        private boolean shownIgnored, shownRight;
 
         StickPreview(Context context, boolean connected) {
             super(context);
@@ -3878,14 +3950,17 @@ public class MainActivity extends Activity {
             drawStick(canvas, 12 * d + inner / 4, cy, lx, ly, "Left stick", captionY);
             drawStick(canvas, 12 * d + inner * 3 / 4, cy, rx, ry, "Right stick", captionY);
             if (!connected) return;
-            float m = (float) Math.sqrt(lx * lx + ly * ly);
+            float lm = (float) Math.sqrt(lx * lx + ly * ly), rm = (float) Math.sqrt(rx * rx + ry * ry);
+            boolean right = rm > lm;
+            float m = right ? rm : lm;
             int percent = Math.round(m * 100);
             boolean ignored = m <= zone;
             // Rebuilt only when the words change, not on every motion event.
-            if (percent != shownPercent || ignored != shownIgnored) {
+            if (percent != shownPercent || ignored != shownIgnored || right != shownRight) {
                 shownPercent = percent;
                 shownIgnored = ignored;
-                text = "Left stick at rest: " + percent + "%. " + (ignored ? "Ignored." : "Sent as a small move.");
+                shownRight = right;
+                text = (right ? "Right" : "Left") + " stick at rest: " + percent + "%. " + (ignored ? "Ignored." : "Sent as a small move.");
                 setContentDescription(text);
             }
             canvas.drawText(text, getWidth() / 2f, captionY + caption.descent() + 10 * d - line.ascent(), line);
