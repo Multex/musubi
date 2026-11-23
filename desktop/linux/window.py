@@ -49,8 +49,6 @@ scrolledwindow, viewport { background: transparent; }
 .divider { border-top: 1px solid #332E28; margin-top: 14px; padding-top: 12px; }
 .caption { font-size: 12px; color: #8F8573; }
 .tab-label { font-size: 11px; color: #8F8573; }
-.player-tab { padding: 6px 8px; border-radius: 6px 6px 0 0; border-bottom: 2px solid transparent; }
-.player-tab.selected { background: #171512; border-bottom: 2px solid #E6DEC8; }
 .detail { font-size: 13px; color: #8F8573; }
 .muted { color: #8F8573; }
 .value { font-size: 16px; font-weight: 500; }
@@ -83,6 +81,9 @@ button.back-btn { min-height: 28px; padding: 4px 6px; border: none; border-radiu
 button.sidebar-item { min-height: 36px; padding: 4px 8px; border: none; border-radius: 6px; }
 button.sidebar-item:disabled { color: #E6DEC8; border: none; opacity: 1; }
 button.sidebar-item.selected, button.plain.selected { background: #171512; }
+button.player-tab { padding: 6px 8px; border: none; border-radius: 6px 6px 0 0; border-bottom: 2px solid transparent; }
+button.player-tab.selected { background: #171512; border-bottom: 2px solid #E6DEC8; }
+button.player-tab.selected .tab-label { color: #E6DEC8; }
 button.overview-row { min-height: 68px; padding: 8px 0; border: none; border-radius: 6px; }
 .hairline { background: #332E28; min-height: 1px; }
 button.row { padding: 6px 0; border: none; border-radius: 6px; }
@@ -833,25 +834,60 @@ class CordNode(Gtk.DrawingArea):
         cr.stroke()
 
 
+def player_slots(phone, status):
+    """Return four (connected, name) pairs from phone and bridge status, handling older single-pad statuses."""
+    controllers = phone.get('controllers') if phone else None
+    if controllers is None:
+        controllers = [phone.get('controller'), None, None, None] if phone else [None] * 4
+    pads = status.get('pads')
+    if pads is None:
+        pads = [bool(status.get('pad')), False, False, False]
+    slots = []
+    for i in range(4):
+        name = controllers[i] if i < len(controllers) else None
+        on = (name is not None) or (i < len(pads) and bool(pads[i]))
+        slots.append((on, name or None))
+    return tuple(slots)
+
+
+def overview_controllers_text(slots):
+    """Return (count, detail, subtext) for the Overview Controllers row."""
+    connected = [(i + 1, name) for i, (on, name) in enumerate(slots) if on]
+    count = len(connected)
+    if count == 0:
+        return 0, 'No controller yet', 'Turn one on that is paired with the phone'
+    if count == 1:
+        num, name = connected[0]
+        return 1, name or 'Connected', f'Games see Xbox 360 controller {num}'
+    detail = ' · '.join(name or f'Player {num}' for num, name in connected)
+    nums = ', '.join(str(num) for num, _ in connected[:-1]) + f' and {connected[-1][0]}'
+    return count, detail, f'Games see Xbox 360 controllers {nums}'
+
+
 class PlayerDots(Gtk.DrawingArea):
     """Four 8px dots showing connected players in the Controllers sidebar item."""
 
     def __init__(self):
         super().__init__(valign=Gtk.Align.CENTER)
         self.set_size_request(44, 10)
-        self.players = 0
+        self.slots = (False, False, False, False)
         self.set_draw_func(self.draw)
 
     def set_players(self, players):
-        if players != self.players:
-            self.players = players
+        if isinstance(players, int):
+            slots = tuple(i < players for i in range(4))
+        else:
+            vals = tuple(bool(x) for x in players)
+            slots = (vals + (False,) * 4)[:4]
+        if slots != self.slots:
+            self.slots = slots
             self.queue_draw()
 
     def draw(self, _area, cr, _width, height, _data=None):
         cy = height / 2.0
         for i in range(4):
             cr.arc(i * 12 + 4, cy, 4, 0, 2 * math.pi)
-            cr.set_source_rgb(*(ACTIVE if i < self.players else BORDER))
+            cr.set_source_rgb(*(ACTIVE if self.slots[i] else BORDER))
             cr.fill()
 
 
@@ -898,7 +934,13 @@ class App(Gtk.Application):
         super().__init__(application_id='io.github.multex.musubi', flags=Gio.ApplicationFlags.NON_UNIQUE)
         self.window = None
         self.partial = b''
-        self.status = {'phone': None, 'pad': False, 'pad_error': None, 'pending': [], 'sound_enabled': True}
+        self.status = {'phone': None, 'pad': False, 'pads': [False] * 4, 'pad_error': None, 'pending': [],
+                       'sound_enabled': True}
+        self.selected_player = 1
+        self.active_slot = 0
+        self.slot_states = [(0, [0] * 8) for _ in range(4)]
+        self.slot_rumbles = [(0.0, 0.0) for _ in range(4)]
+        self._last_connected = (False, False, False, False)
         self.error = None
         self.stopped = False
         self.config = system.load_config()
@@ -1191,19 +1233,31 @@ class App(Gtk.Application):
     def on_event(self, event):
         kind = event['event']
         if kind == 'input':
-            self.pad.set_state(event['buttons'], event['axes'])
-            if self.overview_pad is not None:
-                self.overview_pad.set_state(event['buttons'], event['axes'])
-            if self.readout is not None:
-                description = describe_input(event['buttons'], event['axes'])
-                self.readout.set_label(description or 'Press a button to test')
-                self.readout.remove_css_class('live')
-                if description:
-                    self.readout.add_css_class('live')
+            slot = event.get('slot', 0)
+            if 0 <= slot < 4:
+                buttons, axes = event['buttons'], event['axes']
+                self.slot_states[slot] = (buttons, axes)
+                self.active_slot = slot
+                if slot == self.selected_player - 1:
+                    self.pad.set_state(buttons, axes)
+                    if self.readout is not None:
+                        description = describe_input(buttons, axes)
+                        self.readout.set_label(description or 'Press a button to test')
+                        self.readout.remove_css_class('live')
+                        if description:
+                            self.readout.add_css_class('live')
+                if self.overview_pad is not None:
+                    self.overview_pad.set_state(buttons, axes)
+                    self.overview_pad.set_rumble(*self.slot_rumbles[slot])
         elif kind == 'rumble':
-            self.pad.set_rumble(event['strong'], event['weak'])
-            if self.overview_pad is not None:
-                self.overview_pad.set_rumble(event['strong'], event['weak'])
+            slot = event.get('slot', 0)
+            if 0 <= slot < 4:
+                strong, weak = event['strong'], event['weak']
+                self.slot_rumbles[slot] = (strong, weak)
+                if slot == self.selected_player - 1:
+                    self.pad.set_rumble(strong, weak)
+                if self.overview_pad is not None and slot == self.active_slot:
+                    self.overview_pad.set_rumble(strong, weak)
         elif kind == 'levels':
             for area in (self.overview_headphones, self.sound_headphones):
                 if area is not None:
@@ -1221,7 +1275,7 @@ class App(Gtk.Application):
             self.show_window()
         elif kind == 'status':
             self.status = {key: event.get(key) for key in (
-                'phone', 'pad', 'pad_error', 'pending', 'cable_error', 'sound_enabled')}
+                'phone', 'pad', 'pads', 'pad_error', 'pending', 'cable_error', 'sound_enabled')}
             phone = self.status['phone']
             # The hub saves the phone's mic choice; keeping it here stops this window's own saves from undoing that.
             if phone and phone.get('mic') is not None:
@@ -1283,8 +1337,33 @@ class App(Gtk.Application):
             return 'connected'
         return 'waiting'
 
+    def select_player(self, player):
+        self.selected_player = player
+        self.refresh()
+
+    def overview_slot(self, slots):
+        if slots[self.active_slot][0]:
+            return self.active_slot
+        return next((i for i, (on, _) in enumerate(slots) if on), 0)
+
+    def sync_pad_views(self, slots):
+        sel = self.selected_player - 1
+        self.pad.set_state(*self.slot_states[sel])
+        self.pad.set_rumble(*self.slot_rumbles[sel])
+        if self.overview_pad is not None:
+            preview = self.overview_slot(slots)
+            self.overview_pad.set_state(*self.slot_states[preview])
+            self.overview_pad.set_rumble(*self.slot_rumbles[preview])
+
     def select_item(self, item):
         self.selected_item = item
+        if item == 'controllers' and self.status['phone']:
+            slots = player_slots(self.status['phone'], self.status)
+            if not slots[self.selected_player - 1][0]:
+                first = next((i for i, (on, _) in enumerate(slots) if on), None)
+                if first is not None:
+                    self.selected_player = first + 1
+                    self.refresh()
         self.send({'page': item})
         self.go_main()
 
@@ -1321,12 +1400,14 @@ class App(Gtk.Application):
         self.header_status.set_label(status_text)
 
         has_phone = state == 'connected'
-        controller_on = bool(has_phone and (phone['controller'] is not None or self.status['pad']))
+        slots = player_slots(phone, self.status) if has_phone else ((False, None),) * 4
+        flags = tuple(on for on, _ in slots)
+        players = sum(flags)
+        controller_on = players > 0
         sound_on = bool(has_phone and self.sound_enabled() and phone.get('audio'))
         mic = phone.get('mic') if has_phone else None
         # Live, muted and paused all keep Musubi mic, so the cord runs down to it.
         mic_on = bool(mic)
-        players = 1 if controller_on else 0
 
         seg1 = has_phone and (controller_on or sound_on or mic_on)
         seg2 = has_phone and (sound_on or mic_on)
@@ -1336,7 +1417,7 @@ class App(Gtk.Application):
         self.sound_node.set_state('live' if sound_on else 'idle', seg2, mic_on)
         self.mic_node.set_state({1: 'live', 2: 'muted'}.get(mic, 'idle'), mic_on)
 
-        self.ctrl_dots.set_players(players)
+        self.ctrl_dots.set_players(flags)
         self.ctrl_caption.set_label(f'{players} of 4 players' if has_phone else 'Needs a phone')
         self.sound_caption.set_label(('Playing' if sound_on else 'Off') if has_phone else 'Needs a phone')
         self.mic_caption.set_label(mic_state(mic, '')[1] if has_phone else 'Needs a phone')
@@ -1354,20 +1435,24 @@ class App(Gtk.Application):
         if phone is None and self.selected_item != 'overview':
             self.selected_item = 'overview'
             self.send({'page': 'overview'})
-        if not self.status['pad']:
-            self.pad.set_state(0, [0] * 8)
-            self.pad.set_rumble(0, 0)
-            if self.overview_pad is not None:
-                self.overview_pad.set_state(0, [0] * 8)
-                self.overview_pad.set_rumble(0, 0)
+        slots = player_slots(phone, self.status) if phone else ((False, None),) * 4
+        for i, (on, _) in enumerate(slots):
+            if not on:
+                self.slot_states[i] = (0, [0] * 8)
+                self.slot_rumbles[i] = (0.0, 0.0)
+        if not slots[self.selected_player - 1][0]:
+            joined = next((i for i, (on, _) in enumerate(slots) if on and not self._last_connected[i]), None)
+            if joined is not None:
+                self.selected_player = joined + 1
+        self._last_connected = tuple(on for on, _ in slots)
+        self.sync_pad_views(slots)
         pending = self.pending_phones()
         firewall = bool(self.blocked) and not self.firewall_dismissed and phone is None
         state = self.current_state(pending, firewall)
         key = (state, self.error, self.stopped, json.dumps(pending), json.dumps(self.ignored_phones()),
-               firewall, self.firewall_message, self.status['pad'], self.status['pad_error'],
-               self.status.get('cable_error'), self.local_ip,
-               phone and (phone['ip'], self.phone_name(phone), phone['controller'],
-                          phone['controller_known'], phone.get('audio')))
+               firewall, self.firewall_message, self.status['pad'], tuple(self.status.get('pads') or ()),
+               self.status['pad_error'], self.status.get('cable_error'), self.local_ip, self.selected_player,
+               slots, phone and (phone['ip'], self.phone_name(phone), phone['controller_known'], phone.get('audio')))
         if key != self.panel_key:
             self.panel_key = key
             self.build_panel(state, pending)
@@ -1551,25 +1636,26 @@ class App(Gtk.Application):
         self.overview_panel.append(spacer())
 
         rows = column(0)
-        controller_on = bool(phone['controller'] is not None or self.status['pad'])
-        players = 1 if controller_on else 0
+        slots = player_slots(phone, self.status)
+        players, ctrl_detail, ctrl_sub = overview_controllers_text(slots)
+        controller_on = players > 0
         ctrl_labels = column(2)
         ctrl_labels.set_hexpand(True)
         ctrl_labels.set_valign(Gtk.Align.CENTER)
         ctrl_labels.append(text('Controllers · to this PC', 'caption', ellipsize=True))
         ctrl_labels.append(text(f'{players} of 4 players', 'value', ellipsize=True))
-        ctrl_detail = (phone['controller'] or 'Connected') if controller_on else 'No controller yet'
-        ctrl_labels.append(text(ctrl_detail, 'detail', ellipsize=True))
-        ctrl_sub = ('Games see Xbox 360 controller 1' if controller_on
-                    else 'Turn one on that is paired with the phone')
+        ctrl_detail_label = text(ctrl_detail, 'detail', ellipsize=True)
+        ctrl_detail_label.set_max_width_chars(38)
+        ctrl_labels.append(ctrl_detail_label)
         ctrl_sub_label = text(ctrl_sub, 'detail', wrap=True)
         ctrl_sub_label.set_max_width_chars(36)
         ctrl_labels.append(ctrl_sub_label)
 
         self.overview_pad = PadArea(width=128)
         if controller_on:
-            self.overview_pad.set_state(self.pad.buttons, self.pad.axes)
-            self.overview_pad.set_rumble(self.pad.strong, self.pad.weak)
+            preview = self.overview_slot(slots)
+            self.overview_pad.set_state(*self.slot_states[preview])
+            self.overview_pad.set_rumble(*self.slot_rumbles[preview])
         self.overview_pad.set_opacity(1.0 if controller_on else 0.35)
 
         rows.append(self.overview_row(
@@ -1873,35 +1959,37 @@ class App(Gtk.Application):
         self.panel.append(spacer())
 
     def panel_controllers(self, phone):
-        controller_on = bool(phone['controller'] is not None or self.status['pad'])
-        ctrl_name = phone['controller'] or 'Connected'
+        slots = player_slots(phone, self.status)
+        sel = self.selected_player
+        controller_on, sel_name = slots[sel - 1]
+        ctrl_name = sel_name or 'Connected'
 
         strip = Gtk.Box(spacing=4, homogeneous=True)
         for player in range(1, 5):
-            tab = column(3, 'player-tab')
-            if player == 1:
+            on, name = slots[player - 1]
+            tab = Gtk.Button()
+            tab.add_css_class('plain')
+            tab.add_css_class('player-tab')
+            if player == sel:
                 tab.add_css_class('selected')
-                num_state = 'on' if controller_on else 'free'
-                tab_text = 'Connected' if controller_on else 'Free'
-                accessible = f"Player 1, {ctrl_name if controller_on else 'free'}"
-            else:
-                num_state = 'free'
-                tab_text = 'Later'
-                accessible = f'Player {player}, later'
-            tab.update_property([Gtk.AccessibleProperty.LABEL], [accessible])
-            tab.append(PlayerNumber(player, num_state))
-            label = text(tab_text, 'tab-label', ellipsize=True)
+            tab_box = column(3)
+            tab_box.append(PlayerNumber(player, 'on' if on else 'free'))
+            label = text('Connected' if on else 'Free', 'tab-label', ellipsize=True)
             label.set_xalign(0.5)
             label.set_halign(Gtk.Align.CENTER)
             label.set_single_line_mode(True)
-            tab.append(label)
+            tab_box.append(label)
+            tab.set_child(tab_box)
+            accessible = f"Player {player}, {name or 'connected'}" if on else f'Player {player}, free'
+            tab.update_property([Gtk.AccessibleProperty.LABEL], [accessible])
+            tab.connect('clicked', lambda _, p=player: self.select_player(p))
             strip.append(tab)
         self.controllers_panel.append(strip)
         self.controllers_panel.append(hairline())
 
         header = column(2)
         header.set_margin_top(14)
-        value_label = text(ctrl_name if controller_on else 'Player 1 is free', 'value', ellipsize=True)
+        value_label = text(ctrl_name if controller_on else f'Player {sel} is free', 'value', ellipsize=True)
         value_label.set_single_line_mode(True)
         value_label.set_max_width_chars(40)
         header.append(value_label)
@@ -1910,10 +1998,10 @@ class App(Gtk.Application):
             detail_label = text(self.status['pad_error'], 'detail', wrap=True)
             detail_label.add_css_class('alert')
         elif controller_on:
-            detail_label = text('Player 1 · games see Xbox 360 controller 1', 'detail', wrap=True)
+            detail_label = text(f'Player {sel} · games see Xbox 360 controller {sel}', 'detail', wrap=True)
         else:
-            detail_label = text("Turn on a controller that's paired with the phone, or pair one in the phone's "
-                                "Bluetooth settings. Games see it as Xbox 360 controller 1.", 'detail', wrap=True)
+            detail_label = text(f"Turn on a controller that's paired with the phone, or pair one in the phone's "
+                                f"Bluetooth settings. Games see it as Xbox 360 controller {sel}.", 'detail', wrap=True)
         detail_label.set_max_width_chars(62)
         header.append(detail_label)
         self.controllers_panel.append(header)

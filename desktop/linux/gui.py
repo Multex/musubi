@@ -21,7 +21,7 @@ HUB_COMMANDS = ('stop', 'start', 'ignored', 'reload', 'page')
 
 
 def idle_status(sound_enabled):
-    return {'event': 'status', 'phone': None, 'pad': False, 'pad_error': None, 'pending': [],
+    return {'event': 'status', 'phone': None, 'pad': False, 'pads': [False] * 4, 'pad_error': None, 'pending': [],
             'sound_enabled': sound_enabled}
 
 

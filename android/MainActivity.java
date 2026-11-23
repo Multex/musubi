@@ -95,6 +95,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 
 public class MainActivity extends Activity {
     static final int BACKGROUND = 0xFF0D0C0A, SURFACE = 0xFF171512, BORDER = 0xFF332E28, IDLE = 0xFF6B6256;
@@ -143,6 +144,9 @@ public class MainActivity extends Activity {
     private static final int PING_INTERVAL_MS = 1000;
     private static final int PING_SIZE = 8;
     private static final byte[] HELLO_MAGIC = {'P', 'B', 'H', 'I'};
+    private static final byte[] INPUT_MAGIC = {'P', 'B', 'I', 'N'};
+    private static final int INPUT_SIZE = 20;
+    private static final int SLOTTED_INPUT_SIZE = INPUT_MAGIC.length + 1 + INPUT_SIZE;
     // Below 0x20, so 0.5.x desktops drop it from the controller name as a control character.
     private static final byte FEATURE_AUDIO = 1;
     private static final byte FEATURE_RUMBLE = 2;
@@ -239,7 +243,6 @@ public class MainActivity extends Activity {
     private long quietUntil;
     // What the AudioTrack queues ahead of the speaker, on top of the jitter buffer. Player thread only.
     private AudioBuffer.Track trackSize;
-    private int held;
     // Peaks of the PCM just played, for the headphones drawing; the UI thread takes and clears them.
     private volatile float peakLeft, peakRight;
     // Queued in Musubi plus what the track, mixer and output add, without the network; -1 until first measured.
@@ -251,9 +254,6 @@ public class MainActivity extends Activity {
         peakLeft = peakRight = 0;
         return true;
     };
-    private final short[] axes = new short[6];
-    // Sticks as the pad reports them, before the deadzone, for the Settings preview. UI thread only.
-    private float rawLx, rawLy, rawRx, rawRy;
     private boolean dirty;
     private InetAddress target;
 
@@ -311,13 +311,40 @@ public class MainActivity extends Activity {
     // Stick deadzone radius, 0..1; read once per motion event.
     private volatile float deadzone;
 
-    private volatile int deviceId = -1;
-    private volatile String deviceName;
-    private String descriptor;
-    private int stickXAxis = MotionEvent.AXIS_Z, stickYAxis = MotionEvent.AXIS_RZ;
-    private ButtonMap map = defaultMap();
-    private int axisButtons;
-    private String unmapped;
+    private static final int MAX_PLAYERS = PlayerSlots.MAX;
+
+    private final class PadSlot {
+        final int index;
+        volatile int deviceId = -1;
+        volatile String deviceName;
+        String descriptor;
+        int stickXAxis = MotionEvent.AXIS_Z, stickYAxis = MotionEvent.AXIS_RZ;
+        ButtonMap map = defaultMap();
+        int axisButtons;
+        String unmapped;
+        int held;
+        final short[] axes = new short[6];
+        boolean dirty;
+        float rawLx, rawLy, rawRx, rawRy;
+        float rumbleStrong, rumbleWeak;
+        final Runnable endRumble = () -> showRumble(this, 0, 0, 0);
+
+        PadSlot(int index) {
+            this.index = index;
+        }
+
+        boolean connected() {
+            return deviceId != -1;
+        }
+    }
+
+    private final PlayerSlots playerSlots = new PlayerSlots();
+    private final PadSlot[] slots = new PadSlot[MAX_PLAYERS];
+    {
+        for (int i = 0; i < MAX_PLAYERS; i++) slots[i] = new PadSlot(i);
+    }
+    private int activeSlotIndex;
+    private int remapSlot;
 
     private int screen = HOME;
     private int renderedScreen = -1;
@@ -333,7 +360,6 @@ public class MainActivity extends Activity {
 
     private PadView padView;
     private StickPreview stickPreview;
-    private float rumbleStrong, rumbleWeak;
     private TextView readout, pcDetail, settingsPing, settingsSoundNow, soundName, soundDetail;
     private TextView earbudsName, earbudsDetail, soundReadout, soundStatus;
     private HeadphonesView headphones;
@@ -417,7 +443,7 @@ public class MainActivity extends Activity {
         refreshOutput();
         loadPcs();
         applySelectedPc();
-        findController();
+        findControllers();
         render();
     }
 
@@ -457,11 +483,13 @@ public class MainActivity extends Activity {
         handler.removeCallbacks(finishCapture);
         capture.clear();
         inputManager.unregisterInputDeviceListener(deviceListener);
-        rumble(deviceId, 0, 0, 0);
-        showRumble(0, 0, 0);
         // The app gets no key-up events while in the background.
-        axisButtons = 0;
-        clearInput();
+        for (PadSlot slot : slots) {
+            if (slot.connected()) rumble(slot.deviceId, 0, 0, 0);
+            showRumble(slot, 0, 0, 0);
+            slot.axisButtons = 0;
+            clearInput(slot);
+        }
         // Connected, so keep the PC's sound playing; the sender keeps the neutral pad alive on the PC.
         if (prefs.getBoolean("background", true) && pcState() == RESPONDING) enterBackground();
         else stopAll();
@@ -598,7 +626,7 @@ public class MainActivity extends Activity {
         } else if (screen == GAME) {
             show(gameFrom);
         } else if (screen == REMAP || screen == REMAP_DONE) {
-            if (screen == REMAP_DONE) loadMap();
+            if (screen == REMAP_DONE) loadMap(slots[remapSlot]);
             show(CONTROLLERS);
         } else {
             show(HOME);
@@ -612,12 +640,20 @@ public class MainActivity extends Activity {
     }
 
     private void sendLoop() {
-        byte[] data = new byte[20];
+        byte[] data = new byte[INPUT_SIZE];
+        byte[] slotted = new byte[SLOTTED_INPUT_SIZE];
+        System.arraycopy(INPUT_MAGIC, 0, slotted, 0, INPUT_MAGIC.length);
         byte[] ping = new byte[PING_SIZE];
         DatagramPacket packet = new DatagramPacket(data, data.length);
         packet.setPort(PORT);
+        DatagramPacket slottedPacket = new DatagramPacket(slotted, slotted.length);
+        slottedPacket.setPort(PORT);
         DatagramPacket pingPacket = new DatagramPacket(ping, ping.length);
         pingPacket.setPort(PORT);
+        boolean[] send = new boolean[MAX_PLAYERS];
+        int[] snapHeld = new int[MAX_PLAYERS];
+        short[][] snapAxes = new short[MAX_PLAYERS][6];
+        long nextHeartbeat = 0;
         nextPing = 0;
         try (DatagramSocket socket = new DatagramSocket()) {
             this.socket = socket;
@@ -626,11 +662,31 @@ public class MainActivity extends Activity {
             while (running && sender == Thread.currentThread()) {
                 InetAddress address;
                 synchronized (lock) {
-                    if (!dirty) {
-                        lock.wait(HEARTBEAT_MS);
+                    while (running && sender == Thread.currentThread()) {
+                        long now = SystemClock.uptimeMillis();
+                        boolean anyDirty = dirty;
+                        for (int i = 0; !anyDirty && i < MAX_PLAYERS; i++) {
+                            if (slots[i].dirty) anyDirty = true;
+                        }
+                        if (anyDirty || now >= nextHeartbeat || now >= nextPing) break;
+                        long waitMs = Math.min(HEARTBEAT_MS, Math.min(nextHeartbeat - now, nextPing - now));
+                        if (waitMs > 0) lock.wait(waitMs);
                     }
+                    if (!running || sender != Thread.currentThread()) break;
+                    long now = SystemClock.uptimeMillis();
+                    boolean heartbeat = now >= nextHeartbeat;
+                    if (heartbeat) nextHeartbeat = now + HEARTBEAT_MS;
                     dirty = false;
-                    fill(ByteBuffer.wrap(data));
+                    for (int i = 0; i < MAX_PLAYERS; i++) {
+                        PadSlot slot = slots[i];
+                        boolean active = i == 0 || slot.connected();
+                        send[i] = active && (slot.dirty || heartbeat);
+                        slot.dirty = false;
+                        if (send[i]) {
+                            snapHeld[i] = slot.held;
+                            System.arraycopy(slot.axes, 0, snapAxes[i], 0, 6);
+                        }
+                    }
                     address = target;
                 }
                 FileOutputStream usb = usbOut;
@@ -653,11 +709,26 @@ public class MainActivity extends Activity {
                             socket.send(pingPacket);
                         }
                     }
-                    if (usb != null) {
-                        sendUsb(usb, data);
-                    } else {
-                        packet.setAddress(address);
-                        socket.send(packet);
+                    for (int i = 0; i < MAX_PLAYERS; i++) {
+                        if (!send[i]) continue;
+                        if (i == 0) {
+                            fill(ByteBuffer.wrap(data), snapHeld[0], snapAxes[0]);
+                            if (usb != null) {
+                                sendUsb(usb, data);
+                            } else {
+                                packet.setAddress(address);
+                                socket.send(packet);
+                            }
+                        } else {
+                            slotted[INPUT_MAGIC.length] = (byte) i;
+                            fill(ByteBuffer.wrap(slotted, INPUT_MAGIC.length + 1, INPUT_SIZE), snapHeld[i], snapAxes[i]);
+                            if (usb != null) {
+                                sendUsb(usb, slotted);
+                            } else {
+                                slottedPacket.setAddress(address);
+                                socket.send(slottedPacket);
+                            }
+                        }
                     }
                     networkError = null;
                 } catch (IOException ex) {
@@ -682,23 +753,48 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Tells the PC who this phone is, matching HELLO in musubi.py. */
+    /** Tells the PC who this phone is, matching HELLO in core.py. */
     private byte[] helloPacket() {
-        String controller = deviceName;
-        byte[] names = (shorten(Build.MODEL) + "\0" + shorten(controller != null ? controller : ""))
-            .getBytes(StandardCharsets.UTF_8);
-        ByteBuffer out = ByteBuffer.allocate(HELLO_MAGIC.length + 3 + names.length + 5);
+        byte[] phone = utf8Name(Build.MODEL);
+        byte[][] ctrl = new byte[MAX_PLAYERS][];
+        int mask = 0;
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            boolean on = slots[i].connected();
+            String name = slots[i].deviceName;
+            if (on) mask |= 1 << i;
+            ctrl[i] = on ? utf8Name(name) : new byte[0];
+        }
+        int total = HELLO_MAGIC.length + 3 + phone.length + 1 + ctrl[0].length + 1 + 5
+            + ctrl[1].length + 1 + ctrl[2].length + 1 + ctrl[3].length;
+        ByteBuffer out = ByteBuffer.allocate(total);
         out.put(HELLO_MAGIC);
-        out.put((byte) (controller != null ? 1 : 0));
+        out.put((byte) ((mask & 1) != 0 ? 1 : 0));
         out.putShort((short) Math.min(rttMs, 65535));
-        out.put(names);
+        out.put(phone);
+        out.put((byte) 0);
+        out.put(ctrl[0]);
         out.put((byte) 0);
         out.put((byte) ((soundOn ? FEATURE_AUDIO : 0) | FEATURE_RUMBLE | (stableSound ? FEATURE_STABLE : 0)));
         // Same figure as the Headphones page; 0 means no reading.
         int delay = soundOn ? Math.max(soundDelay(), 0) : 0;
         out.putShort((short) Math.min(delay, 65535));
         out.put((byte) micState());
+        out.put((byte) mask);
+        out.put(ctrl[1]);
+        out.put((byte) 0);
+        out.put(ctrl[2]);
+        out.put((byte) 0);
+        out.put(ctrl[3]);
         return out.array();
+    }
+
+    private static byte[] utf8Name(String name) {
+        if (name == null || name.isEmpty()) return new byte[0];
+        byte[] raw = shorten(name).getBytes(StandardCharsets.UTF_8);
+        if (raw.length <= MAX_NAME_LENGTH) return raw;
+        int end = MAX_NAME_LENGTH;
+        while (end > 0 && (raw[end] & 0xC0) == 0x80) end--;
+        return Arrays.copyOf(raw, end);
     }
 
     /** The network's half of the ping plus delayMs, to 10 ms, or -1 before the first reading. */
@@ -742,8 +838,12 @@ public class MainActivity extends Activity {
                 if (running && !backgrounded && vibration) {
                     int scale = vibrationStrength;
                     int strong = (in.getShort() & 0xffff) * scale / 100, weak = (in.getShort() & 0xffff) * scale / 100, ms = in.getShort() & 0xffff;
-                    rumble(deviceId, strong, weak, ms);
-                    handler.post(() -> showRumble(strong, weak, ms));
+                    int index = in.hasRemaining() ? (in.get() & 0xff) : 0;
+                    if (index < MAX_PLAYERS) {
+                        PadSlot slot = slots[index];
+                        rumble(slot.deviceId, strong, weak, ms);
+                        handler.post(() -> showRumble(slot, strong, weak, ms));
+                    }
                 }
             } else if (length >= 5 && magic == ByteBuffer.wrap(MIC_CMD_MAGIC).getInt()) {
                 int command = in.get();
@@ -762,15 +862,13 @@ public class MainActivity extends Activity {
     }
 
     /** Feeds the motor levels to the pad drawing, and zeroes them when the rumble expires. */
-    private void showRumble(int strong, int weak, int ms) {
-        handler.removeCallbacks(endRumble);
-        rumbleStrong = strong / 65535f;
-        rumbleWeak = weak / 65535f;
-        if (strong > 0 || weak > 0) handler.postDelayed(endRumble, ms > 0 ? ms : RUMBLE_CAP_MS);
-        if (padView != null) padView.setRumble(rumbleStrong, rumbleWeak);
+    private void showRumble(PadSlot slot, int strong, int weak, int ms) {
+        handler.removeCallbacks(slot.endRumble);
+        slot.rumbleStrong = strong / 65535f;
+        slot.rumbleWeak = weak / 65535f;
+        if (strong > 0 || weak > 0) handler.postDelayed(slot.endRumble, ms > 0 ? ms : RUMBLE_CAP_MS);
+        if (padView != null && slot == shownSlot()) padView.setRumble(slot.rumbleStrong, slot.rumbleWeak);
     }
-
-    private final Runnable endRumble = () -> showRumble(0, 0, 0);
 
     /** Drives the controller's motors; levels are 0..65535, and 0, 0 stops them. */
     private static void rumble(int id, int strong, int weak, int ms) {
@@ -1044,18 +1142,69 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void fill(ByteBuffer out) {
+    private int connectedCount() {
+        int n = 0;
+        for (PadSlot slot : slots) {
+            if (slot.connected()) n++;
+        }
+        return n;
+    }
+
+    private PadSlot firstConnected() {
+        for (PadSlot slot : slots) {
+            if (slot.connected()) return slot;
+        }
+        return null;
+    }
+
+    private int firstConnectedPlayer() {
+        PadSlot first = firstConnected();
+        return first != null ? first.index + 1 : 1;
+    }
+
+    private PadSlot activeSlot() {
+        return slots[activeSlotIndex].connected() ? slots[activeSlotIndex] : firstConnected();
+    }
+
+    private PadSlot shownSlot() {
+        if (screen == CONTROLLERS) return slots[selectedPlayer - 1];
+        if (screen == REMAP || screen == REMAP_DONE) return slots[remapSlot];
+        return activeSlot();
+    }
+
+    private boolean anyCustomMap() {
+        for (PadSlot slot : slots) {
+            if (slot.connected() && hasCustomMap(slot)) return true;
+        }
+        return false;
+    }
+
+    private boolean anyCanVibrate() {
+        for (PadSlot slot : slots) {
+            if (slot.connected() && canVibrate(slot.deviceId)) return true;
+        }
+        return false;
+    }
+
+    private boolean anyCanVaryStrength() {
+        for (PadSlot slot : slots) {
+            if (slot.connected() && canVaryStrength(slot.deviceId)) return true;
+        }
+        return false;
+    }
+
+    private static void fill(ByteBuffer out, int held, short[] axes) {
         out.putInt(held & WIRE_BUTTONS);
         for (int i = 0; i < 4; i++) {
             out.putShort(axes[i]);
         }
         out.putShort((held & 1 << L2_BIT) != 0 ? TRIGGER_MAX : axes[4]);
         out.putShort((held & 1 << R2_BIT) != 0 ? TRIGGER_MAX : axes[5]);
-        out.putShort(hat(LEFT_BIT, RIGHT_BIT));
-        out.putShort(hat(UP_BIT, DOWN_BIT));
+        out.putShort(hat(held, LEFT_BIT, RIGHT_BIT));
+        out.putShort(hat(held, UP_BIT, DOWN_BIT));
     }
 
-    private short hat(int negative, int positive) {
+    private static short hat(int held, int negative, int positive) {
         if ((held & 1 << negative) != 0) return -1;
         if ((held & 1 << positive) != 0) return 1;
         return 0;
@@ -1068,16 +1217,17 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void clearInput() {
+    private void clearInput(PadSlot slot) {
         synchronized (lock) {
-            held = 0;
-            Arrays.fill(axes, (short) 0);
+            slot.held = 0;
+            Arrays.fill(slot.axes, (short) 0);
+            slot.dirty = true;
             dirty = true;
             lock.notify();
         }
-        rawLx = rawLy = rawRx = rawRy = 0;
-        unmapped = null;
-        pushPadState();
+        slot.rawLx = slot.rawLy = slot.rawRx = slot.rawRy = 0;
+        slot.unmapped = null;
+        if (slot == shownSlot()) pushPadState();
     }
 
     private static ButtonMap defaultMap() {
@@ -1094,57 +1244,111 @@ public class MainActivity extends Activity {
         return defaults;
     }
 
-    private String mapKey() {
-        return "map:" + descriptor;
+    private static String mapKey(PadSlot slot) {
+        return "map:" + slot.descriptor;
     }
 
-    private boolean hasCustomMap() {
-        return descriptor != null && prefs.contains(mapKey());
+    private boolean hasCustomMap(PadSlot slot) {
+        return slot.descriptor != null && prefs.contains(mapKey(slot));
     }
 
-    private void loadMap() {
-        ButtonMap saved = hasCustomMap() ? ButtonMap.decode(prefs.getString(mapKey(), "")) : null;
-        map = saved != null ? saved : defaultMap();
-        clearInput();
+    private void loadMap(PadSlot slot) {
+        ButtonMap saved = hasCustomMap(slot) ? ButtonMap.decode(prefs.getString(mapKey(slot), "")) : null;
+        slot.map = saved != null ? saved : defaultMap();
+        clearInput(slot);
     }
 
     private void updateController() {
-        int before = deviceId;
-        findController();
-        if (deviceId != before) {
-            rumble(before, 0, 0, 0);
-            showRumble(0, 0, 0);
-            // A controller joining or dropping is always player 1 until multi-pad, so show that tab.
-            selectedPlayer = 1;
-        }
-        if (deviceId != before && (screen == CONTROLLERS || screen == HOME || screen == SETTINGS)) {
+        if (findControllers() && (screen == CONTROLLERS || screen == HOME || screen == SETTINGS || screen == GAME)) {
             render();
         }
     }
 
-    private void findController() {
-        for (int id : InputDevice.getDeviceIds()) {
-            InputDevice device = InputDevice.getDevice(id);
-            if (isGamepad(device)) {
-                adopt(device);
-                return;
-            }
-        }
-        deviceId = -1;
-        deviceName = null;
+    private static PlayerSlots.Device toSlotDevice(InputDevice device) {
+        return new PlayerSlots.Device(device.getId(), device.getName(), device.getDescriptor(), device.getControllerNumber());
     }
 
-    private void adopt(InputDevice device) {
-        if (device.getId() == deviceId) return;
-        deviceId = device.getId();
-        deviceName = device.getName();
-        descriptor = device.getDescriptor();
+    private void applySlotDevice(PadSlot slot, InputDevice device) {
+        slot.deviceName = device.getName();
+        slot.descriptor = device.getDescriptor();
+        slot.deviceId = device.getId();
+        slot.axisButtons = 0;
         // Most pads put the right stick on Z/RZ, but some only report RX/RY.
         boolean onlyRx = device.getMotionRange(MotionEvent.AXIS_Z) == null
             && device.getMotionRange(MotionEvent.AXIS_RX) != null;
-        stickXAxis = onlyRx ? MotionEvent.AXIS_RX : MotionEvent.AXIS_Z;
-        stickYAxis = onlyRx ? MotionEvent.AXIS_RY : MotionEvent.AXIS_RZ;
-        loadMap();
+        slot.stickXAxis = onlyRx ? MotionEvent.AXIS_RX : MotionEvent.AXIS_Z;
+        slot.stickYAxis = onlyRx ? MotionEvent.AXIS_RY : MotionEvent.AXIS_RZ;
+        loadMap(slot);
+    }
+
+    private boolean findControllers() {
+        List<PlayerSlots.Device> present = new ArrayList<>();
+        HashMap<Integer, InputDevice> byId = new HashMap<>();
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(id);
+            if (isGamepad(device)) {
+                present.add(toSlotDevice(device));
+                byId.put(id, device);
+            }
+        }
+        playerSlots.sync(present);
+        boolean changed = false;
+        int firstJoined = -1;
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            PadSlot slot = slots[i];
+            PlayerSlots.Device target = playerSlots.get(i);
+            int beforeId = slot.deviceId;
+            if (target == null) {
+                if (beforeId != -1) {
+                    rumble(beforeId, 0, 0, 0);
+                    showRumble(slot, 0, 0, 0);
+                    slot.deviceId = -1;
+                    slot.deviceName = null;
+                    slot.descriptor = null;
+                    slot.axisButtons = 0;
+                    clearInput(slot);
+                    changed = true;
+                }
+            } else if (target.id != beforeId || !Objects.equals(target.name, slot.deviceName)
+                    || !Objects.equals(target.descriptor, slot.descriptor)) {
+                if (beforeId != -1 && beforeId != target.id) {
+                    rumble(beforeId, 0, 0, 0);
+                    showRumble(slot, 0, 0, 0);
+                }
+                if (beforeId == -1 && firstJoined == -1) firstJoined = i;
+                applySlotDevice(slot, byId.get(target.id));
+                changed = true;
+            }
+        }
+        if ((screen == REMAP || screen == REMAP_DONE) && !slots[remapSlot].connected()) {
+            handler.removeCallbacks(finishCapture);
+            capture.clear();
+            screen = CONTROLLERS;
+            changed = true;
+        }
+        if (firstJoined != -1 && !slots[selectedPlayer - 1].connected()) {
+            selectedPlayer = firstJoined + 1;
+        }
+        if (changed) {
+            nextPing = 0;
+            flush();
+        }
+        return changed;
+    }
+
+    private PadSlot slotForEvent(InputDevice device) {
+        if (!isGamepad(device)) return null;
+        int idx = playerSlots.slotOf(device.getId());
+        if (idx == -1) {
+            idx = playerSlots.ensure(toSlotDevice(device));
+            if (idx == -1) return null;
+            applySlotDevice(slots[idx], device);
+            nextPing = 0;
+            flush();
+            if (!slots[selectedPlayer - 1].connected()) selectedPlayer = idx + 1;
+            if (screen == CONTROLLERS || screen == HOME || screen == SETTINGS || screen == GAME) render();
+        }
+        return slots[idx];
     }
 
     // SOURCE_GAMEPAD shares its class bit with keyboards, so test the whole mask.
@@ -1152,23 +1356,28 @@ public class MainActivity extends Activity {
     private static boolean isGamepad(InputDevice device) {
         if (device == null) return false;
         int sources = device.getSources();
-        return (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
-            || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
-                && device.getMotionRange(MotionEvent.AXIS_X, InputDevice.SOURCE_JOYSTICK) != null
-                && device.getMotionRange(MotionEvent.AXIS_Y, InputDevice.SOURCE_JOYSTICK) != null;
+        boolean gamepad = (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD;
+        boolean joystick = (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+        boolean hasSticks = joystick
+            && device.getMotionRange(MotionEvent.AXIS_X, InputDevice.SOURCE_JOYSTICK) != null
+            && device.getMotionRange(MotionEvent.AXIS_Y, InputDevice.SOURCE_JOYSTICK) != null;
+        boolean pointer = (sources & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD
+            || (sources & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE;
+        return PlayerSlots.isGamepad(gamepad, joystick, hasSticks, pointer, device.isVirtual());
     }
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        if (!isGamepad(event.getDevice())) {
+        PadSlot slot = slotForEvent(event.getDevice());
+        if (slot == null) {
             return super.dispatchKeyEvent(event);
         }
-        adopt(event.getDevice());
+        activeSlotIndex = slot.index;
         if (event.getRepeatCount() == 0) {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                onInput(event.getKeyCode(), true);
+                onInput(slot, event.getKeyCode(), true);
             } else if (event.getAction() == KeyEvent.ACTION_UP) {
-                onInput(event.getKeyCode(), false);
+                onInput(slot, event.getKeyCode(), false);
             }
         }
         return true;
@@ -1176,62 +1385,64 @@ public class MainActivity extends Activity {
 
     @Override
     public boolean dispatchGenericMotionEvent(MotionEvent event) {
-        if (!isGamepad(event.getDevice())) {
+        PadSlot slot = slotForEvent(event.getDevice());
+        if (slot == null) {
             return super.dispatchGenericMotionEvent(event);
         }
-        adopt(event.getDevice());
+        activeSlotIndex = slot.index;
         float hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X);
         float hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y);
         float left = Math.max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE));
         float right = Math.max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS));
-        setAxisButton(ButtonMap.HAT_LEFT, hatX < -0.5f);
-        setAxisButton(ButtonMap.HAT_RIGHT, hatX > 0.5f);
-        setAxisButton(ButtonMap.HAT_UP, hatY < -0.5f);
-        setAxisButton(ButtonMap.HAT_DOWN, hatY > 0.5f);
-        setAxisButton(ButtonMap.LEFT_TRIGGER, left > 0.5f);
-        setAxisButton(ButtonMap.RIGHT_TRIGGER, right > 0.5f);
+        setAxisButton(slot, ButtonMap.HAT_LEFT, hatX < -0.5f);
+        setAxisButton(slot, ButtonMap.HAT_RIGHT, hatX > 0.5f);
+        setAxisButton(slot, ButtonMap.HAT_UP, hatY < -0.5f);
+        setAxisButton(slot, ButtonMap.HAT_DOWN, hatY > 0.5f);
+        setAxisButton(slot, ButtonMap.LEFT_TRIGGER, left > 0.5f);
+        setAxisButton(slot, ButtonMap.RIGHT_TRIGGER, right > 0.5f);
         if (screen == REMAP) {
             return true;
         }
-        int leftControl = map.control(ButtonMap.LEFT_TRIGGER), rightControl = map.control(ButtonMap.RIGHT_TRIGGER);
+        int leftControl = slot.map.control(ButtonMap.LEFT_TRIGGER), rightControl = slot.map.control(ButtonMap.RIGHT_TRIGGER);
         float l2 = leftControl == L2_BIT ? left : rightControl == L2_BIT ? right : 0;
         float r2 = leftControl == R2_BIT ? left : rightControl == R2_BIT ? right : 0;
-        rawLx = event.getAxisValue(MotionEvent.AXIS_X);
-        rawLy = event.getAxisValue(MotionEvent.AXIS_Y);
-        rawRx = event.getAxisValue(stickXAxis);
-        rawRy = event.getAxisValue(stickYAxis);
-        if (stickPreview != null) stickPreview.setSticks(rawLx, rawLy, rawRx, rawRy);
+        slot.rawLx = event.getAxisValue(MotionEvent.AXIS_X);
+        slot.rawLy = event.getAxisValue(MotionEvent.AXIS_Y);
+        slot.rawRx = event.getAxisValue(slot.stickXAxis);
+        slot.rawRy = event.getAxisValue(slot.stickYAxis);
+        if (stickPreview != null) stickPreview.setSticks(slot.rawLx, slot.rawLy, slot.rawRx, slot.rawRy);
         float d = deadzone;
         synchronized (lock) {
-            Deadzone.apply(axes, 0, rawLx, rawLy, d);
-            Deadzone.apply(axes, 2, rawRx, rawRy, d);
-            axes[4] = (short) (l2 * TRIGGER_MAX);
-            axes[5] = (short) (r2 * TRIGGER_MAX);
+            Deadzone.apply(slot.axes, 0, slot.rawLx, slot.rawLy, d);
+            Deadzone.apply(slot.axes, 2, slot.rawRx, slot.rawRy, d);
+            slot.axes[4] = (short) (l2 * TRIGGER_MAX);
+            slot.axes[5] = (short) (r2 * TRIGGER_MAX);
+            slot.dirty = true;
             dirty = true;
             lock.notify();
         }
-        pushPadState();
+        if (slot == shownSlot()) pushPadState();
         return true;
     }
 
-    private void setAxisButton(int input, boolean down) {
+    private void setAxisButton(PadSlot slot, int input, boolean down) {
         int bit = 1 << (-input - 1);
-        if (((axisButtons & bit) != 0) == down) return;
-        axisButtons ^= bit;
-        onInput(input, down);
+        if (((slot.axisButtons & bit) != 0) == down) return;
+        slot.axisButtons ^= bit;
+        onInput(slot, input, down);
     }
 
-    private void onInput(int input, boolean down) {
+    private void onInput(PadSlot slot, int input, boolean down) {
         if (screen == REMAP) {
-            if (down) remapInput(input);
+            if (slot.index == remapSlot && down) remapInput(input);
             return;
         }
-        int control = map.control(input);
+        int control = slot.map.control(input);
         if (control < 0) {
             // Unmapped keys stay visible here so the pad can be calibrated by hand.
             if (down && input > 0) {
-                unmapped = KeyEvent.keyCodeToString(input) + " (not mapped)";
-                updateReadout(true);
+                slot.unmapped = KeyEvent.keyCodeToString(input) + " (not mapped)";
+                if (slot == shownSlot()) updateReadout(true);
             }
             return;
         }
@@ -1240,19 +1451,25 @@ public class MainActivity extends Activity {
             && (control == L2_BIT || control == R2_BIT);
         if (!analog) {
             synchronized (lock) {
-                held = down ? held | 1 << control : held & ~(1 << control);
+                slot.held = down ? slot.held | 1 << control : slot.held & ~(1 << control);
+                slot.dirty = true;
                 dirty = true;
                 lock.notify();
             }
         }
-        unmapped = null;
-        pushPadState();
+        slot.unmapped = null;
+        if (slot == shownSlot()) pushPadState();
     }
 
     private void pushPadState() {
         if (padView != null) {
-            padView.setState(held, shown(axes[0]), shown(axes[1]), shown(axes[2]), shown(axes[3]),
-                triggerShown(L2_BIT, axes[4]), triggerShown(R2_BIT, axes[5]));
+            PadSlot slot = shownSlot();
+            if (slot == null) {
+                padView.setState(0, 0, 0, 0, 0, 0, 0);
+            } else {
+                padView.setState(slot.held, shown(slot.axes[0]), shown(slot.axes[1]), shown(slot.axes[2]), shown(slot.axes[3]),
+                    triggerShown(slot, L2_BIT, slot.axes[4]), triggerShown(slot, R2_BIT, slot.axes[5]));
+            }
         }
         updateReadout(false);
     }
@@ -1262,8 +1479,8 @@ public class MainActivity extends Activity {
         return Math.abs(value) < DISPLAY_DEAD_ZONE ? 0 : value;
     }
 
-    private float triggerShown(int bit, short axis) {
-        return (held & 1 << bit) != 0 ? 1 : axis / (float) TRIGGER_MAX;
+    private static float triggerShown(PadSlot slot, int bit, short axis) {
+        return (slot.held & 1 << bit) != 0 ? 1 : axis / (float) TRIGGER_MAX;
     }
 
     private void updateReadout(boolean force) {
@@ -1272,23 +1489,24 @@ public class MainActivity extends Activity {
         long now = SystemClock.uptimeMillis();
         if (!force && now - lastUiUpdate < UI_INTERVAL_MS) return;
         lastUiUpdate = now;
-        String text = describeInput();
+        String text = describeInput(shownSlot());
         readout.setText(text.isEmpty() ? "Press a button to test" : text);
         readout.setTextColor(text.isEmpty() ? MUTED : ACTIVE);
     }
 
-    private String describeInput() {
-        if (unmapped != null) return unmapped;
+    private static String describeInput(PadSlot slot) {
+        if (slot == null) return "";
+        if (slot.unmapped != null) return slot.unmapped;
         List<String> parts = new ArrayList<>();
         for (int i = 0; i < BUTTON_NAMES.length; i++) {
-            if ((held & 1 << i) != 0) parts.add(BUTTON_NAMES[i]);
+            if ((slot.held & 1 << i) != 0) parts.add(BUTTON_NAMES[i]);
         }
-        if (axes[4] > 0 && (held & 1 << L2_BIT) == 0) parts.add("L2 " + axes[4] * 100 / TRIGGER_MAX + "%");
-        if (axes[5] > 0 && (held & 1 << R2_BIT) == 0) parts.add("R2 " + axes[5] * 100 / TRIGGER_MAX + "%");
-        addAxis(parts, "LX", axes[0]);
-        addAxis(parts, "LY", axes[1]);
-        addAxis(parts, "RX", axes[2]);
-        addAxis(parts, "RY", axes[3]);
+        if (slot.axes[4] > 0 && (slot.held & 1 << L2_BIT) == 0) parts.add("L2 " + slot.axes[4] * 100 / TRIGGER_MAX + "%");
+        if (slot.axes[5] > 0 && (slot.held & 1 << R2_BIT) == 0) parts.add("R2 " + slot.axes[5] * 100 / TRIGGER_MAX + "%");
+        addAxis(parts, "LX", slot.axes[0]);
+        addAxis(parts, "LY", slot.axes[1]);
+        addAxis(parts, "RX", slot.axes[2]);
+        addAxis(parts, "RY", slot.axes[3]);
         return TextUtils.join(" · ", parts);
     }
 
@@ -1389,7 +1607,7 @@ public class MainActivity extends Activity {
         if (settingsSoundNow != null) updateSoundNow();
         updateSound();
         updateReadout(true);
-        if ((screen == CONTROLLERS || screen == HOME) && autoGameMode && deviceId != -1 && currentPc() != null
+        if ((screen == CONTROLLERS || screen == HOME) && autoGameMode && connectedCount() > 0 && currentPc() != null
                 && SystemClock.uptimeMillis() - lastTouch >= AUTO_GAME_MODE_MS) {
             openGame();
         }
@@ -1772,7 +1990,8 @@ public class MainActivity extends Activity {
     /** Controller drawing between the parts of a screen. Middle may be null. */
     private View withPad(int control, View top, View middle, View bottom) {
         padView = new PadView(this);
-        padView.setRumble(rumbleStrong, rumbleWeak);
+        PadSlot shown = shownSlot();
+        padView.setRumble(shown != null ? shown.rumbleStrong : 0, shown != null ? shown.rumbleWeak : 0);
         padView.setContentDescription("Controller");
         padView.setTarget(control);
         int padding = dp(8);
@@ -1800,7 +2019,7 @@ public class MainActivity extends Activity {
     private View buildHome(Pc pc) {
         boolean lost = shownPcState == LOST, answering = shownPcState == RESPONDING;
         boolean soundLive = soundLive();
-        int players = deviceId != -1 ? 1 : 0;
+        int players = connectedCount();
         int mic = micState();
         // Below the last live feature the cord is always off; a paused or muted mic still counts.
         int toMic = answering && mic != MIC_OFF ? ACTIVE : BORDER;
@@ -1835,7 +2054,7 @@ public class MainActivity extends Activity {
         square.setBackground(squareShape);
 
         LinearLayout controllers = clickableRow(() -> {
-                selectedPlayer = 1;
+                selectedPlayer = firstConnectedPlayer();
                 show(CONTROLLERS);
             },
             "Controllers, " + players + " of 4 players connected, open");
@@ -1844,13 +2063,14 @@ public class MainActivity extends Activity {
         LinearLayout controllerText = featureText("Controllers · to PC", players + " of 4 players", TEXT);
         LinearLayout chips = row();
         chips.setPadding(0, dp(2), 0, 0);
-        for (int i = 1; i <= 4; i++) chips.addView(chip(i, i <= players));
+        for (int i = 1; i <= MAX_PLAYERS; i++) chips.addView(chip(i, slots[i - 1].connected()));
         controllerText.addView(chips);
         controllers.addView(controllerText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         padView = new PadView(this);
         padView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        padView.setRumble(rumbleStrong, rumbleWeak);
-        padView.setAlpha(deviceId != -1 ? 1 : 0.35f);
+        PadSlot preview = activeSlot();
+        padView.setRumble(preview != null ? preview.rumbleStrong : 0, preview != null ? preview.rumbleWeak : 0);
+        padView.setAlpha(players > 0 ? 1 : 0.35f);
         controllers.addView(padView, gapped(84, 49));
         controllers.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
@@ -2005,12 +2225,14 @@ public class MainActivity extends Activity {
     }
 
     private View controllerBlock() {
+        int players = connectedCount();
+        PadSlot first = firstConnected();
         LinearLayout block = column();
         block.addView(text("Controller", 12, MUTED));
-        TextView name = text(deviceName != null ? deviceName : "Not connected", 16, TEXT);
+        TextView name = text(players == 0 ? "Not connected" : players == 1 && first != null ? first.deviceName : players + " controllers", 16, TEXT);
         name.setTypeface(medium());
         block.addView(name);
-        TextView status = text(deviceName != null ? "Connected" : "Pair your controller in the phone's Bluetooth settings.", 13, MUTED);
+        TextView status = text(players > 0 ? "Connected" : "Pair your controller in the phone's Bluetooth settings.", 13, MUTED);
         block.addView(status);
         return block;
     }
@@ -2123,8 +2345,10 @@ public class MainActivity extends Activity {
         root.addView(tap, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
         Pc pc = currentPc();
         boolean lost = shownPcState == LOST;
-        String status = lost ? "PC not responding"
-            : (deviceName != null ? deviceName : "No controller") + " to " + (pc != null ? pc.name : "no PC");
+        int players = connectedCount();
+        PadSlot first = firstConnected();
+        String pads = players == 0 ? "No controller" : players == 1 && first != null ? first.deviceName : players + " controllers";
+        String status = lost ? "PC not responding" : pads + " to " + (pc != null ? pc.name : "no PC");
         TextView line = text(status, 16, lost ? ALERT : MUTED);
         line.setGravity(Gravity.CENTER);
         tap.addView(line);
@@ -2311,57 +2535,53 @@ public class MainActivity extends Activity {
         return view;
     }
 
-    /** Spec 4.3. Until multi-pad ships only player 1 is real; players 2 to 4 are placeholders. */
     private View buildControllers(Pc pc) {
-        boolean connected = deviceId != -1;
         int n = selectedPlayer;
+        PadSlot slot = slots[n - 1];
+        boolean connected = slot.connected();
+        int players = connectedCount();
         LinearLayout strip = row();
         strip.setPadding(dp(12), dp(8), dp(12), 0);
-        for (int i = 1; i <= 4; i++) {
+        for (int i = 1; i <= MAX_PLAYERS; i++) {
             if (i > 1) strip.addView(new View(this), new LinearLayout.LayoutParams(dp(4), 0));
-            strip.addView(playerTab(i, connected), weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+            strip.addView(playerTab(i), weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
 
         LinearLayout body = column();
         body.setPadding(dp(16), dp(16), dp(16), dp(16));
-        TextView value = text(n > 1 ? "Player " + n : connected ? deviceName : "Player 1 is free", 16, TEXT);
+        TextView value = text(connected ? slot.deviceName : "Player " + n + " is free", 16, TEXT);
         value.setTypeface(medium());
         body.addView(value);
-        body.addView(detail(n > 1 ? "More controllers at once are coming in a later version."
-            : connected ? "Player 1 · games see Xbox 360 controller 1"
-            : "Turn on a controller paired with this phone. Games will see it as Xbox 360 controller 1."));
-        if (n == 1 && connected && !canVibrate(deviceId)) body.addView(detail("Needs a newer Android to vibrate"));
-        if (n > 1) {
-            body.addView(new View(this), weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        body.addView(detail(connected ? "Player " + n + " · games see Xbox 360 controller " + n
+            : "Turn on a controller paired with this phone. Games will see it as Xbox 360 controller " + n + "."));
+        if (connected && !canVibrate(slot.deviceId)) body.addView(detail("Needs a newer Android to vibrate"));
+        PadView pad = new PadView(this);
+        pad.setContentDescription("Controller");
+        int padding = dp(8);
+        pad.setPadding(padding, padding, padding, padding);
+        body.addView(pad, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        TextView status = mono(connected ? "" : "Waiting for a controller");
+        status.setGravity(Gravity.CENTER);
+        status.setPadding(0, 0, 0, dp(8));
+        body.addView(status);
+        if (connected) {
+            padView = pad;
+            pad.setRumble(slot.rumbleStrong, slot.rumbleWeak);
+            readout = status;
+            body.addView(button("Remap", SECONDARY, this::startRemap), buttonParams(44));
         } else {
-            PadView pad = new PadView(this);
-            pad.setContentDescription("Controller");
-            int padding = dp(8);
-            pad.setPadding(padding, padding, padding, padding);
-            body.addView(pad, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
-            TextView status = mono(connected ? "" : "Waiting for a controller");
-            status.setGravity(Gravity.CENTER);
-            status.setPadding(0, 0, 0, dp(8));
-            body.addView(status);
-            if (connected) {
-                padView = pad;
-                pad.setRumble(rumbleStrong, rumbleWeak);
-                readout = status;
-                body.addView(button("Remap", SECONDARY, this::startRemap), buttonParams(44));
-            } else {
-                pad.setAlpha(0.35f);
-                body.addView(button("Pair a new controller", SECONDARY, () -> {
-                    try {
-                        startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));
-                    } catch (ActivityNotFoundException missing) {
-                        Toast.makeText(this, "This phone has no Bluetooth settings to open", Toast.LENGTH_SHORT).show();
-                    }
-                }), buttonParams(44));
-                TextView caption = text("Opens the phone's Bluetooth settings", 12, MUTED);
-                caption.setGravity(Gravity.CENTER);
-                caption.setPadding(0, dp(6), 0, 0);
-                body.addView(caption);
-            }
+            pad.setAlpha(0.35f);
+            body.addView(button("Pair a new controller", SECONDARY, () -> {
+                try {
+                    startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));
+                } catch (ActivityNotFoundException missing) {
+                    Toast.makeText(this, "This phone has no Bluetooth settings to open", Toast.LENGTH_SHORT).show();
+                }
+            }), buttonParams(44));
+            TextView caption = text("Opens the phone's Bluetooth settings", 12, MUTED);
+            caption.setGravity(Gravity.CENTER);
+            caption.setPadding(0, dp(6), 0, 0);
+            body.addView(caption);
         }
         LinearLayout footer = column();
         footer.addView(detail("Controllers only work while Musubi is open. Game mode keeps it open with the screen dimmed."));
@@ -2374,24 +2594,25 @@ public class MainActivity extends Activity {
         page.addView(strip);
         page.addView(cordLine(BORDER), buttonParams(1));
         page.addView(body, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
-        LinearLayout root = (LinearLayout) withHeader("Controllers", node(shownPcState == RESPONDING && deviceId != -1 ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), () -> show(HOME), page);
+        LinearLayout root = (LinearLayout) withHeader("Controllers", node(shownPcState == RESPONDING && players > 0 ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), () -> show(HOME), page);
         LinearLayout header = (LinearLayout) root.getChildAt(0);
         header.getChildAt(0).setContentDescription("Back to " + pc.name);
         header.addView(new View(this), weighted(0, 0));
-        header.addView(mono((connected ? 1 : 0) + " of 4"));
+        header.addView(mono(players + " of 4"));
         return root;
     }
 
     /** Number over label; the selected tab gets the surface fill and a cream bottom edge, like the output tabs. */
-    private View playerTab(int n, boolean connected) {
-        boolean real = n == 1, on = real && connected, selected = n == selectedPlayer;
+    private View playerTab(int n) {
+        PadSlot slot = slots[n - 1];
+        boolean on = slot.connected(), selected = n == selectedPlayer;
         LinearLayout tab = column();
         tab.setGravity(Gravity.CENTER_HORIZONTAL);
         tab.setPadding(0, dp(10), 0, 0);
         tab.setClickable(true);
         tab.setFocusable(true);
         tab.setSelected(selected);
-        tab.setContentDescription("Player " + n + (on ? ", " + deviceName : real ? ", free" : ", coming later"));
+        tab.setContentDescription("Player " + n + (on ? ", " + slot.deviceName : ", free"));
         tab.setOnClickListener(view -> {
             selectedPlayer = n;
             render();
@@ -2411,7 +2632,7 @@ public class MainActivity extends Activity {
         else shape.setStroke(dp(2), IDLE, dp(3), dp(2));
         number.setBackground(shape);
         tab.addView(number, new LinearLayout.LayoutParams(dp(28), dp(28)));
-        TextView label = text(on ? "Connected" : real ? "Free" : "Later", 11, selected ? TEXT : MUTED);
+        TextView label = text(on ? "Connected" : "Free", 11, selected ? TEXT : MUTED);
         label.setGravity(Gravity.CENTER);
         label.setSingleLine(true);
         label.setEllipsize(TextUtils.TruncateAt.END);
@@ -2456,7 +2677,10 @@ public class MainActivity extends Activity {
     }
 
     private void startRemap() {
-        pending = map.copy();
+        PadSlot slot = slots[selectedPlayer - 1];
+        if (!slot.connected()) return;
+        remapSlot = slot.index;
+        pending = slot.map.copy();
         history.clear();
         claimed.clear();
         capture.clear();
@@ -2466,7 +2690,7 @@ public class MainActivity extends Activity {
         ignoreInputUntil = SystemClock.uptimeMillis() + STEP_COOLDOWN_MS;
         screen = REMAP;
         // The game shouldn't react to presses meant for the setup.
-        clearInput();
+        clearInput(slot);
         render();
     }
 
@@ -2513,8 +2737,9 @@ public class MainActivity extends Activity {
             render();
             return;
         }
-        map = pending;
-        clearInput();
+        PadSlot slot = slots[remapSlot];
+        slot.map = pending;
+        clearInput(slot);
         show(REMAP_DONE);
     }
 
@@ -2579,30 +2804,46 @@ public class MainActivity extends Activity {
         counts.setTypeface(Typeface.MONOSPACE);
         counts.setPadding(0, dp(12), 0, 0);
         top.addView(counts);
-        TextView forDevice = text("For " + deviceName, 13, MUTED);
+        PadSlot slot = slots[remapSlot];
+        TextView forDevice = text("For " + slot.deviceName, 13, MUTED);
         forDevice.setPadding(0, dp(4), 0, 0);
         top.addView(forDevice);
 
         LinearLayout actions = column();
         actions.addView(button("Save", PRIMARY, () -> {
-            prefs.edit().putString(mapKey(), map.encode()).apply();
+            if (slot.descriptor != null) {
+                prefs.edit().putString(mapKey(slot), slot.map.encode()).apply();
+                for (PadSlot s : slots) {
+                    if (s != slot && slot.descriptor.equals(s.descriptor)) loadMap(s);
+                }
+            }
             show(CONTROLLERS);
         }), buttonParams(48));
         actions.addView(pair(
             button("Start over", SECONDARY, () -> {
-                loadMap();
+                loadMap(slot);
+                selectedPlayer = slot.index + 1;
                 startRemap();
             }),
             button("Reset", SECONDARY, () -> {
-                resetLayout();
+                resetLayout(slot);
                 show(CONTROLLERS);
             })));
         return withPad(-1, top, null, actions);
     }
 
-    private void resetLayout() {
-        prefs.edit().remove(mapKey()).apply();
-        loadMap();
+    private void resetLayout(PadSlot slot) {
+        if (slot.descriptor == null) return;
+        prefs.edit().remove(mapKey(slot)).apply();
+        for (PadSlot s : slots) {
+            if (slot.descriptor.equals(s.descriptor)) loadMap(s);
+        }
+    }
+
+    private void resetConnectedLayouts() {
+        for (PadSlot slot : slots) {
+            if (slot.connected() && hasCustomMap(slot)) resetLayout(slot);
+        }
     }
 
     private View buildSettings() {
@@ -2618,8 +2859,9 @@ public class MainActivity extends Activity {
         cableNote.setPadding(0, dp(10), 0, 0);
         pcSection.addView(cableNote);
 
-        // Until multi-pad ships at most one controller is connected.
-        boolean controller = deviceId != -1;
+        int players = connectedCount();
+        boolean controller = players > 0;
+        PadSlot first = firstConnected();
         LinearLayout generalSection = column();
         generalSection.addView(sectionHeading("General", false, ICON_SLIDERS, null));
         generalSection.addView(prefRow("Keep the screen on", "While Musubi is open. Game mode always keeps it on.", "keep_screen",
@@ -2653,22 +2895,25 @@ public class MainActivity extends Activity {
         updateSoundNow();
 
         LinearLayout controllerSection = column();
-        controllerSection.addView(sectionHeading("Controllers", controller, ICON_ARROW_UP, controller ? "1 connected" : null));
+        controllerSection.addView(sectionHeading("Controllers", controller, ICON_ARROW_UP, controller ? players + " connected" : null));
         TextView layouts = text("Button layouts", 15, TEXT);
         layouts.setTypeface(medium());
         layouts.setPadding(0, dp(4), 0, 0);
         controllerSection.addView(layouts);
         controllerSection.addView(settingsNote("Each controller keeps its own layout. Change one from Controllers, on its player, with Remap."));
-        boolean canReset = controller && hasCustomMap();
+        boolean canReset = anyCustomMap();
         Button reset = button("Reset layout", SECONDARY, () -> {
-            resetLayout();
+            resetConnectedLayouts();
             render();
         });
         reset.setEnabled(canReset);
         reset.setAlpha(canReset ? 1 : 0.5f);
         controllerSection.addView(spaced(reset, 44));
-        boolean stuck = controller && !canVibrate(deviceId);
-        LinearLayout vibrationRow = prefRow("Vibration", stuck ? deviceName + " needs a newer Android to vibrate" : "Rumble from games", "vibration",
+        boolean stuck = controller && !anyCanVibrate();
+        String stuckNote = players == 1 && first != null
+            ? first.deviceName + " needs a newer Android to vibrate"
+            : "Connected controllers need a newer Android to vibrate";
+        LinearLayout vibrationRow = prefRow("Vibration", stuck ? stuckNote : "Rumble from games", "vibration",
             () -> {
                 vibration = prefs.getBoolean("vibration", true);
                 render();
@@ -2681,7 +2926,7 @@ public class MainActivity extends Activity {
         vibrationRow.setPadding(0, dp(12), 0, dp(6));
         controllerSection.addView(vibrationRow);
         if (vibration && !stuck) {
-            if (!controller || canVaryStrength(deviceId)) {
+            if (!controller || anyCanVaryStrength()) {
                 controllerSection.addView(strengthRow(controller));
             } else {
                 LinearLayout testRow = row();
@@ -2837,7 +3082,9 @@ public class MainActivity extends Activity {
     private Button testButton() {
         Button test = button("Test", SECONDARY, () -> {
             int level = 65535 * vibrationStrength / 100;
-            rumble(deviceId, level, level, 500);
+            for (PadSlot slot : slots) {
+                if (slot.connected()) rumble(slot.deviceId, level, level, 500);
+            }
         });
         test.setContentDescription("Test vibration");
         test.setPadding(dp(14), 0, dp(14), 0);
@@ -2891,9 +3138,10 @@ public class MainActivity extends Activity {
         box.addView(labels);
         box.addView(settingsNote("Ignores small stick moves, for a stick that drifts."));
 
+        PadSlot previewSlot = activeSlot();
         StickPreview preview = new StickPreview(this, controller);
         preview.setDeadzone(deadzone);
-        preview.setSticks(rawLx, rawLy, rawRx, rawRy);
+        if (previewSlot != null) preview.setSticks(previewSlot.rawLx, previewSlot.rawLy, previewSlot.rawRx, previewSlot.rawRy);
         preview.setVisibility(View.GONE);
         StrengthView bar = new StrengthView(this, "Stick deadzone", 0, 30, 1, percent, false);
         bar.setListener(new StrengthView.Listener() {
@@ -2907,7 +3155,11 @@ public class MainActivity extends Activity {
                 value.setTextColor(held ? ACTIVE : MUTED);
                 preview.setVisibility(held ? View.VISIBLE : View.GONE);
                 stickPreview = held ? preview : null;
-                if (held) preview.setSticks(rawLx, rawLy, rawRx, rawRy);
+                if (held) {
+                    PadSlot live = activeSlot();
+                    if (live != null) preview.setSticks(live.rawLx, live.rawLy, live.rawRx, live.rawRy);
+                    else preview.setSticks(0, 0, 0, 0);
+                }
             }
         });
         box.addView(bar, buttonParams(44));

@@ -76,14 +76,14 @@ class Console:
         self.longest_step = 0.0
         self.recv_errors = 0
         self.bridge = core.Bridge(sock, self.config['phones'], self.on_status,
-                                  make_pad=make_pad or (lambda: win_pad.Pad(self.on_rumble)))
+                                  make_pad=make_pad or (lambda slot=0: win_pad.Pad(lambda large, small, s=slot: self.on_rumble(large, small, s))))
 
     def post(self, *item):
         self.inbox.put(item)
         self.waker.send(b'\0')
 
-    def on_rumble(self, large, small):
-        self.post('rumble', large, small)
+    def on_rumble(self, large, small, slot=0):
+        self.post('rumble', large, small, slot)
 
     def on_status(self):
         status = self.bridge.status()
@@ -97,9 +97,13 @@ class Console:
                 self.say(f"{phone['name'] or 'A phone'} ({phone['ip']}) wants to connect. "
                          'Type y and press Enter to allow it.')
         phone = status['phone']
+        pads = [i + 1 for i, on in enumerate(status.get('pads', ())) if on]
         if phone:
-            line = (f"Phone: {phone['name'] or phone['ip']}. Controller: {phone['controller'] or 'none'}. "
-                    f"Virtual pad: {'on' if status['pad'] else 'off'}.")
+            controllers = [c for c in phone.get('controllers', ()) if c]
+            ctrl = ', '.join(controllers) if len(controllers) > 1 else (phone['controller'] or (controllers[0] if controllers else 'none'))
+            pad_text = 'on' if pads == [1] else (', '.join(str(p) for p in pads) if pads else 'off')
+            line = (f"Phone: {phone['name'] or phone['ip']}. Controller: {ctrl}. "
+                    f"Virtual pad: {pad_text}.")
         else:
             line = 'No phone connected.'
         if status['pad_error']:
@@ -110,11 +114,11 @@ class Console:
 
     def handle(self, kind, *details):
         if kind == 'rumble':
-            large, small = details
+            large, small, slot = details
             if not self.rumbled:
                 self.rumbled = True
                 log.info('first rumble from a game: %s %s', large, small)
-            self.bridge.set_rumble(large * 257, small * 257)
+            self.bridge.set_rumble(large * 257, small * 257, slot=slot)
         elif details[0].lower() in ('y', 'yes'):
             pending = self.bridge.status()['pending']
             if not pending:

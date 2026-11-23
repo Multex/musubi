@@ -12,8 +12,9 @@ from evdev import InputEvent, ecodes as e, ff
 
 import paths  # noqa: F401
 import audio
+import core
 import musubi
-from musubi import HELLO, HELLO_MAGIC, PACKET, Bridge, decode, decode_hello
+from musubi import HELLO, HELLO_MAGIC, INPUT_MAGIC, PACKET, Bridge, decode, decode_hello, decode_input, slotted_packet
 
 
 class DecodeTest(unittest.TestCase):
@@ -35,22 +36,57 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(buttons, 0)
         self.assertEqual(axes, [0] * 8)
 
+    def test_decode_input_accepts_legacy_and_slotted_packets(self):
+        raw = PACKET.pack(0b11, 10, -20, 0, 0, 128, 0, 1, -1)
+        self.assertEqual(decode_input(raw), (0, (0b11, [10, -20, 0, 0, 128, 0, 1, -1])))
+        for slot in range(1, musubi.MAX_PLAYERS):
+            pkt = slotted_packet(slot, raw)
+            self.assertEqual(pkt[:4], INPUT_MAGIC)
+            self.assertEqual(decode_input(pkt), (slot, (0b11, [10, -20, 0, 0, 128, 0, 1, -1])))
+        self.assertIsNone(decode_input(INPUT_MAGIC + bytes([musubi.MAX_PLAYERS]) + raw))
+        self.assertIsNone(decode_input(b'BAD!' + bytes([1]) + raw))
+        self.assertIsNone(decode_input(INPUT_MAGIC + bytes([1]) + raw[:-1]))
 
-def hello(phone=b'LM-X430', controller=b'Xbox Wireless Controller', connected=True, rtt=9, features=None, delay=None, mic=None):
+
+def hello(phone=b'LM-X430', controller=b'Xbox Wireless Controller', connected=True, rtt=9, features=None, delay=None,
+          mic=None, slots_mask=None, extra=()):
     """Without features, this is the hello of a 0.5.x app."""
     packet = HELLO.pack(HELLO_MAGIC, connected, rtt) + phone + b'\0' + controller
     if features is None:
         return packet
-    return (packet + b'\0' + bytes([features]) + (b'' if delay is None else delay.to_bytes(2, 'big'))
-            + (b'' if mic is None else bytes([mic])))
+    out = (packet + b'\0' + bytes([features]) + (b'' if delay is None else delay.to_bytes(2, 'big'))
+           + (b'' if mic is None else bytes([mic])))
+    if slots_mask is not None:
+        out += bytes([slots_mask]) + b'\0'.join(extra)
+    return out
 
 
 class HelloTest(unittest.TestCase):
     def test_reads_every_field(self):
         self.assertEqual(decode_hello(hello()), {
             'name': 'LM-X430', 'controller': 'Xbox Wireless Controller',
-            'controller_connected': True, 'rtt': 9, 'audio': False, 'rumble': False, 'stable': False, 'delay': None, 'mic': 0,
+            'controller_connected': True, 'controllers': ['Xbox Wireless Controller', None, None, None],
+            'rtt': 9, 'audio': False, 'rumble': False, 'stable': False, 'delay': None, 'mic': 0,
         })
+
+    def test_reads_multi_pad_slots_and_gaps(self):
+        parsed = decode_hello(hello(features=0, delay=0, mic=0, slots_mask=0b1111,
+                                    extra=(b'DualShock', b'Pad 3', b'Pad 4')))
+        self.assertEqual(parsed['controllers'], ['Xbox Wireless Controller', 'DualShock', 'Pad 3', 'Pad 4'])
+
+        gapped = decode_hello(hello(controller=b'', connected=False, features=0, delay=0, mic=0,
+                                    slots_mask=0b1010, extra=(b'Pad 2', b'', b'Pad 4')))
+        self.assertTrue(gapped['controller_connected'])
+        self.assertEqual(gapped['controllers'], [None, 'Pad 2', None, 'Pad 4'])
+
+        cleaned = decode_hello(hello(features=0, delay=0, mic=0, slots_mask=0b0010,
+                                     extra=(b'\x1b[31mbad' + b'x' * 100,)))
+        self.assertEqual(len(cleaned['controllers'][1]), musubi.MAX_NAME)
+        self.assertTrue(cleaned['controllers'][1].startswith('[31mbad'))
+
+        unnamed = decode_hello(hello(controller=b'', connected=False, features=0, delay=0, mic=0,
+                                     slots_mask=0b0010, extra=(b'',)))
+        self.assertEqual(unnamed['controllers'], [None, '', None, None])
 
     def test_reads_the_features_after_the_names(self):
         parsed = decode_hello(hello(features=musubi.FEATURE_AUDIO))
@@ -106,12 +142,18 @@ class FailingSock:
 
 
 class FakeUi:
-    def __init__(self):
+    def __init__(self, slot=0):
+        self.slot = slot
         self.syncs = 0
         self.closed = False
+        self.states = []
 
     def write(self, *_):
         pass
+
+    def apply(self, state):
+        self.states.append(state)
+        self.syn()
 
     def syn(self):
         self.syncs += 1
@@ -123,8 +165,8 @@ class FakeUi:
 class FakeFfUi(FakeUi):
     """Stands in for the uinput fd: queued events, and the effects behind each upload request."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, slot=0):
+        super().__init__(slot)
         self.events = []
         self.uploads = {}
         self.erases = {}
@@ -187,8 +229,8 @@ class BridgeTest(unittest.TestCase):
     def on_status(self):
         self.status_calls += 1
 
-    def make_pad(self):
-        self.pads.append(FakeUi())
+    def make_pad(self, slot=0):
+        self.pads.append(FakeUi(slot))
         return self.pads[-1]
 
     def test_echoes_pings_from_allowed_phones(self):
@@ -460,11 +502,84 @@ class BridgeTest(unittest.TestCase):
         self.assertFalse(self.bridge.wants_audio())
 
     def test_a_pad_error_is_reported_instead_of_crashing(self):
-        def denied():
+        def denied(slot=0):
             raise PermissionError('no access to /dev/uinput')
         bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status, make_pad=denied, clock=lambda: self.now)
         bridge.on_datagram(hello(), self.PHONE)
         self.assertIn('uinput', bridge.status()['pad_error'])
+
+    def test_multi_pad_creates_slots_in_order_and_routes_input_independently(self):
+        inputs = []
+        self.bridge.on_input = lambda slot, state: inputs.append((slot, state))
+        self.bridge.on_datagram(
+            hello(controller=b'Xbox', features=0, delay=0, mic=0, slots_mask=0b0101, extra=(b'', b'EasySMX', b'')),
+            self.PHONE)
+        self.assertEqual([p.slot for p in self.pads], [0, 2])
+        self.assertEqual(self.bridge.status()['pads'], [True, False, True, False])
+        self.assertEqual(self.bridge.status()['phone']['controllers'], ['Xbox', None, 'EasySMX', None])
+
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        self.assertEqual((self.pads[0].syncs, self.pads[1].syncs), (1, 0))
+        self.bridge.on_datagram(slotted_packet(2, self.PRESSED), self.PHONE)
+        self.assertEqual((self.pads[0].syncs, self.pads[1].syncs), (1, 1))
+        self.assertEqual(inputs, [(0, decode(self.PRESSED)), (2, decode(self.PRESSED))])
+
+    def test_disconnecting_player_1_keeps_player_2_pad_alive(self):
+        self.bridge.on_datagram(
+            hello(features=0, delay=0, mic=0, slots_mask=0b0011, extra=(b'EasySMX',)),
+            self.PHONE)
+        self.bridge.on_datagram(slotted_packet(1, self.PRESSED), self.PHONE)
+        self.bridge.on_datagram(
+            hello(controller=b'', connected=False, features=0, delay=0, mic=0, slots_mask=0b0010, extra=(b'EasySMX',)),
+            self.PHONE)
+        self.assertTrue(self.pads[0].closed)
+        self.assertFalse(self.pads[1].closed)
+        self.assertEqual(self.bridge.status()['pads'], [False, True, False, False])
+        self.assertEqual(self.bridge.status()['phone']['controllers'], [None, 'EasySMX', None, None])
+
+        self.bridge.on_datagram(slotted_packet(1, PACKET.pack(2, *[0] * 8)), self.PHONE)
+        self.assertEqual(self.pads[1].syncs, 2)
+
+    def test_per_slot_silence_releases_only_the_quiet_player(self):
+        self.bridge.on_datagram(
+            hello(features=0, delay=0, mic=0, slots_mask=0b0011, extra=(b'EasySMX',)),
+            self.PHONE)
+        self.bridge.on_datagram(self.PRESSED, self.PHONE)
+        self.bridge.on_datagram(slotted_packet(1, self.PRESSED), self.PHONE)
+        self.now += musubi.TIMEOUT - 0.1
+        self.bridge.on_datagram(slotted_packet(1, self.PRESSED), self.PHONE)
+        self.now += 0.2
+        self.bridge.on_tick()
+        self.assertEqual((self.pads[0].syncs, self.pads[1].syncs), (2, 1))
+
+    def test_dropping_phone_or_revoking_approval_closes_all_pads_and_stops_all_rumble(self):
+        bridge = core.Bridge(self.sock, [self.PHONE[0]], self.on_status, make_pad=self.make_pad, clock=lambda: self.now)
+        h = hello(features=musubi.FEATURE_RUMBLE, delay=0, mic=0, slots_mask=0b0011, extra=(b'Pad 2',))
+        bridge.on_datagram(h, self.PHONE)
+        bridge.set_rumble(100, 0, slot=0)
+        bridge.set_rumble(200, 0, slot=1)
+        self.sock.sent.clear()
+        self.now += musubi.PHONE_TIMEOUT + 1
+        bridge.on_tick()
+        self.assertTrue(self.pads[0].closed and self.pads[1].closed)
+        self.assertEqual([d for d, _ in self.sock.sent][-2:],
+                         [musubi.rumble_message(0, 0, 0, slot=0), musubi.rumble_message(0, 0, 0, slot=1)])
+
+        bridge.on_datagram(h, self.PHONE)
+        self.sock.sent.clear()
+        bridge.set_allowed([])
+        self.assertTrue(self.pads[2].closed and self.pads[3].closed)
+        self.assertIsNone(bridge.status()['phone'])
+        self.assertEqual(self.sock.sent, [])
+
+    def test_cable_handoff_keeps_all_open_pads(self):
+        self.bridge.on_datagram(
+            hello(features=0, delay=0, mic=0, slots_mask=0b0011, extra=(b'Pad 2',)),
+            self.PHONE)
+        self.bridge.on_datagram(slotted_packet(1, self.PRESSED), (musubi.USB, 0))
+        self.assertEqual(self.bridge.status()['phone']['ip'], musubi.USB)
+        self.assertFalse(self.pads[0].closed or self.pads[1].closed)
+        self.assertEqual(self.pads[1].syncs, 1)
 
 
 def pcm(left, right, frames=240):
@@ -481,7 +596,7 @@ class RumbleTest(unittest.TestCase):
         self.usb_sent = []
         self.rumbles = []
         self.bridge = Bridge(self.sock, [self.PHONE[0]], lambda: None,
-                             on_rumble=lambda strong, weak: self.rumbles.append((strong, weak)),
+                             on_rumble=lambda slot, strong, weak: self.rumbles.append((slot, strong, weak)),
                              make_pad=FakeFfUi, clock=lambda: self.now, send_usb=self.usb_sent.append)
         self.bridge.on_datagram(hello(features=musubi.FEATURE_RUMBLE), self.PHONE)
         self.pad = self.bridge.pad
@@ -489,12 +604,15 @@ class RumbleTest(unittest.TestCase):
     def sent(self):
         return [data for data, _ in self.sock.sent]
 
-    def play(self, effect_id, count=1):
-        self.pad.queue(e.EV_FF, effect_id, count)
-        self.bridge.on_pad_events()
+    def play(self, effect_id, count=1, slot=0):
+        self.bridge.slots[slot].pad.queue(e.EV_FF, effect_id, count)
+        self.bridge.on_pad_events(slot)
 
     def test_message_layout(self):
         self.assertEqual(musubi.rumble_message(0xffff, 0x8000, 250), b'PBRM\xff\xff\x80\x00\x00\xfa')
+        for slot in range(1, musubi.MAX_PLAYERS):
+            self.assertEqual(musubi.rumble_message(0xffff, 0x8000, 250, slot=slot),
+                             b'PBRM\xff\xff\x80\x00\x00\xfa' + bytes([slot]))
 
     def test_hello_flag(self):
         self.assertTrue(decode_hello(hello(features=musubi.FEATURE_RUMBLE))['rumble'])
@@ -597,18 +715,43 @@ class RumbleTest(unittest.TestCase):
         self.play(0)
         self.now += 0.1
         self.bridge.on_tick()
-        self.assertEqual(self.rumbles, [(0.75, 0.25)])
+        self.assertEqual(self.rumbles, [(0, 0.75, 0.25)])
         self.now += 0.2
         self.bridge.on_tick()
         self.bridge.on_tick()
-        self.assertEqual(self.rumbles, [(0.75, 0.25), (0.0, 0.0)])
+        self.assertEqual(self.rumbles, [(0, 0.75, 0.25), (0, 0.0, 0.0)])
         self.pad.upload(1, 0, 0xffff, 0, 0)
         self.play(0)
         self.now += musubi.RUMBLE_REFRESH
         self.bridge.on_tick()
-        self.assertEqual(self.rumbles, [(0.75, 0.25), (0.0, 0.0), (1.0, 0.0)])
+        self.assertEqual(self.rumbles, [(0, 0.75, 0.25), (0, 0.0, 0.0), (0, 1.0, 0.0)])
         self.play(0, 0)
-        self.assertEqual(self.rumbles[-1], (0.0, 0.0))
+        self.assertEqual(self.rumbles[-1], (0, 0.0, 0.0))
+
+    def test_multi_pad_independent_rumble_and_disconnect(self):
+        self.bridge.on_datagram(
+            hello(features=musubi.FEATURE_RUMBLE, delay=0, mic=0, slots_mask=0b0011, extra=(b'Pad 2',)),
+            self.PHONE)
+        pad2 = self.bridge.slots[1].pad
+        pad2.upload(0, 0, 0x8000, 0x4000, 0)
+        self.play(0, slot=1)
+        self.assertEqual(self.sent(), [musubi.rumble_message(0x8000, 0x4000, 0, slot=1)])
+        self.assertEqual(self.rumbles, [(1, 0.5, 0.25)])
+
+        self.pad.upload(0, 0, 0xffff, 0, 0)
+        self.play(0, slot=0)
+        self.assertEqual(self.sent()[-1], musubi.rumble_message(0xffff, 0, 0, slot=0))
+
+        self.sock.sent.clear()
+        self.bridge.on_datagram(
+            hello(features=musubi.FEATURE_RUMBLE, delay=0, mic=0, slots_mask=0b0001),
+            self.PHONE)
+        self.assertEqual(self.sent(), [musubi.rumble_message(0, 0, 0, slot=1)])
+        self.assertTrue(pad2.closed)
+        self.sock.sent.clear()
+        self.now += musubi.RUMBLE_REFRESH
+        self.bridge.on_tick()
+        self.assertEqual(self.sent(), [musubi.rumble_message(0xffff, 0, 0, slot=0)])
 
 
 class LevelsTest(unittest.TestCase):
