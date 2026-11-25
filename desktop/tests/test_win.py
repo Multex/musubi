@@ -4,8 +4,10 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from array import array
 from pathlib import Path
 from unittest import mock
 
@@ -14,6 +16,7 @@ import core
 import firewall
 import main as win_main
 import pad as win_pad
+import sound as win_sound
 from core import HELLO, HELLO_MAGIC, PACKET
 
 
@@ -51,11 +54,29 @@ class FakePad:
         self.closed = True
 
 
-def hello(features=core.FEATURE_RUMBLE, rtt=9, slots_mask=None, extra=()):
+class FakeSound:
+    def __init__(self, on_pcm):
+        self.on_pcm = on_pcm
+        self.capturing = False
+        self.error = None
+        self.starts = 0
+
+    def start(self):
+        if not self.capturing:
+            self.capturing = True
+            self.starts += 1
+
+    def stop(self):
+        self.capturing = False
+
+
+def hello(features=core.FEATURE_RUMBLE, rtt=9, delay=0, slots_mask=None, extra=()):
     pkt = HELLO.pack(HELLO_MAGIC, 1, rtt) + b'Pixel\0Xbox pad\0' + bytes([features])
-    if slots_mask is None:
-        return pkt
-    return pkt + bytes([0, 0, 0, slots_mask]) + b'\0'.join(extra)
+    if slots_mask is not None:
+        return pkt + delay.to_bytes(2, 'big') + bytes([0, slots_mask]) + b'\0'.join(extra)
+    if delay:
+        return pkt + delay.to_bytes(2, 'big')
+    return pkt
 
 
 class ConsoleTest(unittest.TestCase):
@@ -69,7 +90,7 @@ class ConsoleTest(unittest.TestCase):
         self.config = Path(tempfile.mkdtemp()) / 'config.json'
         self.said = []
         self.pads = []
-        self.console = win_main.Console(self.sock, self.make_pad, self.config, self.said.append)
+        self.console = win_main.Console(self.sock, self.make_pad, self.config, self.said.append, FakeSound)
 
     def tearDown(self):
         self.console.close()
@@ -124,6 +145,43 @@ class ConsoleTest(unittest.TestCase):
             self.send(hello(features=core.FEATURE_AUDIO, rtt=15))
         self.assertIn('status ', logs.output[0])
 
+    def test_a_sound_delay_logs_when_it_appears_but_not_when_it_jitters(self):
+        self.allow()
+        self.send(hello())
+        with self.assertLogs('musubi', 'INFO') as logs:
+            self.send(hello(delay=98))
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("'delay': 98", logs.output[0])
+        with self.assertNoLogs('musubi', 'INFO'):
+            self.send(hello(delay=105))
+
+    def test_a_phone_that_wants_sound_gets_it_until_it_leaves(self):
+        self.allow()
+        self.send(hello(features=core.FEATURE_AUDIO))
+        self.assertTrue(self.console.sound.capturing)
+        pcm = b'\x01' * core.CHUNK
+        self.console.sound.on_pcm(pcm)
+        self.console.step(timeout=2)
+        self.assertEqual(self.phone.recv(2048), b'PBAU\0\0' + pcm)
+        self.console.bridge.last_seen -= core.PHONE_TIMEOUT + 1
+        self.console.step(timeout=0)
+        self.assertFalse(self.console.sound.capturing)
+
+    def test_stable_sound_packs_7_5_ms_chunks(self):
+        self.allow()
+        self.send(hello(features=core.FEATURE_AUDIO | core.FEATURE_STABLE))
+        pcm = b'\x01' * core.STABLE_CHUNK
+        # Two callbacks' worth, so the packet has to be put together across them.
+        self.console.sound.on_pcm(pcm[:core.CHUNK])
+        self.console.sound.on_pcm(pcm[core.CHUNK:])
+        self.console.step(timeout=2)
+        self.assertEqual(self.phone.recv(2048), b'PBAU\0\0' + pcm)
+
+    def test_a_phone_without_the_sound_feature_never_starts_it(self):
+        self.allow()
+        self.send(hello())
+        self.assertEqual(self.console.sound.starts, 0)
+
     def test_rumble_from_the_driver_thread_reaches_the_phone(self):
         self.allow()
         self.send(hello())
@@ -153,6 +211,88 @@ class ConsoleTest(unittest.TestCase):
         self.console.on_rumble(255, 0, 1)
         self.console.step(timeout=2)
         self.assertEqual(self.phone.recv(64), core.rumble_message(0xffff, 0, 0, slot=1))
+
+
+class SoundTest(unittest.TestCase):
+    def start(self, sound):
+        """start(), then wait for the opening it does on its own thread."""
+        sound.start()
+        thread = sound.opening
+        if thread is not None:
+            thread.join(2)
+
+    def test_a_failed_start_waits_for_a_stop_before_trying_again(self):
+        opener = mock.Mock(side_effect=OSError('No sound output was found on this PC.'))
+        sound = win_sound.Sound(lambda pcm: None, opener)
+        with self.assertLogs('musubi', 'ERROR'):
+            self.start(sound)
+        self.start(sound)
+        self.assertEqual((opener.call_count, sound.error), (1, 'No sound output was found on this PC.'))
+        sound.stop()
+        self.assertIsNone(sound.error)
+
+    def test_a_good_start_captures_until_stopped(self):
+        capture = mock.Mock(channels=2)
+        capture.name = 'Speakers [Loopback]'
+        sound = win_sound.Sound(lambda pcm: None, mock.Mock(return_value=capture))
+        self.start(sound)
+        self.assertTrue(sound.capturing)
+        sound.stop()
+        self.assertFalse(sound.capturing)
+        capture.close.assert_called_once()
+
+    def test_a_slow_start_does_not_hold_the_caller_and_a_stop_meanwhile_closes_it(self):
+        go = threading.Event()
+        capture = mock.Mock(channels=2)
+
+        def opener(on_pcm):
+            go.wait(2)
+            return capture
+
+        sound = win_sound.Sound(lambda pcm: None, opener)
+        sound.start()
+        thread = sound.opening
+        self.assertFalse(sound.capturing)
+        sound.stop()
+        go.set()
+        thread.join(2)
+        self.assertFalse(sound.capturing)
+        capture.close.assert_called_once()
+
+    def test_the_library_is_missing_off_windows(self):
+        with mock.patch.dict(sys.modules, {'pyaudiowpatch': None}):
+            with self.assertRaisesRegex(OSError, 'library is missing'):
+                win_sound.open_capture(lambda pcm: None)
+
+    def fake_library(self, rate=48000, channels=6):
+        library = mock.Mock(paInt16=8, paContinue=0)
+        audio = library.PyAudio.return_value
+        audio.get_default_wasapi_loopback.return_value = {
+            'index': 7, 'name': 'Speakers [Loopback]', 'defaultSampleRate': float(rate), 'maxInputChannels': channels}
+        return library, audio
+
+    def test_the_callback_hands_on_stereo_pcm(self):
+        library, audio = self.fake_library()
+        received = []
+        with mock.patch.dict(sys.modules, {'pyaudiowpatch': library}):
+            capture = win_sound.open_capture(received.append)
+        callback = audio.open.call_args.kwargs['stream_callback']
+        self.assertEqual(callback(bytes(6 * 2 * 300), 300, {}, 0), (None, 0))
+        self.assertEqual([len(pcm) for pcm in received], [300 * 4])
+        capture.close()
+        audio.terminate.assert_called_once()
+
+    def test_a_wrong_rate_says_what_to_change_and_lets_go_of_portaudio(self):
+        library, audio = self.fake_library(rate=44100)
+        with mock.patch.dict(sys.modules, {'pyaudiowpatch': library}):
+            with self.assertRaisesRegex(OSError, 'at 44100 Hz'):
+                win_sound.open_capture(lambda pcm: None)
+        audio.terminate.assert_called_once()
+
+    def test_surround_keeps_the_front_left_and_right(self):
+        frames = array('h', [1, 2, 3, 4, 5, 6, -1, -2, -3, -4, -5, -6]).tobytes()
+        self.assertEqual(array('h', win_sound.stereo(frames, 6)).tolist(), [1, 2, -1, -2])
+        self.assertIs(win_sound.stereo(frames, 2), frames)
 
 
 class XInputState(ctypes.Structure):

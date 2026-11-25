@@ -33,12 +33,12 @@ jobs:
         run: |
           Invoke-WebRequest 'https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe' -OutFile vigembus.exe
           Start-Process ./vigembus.exe -ArgumentList '/exenoui', '/qn', '/norestart' -Wait
+      - run: pip install pyinstaller PyAudioWPatch
       - run: python -m unittest discover -s desktop/tests -p 'test_win*.py' -v
       - name: Build the exe
         shell: pwsh
         run: |
           "BUILD = '$("${{ github.sha }}".Substring(0, 7))'" | Out-File desktop/windows/build.py -Encoding utf8
-          pip install pyinstaller
           pyinstaller --onefile --console --name Musubi-test --paths desktop --paths desktop/windows --add-binary "desktop/windows/ViGEmClient.dll;." desktop/windows/main.py
       - name: Start the exe once
         shell: pwsh
