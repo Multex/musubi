@@ -185,7 +185,7 @@ class FirewallTest(unittest.TestCase):
         self.assertEqual(calls[0], ['delete', 'rule', 'name=all', f'program={self.EXE}'])
         self.assertEqual(calls[1], ['delete', 'rule', 'name=Musubi'])
         self.assertEqual(calls[2][:2], ['add', 'rule'])
-        for part in ('dir=in', 'action=allow', f'program={self.EXE}', 'protocol=UDP', 'localport=9999', 'profile=any'):
+        for part in ('dir=in', 'action=allow', f'program={self.EXE}', 'protocol=UDP', 'localport=9999', 'profile=private,public'):
             self.assertIn(part, calls[2])
 
 

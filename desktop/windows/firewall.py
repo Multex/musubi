@@ -33,12 +33,13 @@ def rule_ok(exe):
 
 
 def open_port(exe):
-    """Runs as admin. Replaces any rules for this exe with one allow rule for every network type."""
+    """Runs as admin. Replaces any rules for this exe with one allow rule for private and public networks."""
     # Block rules beat allow rules, and the Windows prompt makes a block rule for every network type left unticked.
     _netsh('delete', 'rule', 'name=all', f'program={exe}')
     _netsh('delete', 'rule', f'name={RULE}')
+    # Control Panel hides Domain on home PCs, so profile=any leaves an enabled Domain rule when unchecked.
     added = _netsh('add', 'rule', f'name={RULE}', 'dir=in', 'action=allow', f'program={exe}',
-                   'protocol=UDP', f'localport={PORT}', 'profile=any')
+                   'protocol=UDP', f'localport={PORT}', 'profile=private,public')
     return added.returncode == 0
 
 
