@@ -35,38 +35,86 @@ class FakeWindow:
         self.commands = os.fdopen(commands_write, 'wb')
         self.stdin = os.fdopen(events_write, 'wb')
         self.events = os.fdopen(events_read, 'rb')
+        self.killed = False
 
     def wait(self, timeout=None):
+        self.commands.close()  # A process that exits closes its end, which the hub's reader sees.
         return 0
+
+    def kill(self):
+        self.killed = True
+        self.events.close()
+
+
+class FakeTray:
+    def __init__(self, on_open, on_quit):
+        self.on_open = on_open
+        self.on_quit = on_quit
+        self.status = 'Musubi'
+        self.closed = False
+
+    def set_status(self, text):
+        self.status = text
+
+    def close(self):
+        self.closed = True
 
 
 class HubTest(unittest.TestCase):
     def setUp(self):
         self.port = free_port()
         self.config = Path(tempfile.mkdtemp()) / 'config.json'
-        self.window = FakeWindow()
+        self.window = None
+        self.windows = []
+        self.tray = None
         self.pads = []
         self.sounds = []
         self.no_driver = False
         self.phone = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.addCleanup(self.phone.close)
 
-    def start(self, allowed=()):
-        core.save_config({'phones': {ip: 'Pixel' for ip in allowed}, 'tray': True, 'sound_enabled': True}, self.config)
-        self.hub = hub.Hub(self.make_pad, self.make_sound, self.port, self.config, lambda: self.window,
-                           lambda: self.no_driver, ensure_firewall=lambda: None)
+    def start(self, allowed=(), tray=False, tray_enabled=True):
+        core.save_config({'phones': {ip: 'Pixel' for ip in allowed}, 'tray': tray_enabled, 'sound_enabled': True},
+                         self.config)
+        self.hub = hub.Hub(self.make_pad, self.make_sound, self.port, self.config, self.spawn_window,
+                           lambda: self.no_driver, ensure_firewall=lambda: None,
+                           make_tray=self.make_tray if tray else None)
         self.thread = threading.Thread(target=self.hub.run, daemon=True)
         self.thread.start()
         self.addCleanup(self.finish)
+        self.wait_for(lambda: self.windows)
         # Sent once the port is bound, so packets from here on arrive.
         return self.next_event(lambda event: event['event'] == 'state')
 
     def finish(self):
-        if not self.window.commands.closed:
-            self.window.commands.close()
+        for window in self.windows:
+            window.commands.close()
+        if self.tray:
+            self.tray.on_quit()
         self.thread.join(2)
         self.assertFalse(self.thread.is_alive())
-        self.window.events.close()
+        for window in self.windows:
+            window.events.close()
+
+    def spawn_window(self):
+        self.window = FakeWindow()
+        self.windows.append(self.window)
+        return self.window
+
+    def make_tray(self, on_open, on_quit):
+        self.tray = FakeTray(on_open, on_quit)
+        return self.tray
+
+    def wait_for(self, check, timeout=3):
+        end = time.monotonic() + timeout
+        while not check():
+            if time.monotonic() > end:
+                self.fail('timed out')
+            time.sleep(0.01)
+
+    def close_window(self):
+        self.window.commands.close()
+        self.wait_for(lambda: self.hub.window is None)
 
     def make_pad(self, slot=0):
         pad = FakePad()
@@ -195,6 +243,67 @@ class HubTest(unittest.TestCase):
         self.thread.join(2)
         self.assertFalse(self.thread.is_alive())
         self.assertIsNone(self.hub.receiver)
+
+    def test_with_the_tray_a_closed_window_leaves_the_hub_running_until_quit(self):
+        self.start(['127.0.0.1'], tray=True)
+        self.command(watch=True)
+        self.wait_for(lambda: self.hub.receiver.watching)
+        self.close_window()
+        self.wait_for(lambda: not self.hub.receiver.watching)
+        self.hello()
+        self.phone.sendto(PACKET.pack(1, 5, 0, 0, 0, 0, 0, 0, 0), ('127.0.0.1', self.port))
+        self.wait_for(lambda: self.pads and (1, [5, 0, 0, 0, 0, 0, 0, 0]) in self.pads[0].states)
+        self.assertTrue(self.thread.is_alive())
+        self.tray.on_open()
+        self.wait_for(lambda: len(self.windows) == 2)
+        self.assertIsNone(self.next_event(lambda event: event['event'] == 'state')['error'])
+        self.status(lambda event: event['phone'])
+        self.tray.on_open()
+        self.next_event(lambda event: event['event'] == 'present')
+        self.assertEqual(len(self.windows), 2)
+        self.tray.on_quit()
+        self.thread.join(2)
+        self.assertFalse(self.thread.is_alive())
+        self.assertTrue(self.tray.closed)
+        self.assertIsNone(self.hub.receiver)
+
+    def test_with_the_tray_setting_off_closing_the_window_quits(self):
+        self.start(tray=True, tray_enabled=False)
+        self.window.commands.close()
+        self.thread.join(2)
+        self.assertFalse(self.thread.is_alive())
+        self.assertTrue(self.tray.closed)
+
+    def test_a_new_phone_reopens_the_window_once(self):
+        self.start(tray=True)
+        self.close_window()
+        self.hello()
+        self.wait_for(lambda: len(self.windows) == 2)
+        self.status(lambda event: event['pending'])
+        self.wait_for(lambda: self.tray.status == 'Musubi: a new phone is asking')
+        self.close_window()
+        self.hello()
+        time.sleep(0.3)
+        self.assertEqual(len(self.windows), 2)
+
+    def test_the_tray_text_follows_the_phone_and_stop(self):
+        self.start(['127.0.0.1'], tray=True)
+        self.wait_for(lambda: self.tray.status == 'Musubi: waiting for a phone')
+        core.save_config({'phones': {'127.0.0.1': 'Couch'}, 'tray': True, 'sound_enabled': True}, self.config)
+        self.command(reload=True)
+        self.hello()
+        self.wait_for(lambda: self.tray.status == 'Musubi: Couch')
+        self.command(stop=True)
+        self.wait_for(lambda: self.tray.status == 'Musubi: stopped')
+
+    def test_quit_does_not_hang_on_a_window_that_stopped_reading(self):
+        self.start(tray=True)
+        self.hub.send_window({'event': 'filler', 'data': 'x' * 2 ** 20})
+        time.sleep(0.1)
+        self.tray.on_quit()
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertTrue(self.window.killed)
 
 
 class DriverCheckTest(unittest.TestCase):

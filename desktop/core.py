@@ -529,6 +529,23 @@ def sync_sound(sound, wanted):
         sound.stop()
 
 
+def pending_phones(status, ignored):
+    return [phone for phone in status['pending'] if phone['ip'] not in ignored]
+
+
+def tray_text(status, error, stopped, ignored, names):
+    phone = status['phone']
+    if error:
+        return 'Musubi: error'
+    if stopped:
+        return 'Musubi: stopped'
+    if pending_phones(status, ignored):
+        return 'Musubi: a new phone is asking'
+    if not phone:
+        return 'Musubi: waiting for a phone'
+    return f"Musubi: {names.get(phone['ip']) or phone['name'] or phone['ip']}"
+
+
 def load_config(path=CONFIG_FILE):
     config = {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False}
     try:

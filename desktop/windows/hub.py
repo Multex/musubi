@@ -17,6 +17,7 @@ import core  # noqa: E402
 import firewall  # noqa: E402
 import main as win_main  # noqa: E402
 import pad as win_pad  # noqa: E402
+import win_tray  # noqa: E402
 from core import Levels  # noqa: E402
 
 log = logging.getLogger('musubi')
@@ -24,6 +25,7 @@ log = logging.getLogger('musubi')
 HUB_COMMANDS = ('stop', 'start', 'ignored', 'reload', 'page', 'driver')
 NO_DRIVER = ("Controllers need the ViGEmBus driver, and this PC doesn't have it. Install it, then press Check again. "
              'Sound works without it.')
+DEFAULT = object()  # Stands for "this OS's tray", because None already means no tray.
 
 
 def idle_status(sound_enabled):
@@ -120,10 +122,14 @@ class Receiver(win_main.Console):
 
 
 class Hub:
-    """Linux's hub without the tray: the receiver, and the window until it closes. Its state lives on one thread."""
+    """Linux's hub for Windows: the tray icon, the receiver and the window. Its state lives on one thread."""
 
     def __init__(self, make_pad=None, make_sound=None, port=core.PORT, config_path=core.CONFIG_FILE,
-                 spawn_window=spawn_window, driver_missing=driver_missing, ensure_firewall=win_main.ensure_firewall):
+                 spawn_window=spawn_window, driver_missing=driver_missing, ensure_firewall=win_main.ensure_firewall,
+                 make_tray=DEFAULT):
+        if make_tray is DEFAULT:
+            make_tray = win_tray.Tray if sys.platform == 'win32' else None
+        self.make_tray = make_tray
         self.make_pad = make_pad
         self.make_sound = make_sound
         self.port = port
@@ -141,9 +147,12 @@ class Hub:
         self.ignored = set()
         self.page = 'overview'  # The window's sidebar item, kept like Linux keeps it for a reopened window.
         self.watch = False
-        self.lines = queue.SimpleQueue()
-        # A stuck window drops lines instead of stalling the receiver. Status repeats every second.
-        self.outbox = queue.Queue(maxsize=256)
+        self.running = True
+        self.tray = None
+        self.asking = []
+        self.outbox = None
+        self.writer = None
+        self.events = queue.SimpleQueue()
 
     def start_receiver(self):
         self.config = core.load_config(self.config_path)
@@ -173,9 +182,32 @@ class Hub:
     def on_receiver_event(self, event):
         if event['event'] == 'status':
             self.status = event
+            self.refresh()
         self.send_window(event)
 
+    def show_window(self):
+        if self.window is not None:
+            self.send_window({'event': 'present'})
+            return
+        try:
+            self.window = self.spawn_window()
+        except OSError:
+            log.exception('could not start window')
+            if not self.tray:
+                self.running = False
+            return
+        # One queue per window, so an old writer thread can't take the next window's lines.
+        self.outbox = queue.Queue(maxsize=256)
+        log.info('window started')
+        threading.Thread(target=self.read_window, args=(self.window,), daemon=True).start()
+        self.writer = threading.Thread(target=self.write_window, args=(self.window.stdin, self.outbox), daemon=True)
+        self.writer.start()
+        self.send_state()
+
     def send_window(self, event):
+        if self.outbox is None:
+            return
+        # A stuck window drops lines instead of stalling the receiver. Status repeats every second.
         try:
             self.outbox.put_nowait(json.dumps(event).encode() + b'\n')
         except queue.Full:
@@ -211,6 +243,17 @@ class Hub:
         relay = {key: value for key, value in command.items() if key not in HUB_COMMANDS}
         if relay and self.receiver:
             self.receiver.command(relay)
+        self.refresh()
+
+    def refresh(self):
+        asking = [phone['ip'] for phone in core.pending_phones(self.status, self.ignored)]
+        # An open window raises itself for a new phone. A closed one opens once per new request.
+        if asking and asking != self.asking and self.window is None and not self.error:
+            self.show_window()
+        self.asking = asking
+        if self.tray:
+            self.tray.set_status(core.tray_text(self.status, self.error, self.stopped, self.ignored,
+                                                self.config['phones']))
 
     def sync_driver(self):
         """Looks for the driver again, and lets a pad that failed without it be tried once more."""
@@ -220,21 +263,67 @@ class Hub:
             self.receiver.bridge.pad_error = None
             self.receiver.send_status()
 
-    def on_window_end(self):
-        log.info('window closed')
+    def on_tray_open(self):
+        self.events.put(('open',))
+        self.wake()
+
+    def on_tray_quit(self):
+        self.events.put(('quit',))
+        self.wake()
+
+    def close_window(self):
         window, self.window = self.window, None
+        outbox, self.outbox = self.outbox, None
+        if window is None:
+            return
+        try:
+            outbox.put_nowait(None)
+        except queue.Full:
+            try:
+                outbox.get_nowait()
+            except queue.Empty:
+                pass
+            outbox.put_nowait(None)
+        # Closing stdin waits for a write in progress, which only ends if a stuck window dies first.
+        self.writer.join(1)
+        if self.writer.is_alive():
+            window.kill()
+        try:
+            window.stdin.close()
+        except (OSError, ValueError):
+            pass
         try:
             window.wait(timeout=2)
         except subprocess.TimeoutExpired:
             window.kill()
+            window.wait()
+        try:
+            window.stdout.close()
+        except OSError:
+            pass
 
-    def read_window(self, stdout):
-        """Reader thread: hands the window's lines to the main thread, then None when the window is gone."""
-        for line in stdout:
-            if line.strip():
-                self.lines.put(line)
-                self.wake()
-        self.lines.put(None)
+    def on_window_end(self, window):
+        if window is not self.window:
+            return
+        log.info('window closed')
+        self.close_window()
+        self.watch = False
+        if self.receiver:
+            self.receiver.command({'watch': False})
+        self.config = core.load_config(self.config_path)
+        if not (self.config['tray'] and self.tray):
+            self.running = False
+
+    def read_window(self, window):
+        """Reader thread: hands the window's lines to the main thread, then says the window is gone."""
+        try:
+            for line in window.stdout:
+                if line.strip():
+                    self.events.put(('line', window, line))
+                    self.wake()
+        except (OSError, ValueError):
+            pass
+        self.events.put(('window_end', window))
         self.wake()
 
     def wake(self):
@@ -245,10 +334,10 @@ class Hub:
             except OSError:
                 pass
 
-    def write_window(self, stdin):
+    def write_window(self, stdin, outbox):
         try:
-            while True:
-                stdin.write(self.outbox.get())
+            while (item := outbox.get()) is not None:
+                stdin.write(item)
                 stdin.flush()
         except (OSError, ValueError):
             pass  # The window is gone, and the reader thread reports that.
@@ -258,31 +347,42 @@ class Hub:
         log.info('build %s, %s, python %s, %s MB', win_main.BUILD, platform.platform(), platform.python_version(),
                  memory)
         try:
+            # The tray comes before the firewall prompt, so a second launch during it finds this one.
+            if self.make_tray is not None:
+                try:
+                    self.tray = self.make_tray(self.on_tray_open, self.on_tray_quit)
+                except OSError as ex:
+                    log.warning('tray: %s', ex)
+                    self.tray = None
             self.ensure_firewall()
             self.start_receiver()
-            self.window = self.spawn_window()
-            log.info('window started')
-            threading.Thread(target=self.read_window, args=(self.window.stdout,), daemon=True).start()
-            threading.Thread(target=self.write_window, args=(self.window.stdin,), daemon=True).start()
-            self.send_state()
+            self.show_window()
+            self.refresh()
             # After the window is up, because a driver that is slow to answer takes seconds here.
             self.sync_driver()
-            while self.window is not None:
+            while self.running:
                 if self.receiver is not None:
                     self.receiver.step()
                 block = self.receiver is None
                 try:
-                    while self.window is not None:
-                        line = self.lines.get(block, core.TICK)
+                    while self.running:
+                        kind, *details = self.events.get(block, core.TICK)
                         block = False
-                        if line is None:
-                            self.on_window_end()
-                        else:
-                            self.on_window_line(line)
+                        if kind == 'line':
+                            self.on_window_line(details[1])
+                        elif kind == 'window_end':
+                            self.on_window_end(details[0])
+                        elif kind == 'open':
+                            self.show_window()
+                        elif kind == 'quit':
+                            self.running = False
                 except queue.Empty:
                     pass
         finally:
+            self.close_window()
             self.stop_receiver()
+            if self.tray:
+                self.tray.close()
             log.info('stopped')
 
 
@@ -292,6 +392,9 @@ def main():
     if '--window' in sys.argv:
         import gtk_window  # Only the window process loads GTK, and it keeps its own log.
         return gtk_window.main()
+    # Before the log, which the running Musubi holds open.
+    if win_tray.wake_existing():
+        return 0
     win_main.setup_log()
     try:
         Hub().run()

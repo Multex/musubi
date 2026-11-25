@@ -10,6 +10,7 @@ from pathlib import Path
 from gi.repository import Gio, GLib
 
 import system
+from core import pending_phones, tray_text  # noqa: E402
 from tray import Tray, tray_available
 
 HERE = Path(__file__).resolve().parent
@@ -23,23 +24,6 @@ HUB_COMMANDS = ('stop', 'start', 'ignored', 'reload', 'page')
 def idle_status(sound_enabled):
     return {'event': 'status', 'phone': None, 'pad': False, 'pads': [False] * 4, 'pad_error': None, 'pending': [],
             'sound_enabled': sound_enabled}
-
-
-def pending_phones(status, ignored):
-    return [phone for phone in status['pending'] if phone['ip'] not in ignored]
-
-
-def tray_text(status, error, stopped, ignored, names):
-    phone = status['phone']
-    if error:
-        return 'Musubi: error'
-    if stopped:
-        return 'Musubi: stopped'
-    if pending_phones(status, ignored):
-        return 'Musubi: a new phone is asking'
-    if not phone:
-        return 'Musubi: waiting for a phone'
-    return f"Musubi: {names.get(phone['ip']) or phone['name'] or phone['ip']}"
 
 
 def spawn(args, on_line, on_end):

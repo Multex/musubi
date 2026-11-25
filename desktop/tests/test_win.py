@@ -17,6 +17,7 @@ import firewall
 import main as win_main
 import pad as win_pad
 import sound as win_sound
+import win_tray
 from core import HELLO, HELLO_MAGIC, PACKET
 
 
@@ -441,6 +442,24 @@ class DriverTest(unittest.TestCase):
         vibration = (ctypes.c_ushort * 2)(0xffff, 0)
         self.assertEqual(self.xinput.XInputSetState(slot, ctypes.byref(vibration)), 0)
         self.wait_for(lambda: True if (255, 0) in self.rumbles else None)
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'needs Windows')
+class RealTrayTest(unittest.TestCase):
+    """A real icon, under its own class name so a running Musubi isn't woken."""
+
+    def test_the_icon_answers_a_second_launch_and_goes_away(self):
+        if ctypes.sizeof(ctypes.c_void_p) == 8:
+            self.assertEqual(ctypes.sizeof(win_tray.NOTIFYICONDATAW), 976)
+        opened = threading.Event()
+        tray = win_tray.Tray(opened.set, lambda: None, class_name='MusubiTrayTest')
+        self.addCleanup(tray.close)
+        tray.set_status('Musubi: testing')
+        self.assertTrue(win_tray.wake_existing('MusubiTrayTest'))
+        self.assertTrue(opened.wait(5))
+        tray.close()
+        self.assertFalse(tray.thread.is_alive())
+        self.assertFalse(win_tray.wake_existing('MusubiTrayTest'))
 
 
 if __name__ == '__main__':

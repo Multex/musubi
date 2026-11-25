@@ -125,14 +125,37 @@ jobs:
           [System.Drawing.Graphics]::FromImage($picture).CopyFromScreen($screen.Left, $screen.Top, 0, 0, $picture.Size)
           $picture.Save("$PWD/screens/app.png")
           $phone.WaitForExit()
-          # Closing the window by hand can't be scripted simply, so its process goes, and the hub must follow by itself.
-          $windows = Get-CimInstance Win32_Process -Filter "Name = 'Musubi.exe' AND ParentProcessId = $($hub.Id)"
+          # Closing the window by hand can't be scripted simply, so its process goes, and the tray must keep the hub.
+          $children = "Name = 'Musubi.exe' AND ParentProcessId = $($hub.Id)"
+          $windows = Get-CimInstance Win32_Process -Filter $children
           if (-not $windows) { throw 'The window process was not running.' }
           $windows | ForEach-Object { Stop-Process -Id $_.ProcessId }
-          $closed = $hub.WaitForExit(10000)
+          Start-Sleep 2
           $logs = "$env:LOCALAPPDATA/musubi"
+          if ($hub.HasExited) {
+            Get-Content "$logs/musubi.log", "$logs/musubi-window.log" -ErrorAction SilentlyContinue
+            throw 'The hub quit with its window although the tray is on.'
+          }
+          # The hub reads this when the next window closes, so that close must end it.
+          python -c "import sys; sys.path.insert(0, 'desktop'); import core; core.save_config({**core.load_config(), 'tray': False})"
+          Start-Process dist/Musubi/Musubi.exe
+          $reopened = $null
+          for ($i = 0; $i -lt 20 -and -not $reopened; $i++) {
+            Start-Sleep -Milliseconds 500
+            $reopened = Get-CimInstance Win32_Process -Filter $children
+          }
+          if (-not $reopened) {
+            Get-Content "$logs/musubi.log", "$logs/musubi-window.log" -ErrorAction SilentlyContinue
+            Stop-Process $hub
+            throw 'A second launch did not reopen the window.'
+          }
+          # The new window starts its log fresh, so it needs time to show before it goes.
+          Start-Sleep 8
+          $reopened | ForEach-Object { Stop-Process -Id $_.ProcessId }
+          $closed = $hub.WaitForExit(10000)
           Get-Content "$logs/musubi.log", "$logs/musubi-window.log" -ErrorAction SilentlyContinue
           if (-not $closed) { Stop-Process $hub; throw 'The hub kept running after its window was gone.' }
+          if (-not (Select-String -Path "$logs/musubi.log" -Pattern 'tray icon added' -Quiet)) { throw 'The tray icon was never added.' }
           if (-not (Select-String -Path "$logs/musubi.log" -Pattern 'listening' -Quiet)) { throw 'The app never started listening.' }
           if (-not (Select-String -Path "$logs/musubi.log" -Pattern 'first packet' -Quiet)) { throw 'No packet arrived from the pretend phone.' }
           if (-not (Select-String -Path "$logs/musubi-window.log" -Pattern 'window shown' -Quiet)) { throw 'The window never opened.' }

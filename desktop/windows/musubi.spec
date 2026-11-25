@@ -9,11 +9,14 @@ a = Analysis([os.path.join(here, 'hub.py')],
              pathex=[desktop, os.path.join(desktop, 'linux'), here],
              # pad.py loads it from _MEIPASS.
              binaries=[(os.path.join(here, 'ViGEmClient.dll'), '.')],
+             # win_tray.py loads it from _MEIPASS.
+             datas=[(os.path.join(here, 'musubi.ico'), '.')],
              # The drawings get their cairo context through this module, which nothing imports by name.
              hiddenimports=['gi._gi_cairo', 'cairo'],
              # Adwaita's icons are the title bar buttons. No GTK themes or translations: the look is the window's own.
              hooksconfig={'gi': {'module-versions': {'Gtk': '4.0', 'Gdk': '4.0'},
                                  'icons': ['Adwaita'], 'themes': [], 'languages': []}})
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, exclude_binaries=True, name='Musubi', console=False)
+exe = EXE(pyz, a.scripts, exclude_binaries=True, name='Musubi', console=False,
+          icon=os.path.join(here, 'musubi.ico'))
 COLLECT(exe, a.binaries, a.datas, name='Musubi')
