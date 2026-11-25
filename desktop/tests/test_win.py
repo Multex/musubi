@@ -51,8 +51,8 @@ class FakePad:
         self.closed = True
 
 
-def hello(features=core.FEATURE_RUMBLE):
-    return HELLO.pack(HELLO_MAGIC, 1, 9) + b'Pixel\0Xbox pad\0' + bytes([features])
+def hello(features=core.FEATURE_RUMBLE, rtt=9):
+    return HELLO.pack(HELLO_MAGIC, 1, rtt) + b'Pixel\0Xbox pad\0' + bytes([features])
 
 
 class ConsoleTest(unittest.TestCase):
@@ -110,6 +110,15 @@ class ConsoleTest(unittest.TestCase):
             self.send(hello())
         self.assertIn('gap', logs.output[0])
 
+    def test_ping_only_changes_do_not_log_status(self):
+        self.allow()
+        self.send(hello(rtt=9))
+        with self.assertNoLogs('musubi', 'INFO'):
+            self.send(hello(rtt=15))
+        with self.assertLogs('musubi', 'INFO') as logs:
+            self.send(hello(features=core.FEATURE_AUDIO, rtt=15))
+        self.assertIn('status ', logs.output[0])
+
     def test_rumble_from_the_driver_thread_reaches_the_phone(self):
         self.allow()
         self.send(hello())
@@ -161,8 +170,9 @@ class FirewallTest(unittest.TestCase):
             returncode=returncode, stdout=stdout, stderr=''))
 
     def test_rule_counts_only_when_it_names_this_exe(self):
-        with self.netsh(stdout=r'Program: c:\users\ana\downloads\musubi-test.exe'):
+        with self.netsh(stdout=r'Program: c:\users\ana\downloads\musubi-test.exe') as run:
             self.assertTrue(firewall.rule_ok(self.EXE))
+        self.assertIn('status=enabled', run.call_args.args[0])
         with self.netsh(stdout=r'Program: C:\Old\Musubi-test.exe'):
             self.assertFalse(firewall.rule_ok(self.EXE))
         with self.netsh(returncode=1, stdout=self.EXE):
@@ -189,6 +199,9 @@ class RealFirewallTest(unittest.TestCase):
                         capture_output=True)
         self.assertTrue(firewall.open_port(exe))
         self.assertTrue(firewall.rule_ok(exe))
+        subprocess.run(['netsh', 'advfirewall', 'firewall', 'set', 'rule', 'name=Musubi', 'new', 'enable=no'],
+                       check=True, capture_output=True)
+        self.assertFalse(firewall.rule_ok(exe))
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'needs Windows')

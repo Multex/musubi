@@ -88,9 +88,12 @@ class Console:
 
     def on_status(self):
         status = self.bridge.status()
-        if status == self.shown:
+        shown = dict(status)
+        if shown['phone']:
+            shown['phone'] = {k: v for k, v in shown['phone'].items() if k != 'rtt'}
+        if shown == self.shown:
             return
-        self.shown = status
+        self.shown = shown
         log.info('status %s', status)
         for phone in status['pending']:
             if phone['ip'] not in self.asked:

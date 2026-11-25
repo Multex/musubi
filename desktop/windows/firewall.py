@@ -24,9 +24,9 @@ def _netsh(*args):
 
 
 def rule_ok(exe):
-    """True when our rule exists for this exe. Reading rules needs no admin."""
+    """True when our rule is enabled for this exe. Reading rules needs no admin."""
     try:
-        result = _netsh('show', 'rule', f'name={RULE}', 'verbose')
+        result = _netsh('show', 'rule', f'name={RULE}', 'status=enabled', 'verbose')
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0 and exe.lower() in result.stdout.lower()
