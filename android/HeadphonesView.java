@@ -10,10 +10,11 @@ import android.view.View;
 /** The headphones drawing. Levels animate at 30 fps only while sound arrives, and nothing is allocated per frame. */
 final class HeadphonesView extends View implements Runnable {
     static final int ON = 0, OFF = 1, NONE = 2;
-    private static final float WIDTH = 300, HEIGHT = 266, FALL = 0.85f;
+    static final float FALL = 0.85f;
+    private static final float WIDTH = 300, HEIGHT = 266;
     private static final int FRAME_MS = 33;
     // Below 1, quiet sound shows taller while full scale still maps to 1: 0.1 shows as 0.45, 0.2 as 0.57, 0.5 as 0.78.
-    private static final double CURVE = 0.35;
+    static final double CURVE = 0.35;
 
     /** Fills out with the left and right peaks (0 to 1) since the last call; false once the sound has stopped. */
     interface Source {

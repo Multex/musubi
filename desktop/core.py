@@ -20,9 +20,13 @@ TICK = 0.25
 # shortcut: no sequence number, a reordered packet glitches until the next one, add it if jitter shows up.
 PACKET = struct.Struct('!I8h')
 NEUTRAL = PACKET.pack(0, *[0] * 8)
+MAX_PLAYERS = 4
+# Multi-pad input: magic, slot index 0..3, then the same 20-byte state as PACKET. Slot 0 keeps using PACKET.
+INPUT_MAGIC = b'PBIN'
+SLOTTED_PACKET = struct.Struct('!4sBI8h')
 # The app times the echo of these to tell whether the PC is answering.
 PING_SIZE = 8
-# Magic, controller connected, ping in ms, then "phone name\0controller name\0" a features byte and a 16-bit sound delay in ms (0 = none). Sent once a second.
+# Magic, controller connected, ping in ms, then "phone name\0controller name\0" a features byte, a 16-bit sound delay in ms (0 = none) and the mic state (0 off, 1 live, 2 muted, 3 paused), optional slots mask (bits 0..3) and slots 1..3 names separated by \0. Sent once a second.
 HELLO = struct.Struct('!4sBH')
 HELLO_MAGIC = b'PBHI'
 # Feature bits stay below 0x20: 0.5.x desktops read the byte as part of the controller name and drop it as a control character.
@@ -30,12 +34,17 @@ FEATURE_AUDIO = 1
 FEATURE_RUMBLE = 2
 # "Most stable": the phone asks for 7.5 ms audio packets instead of 5.
 FEATURE_STABLE = 4
+# Phone to PC: magic, 16-bit sequence number, then 5 ms of mono 48 kHz s16le PCM (480 bytes).
+MIC_MAGIC = b'PBMC'
 # PC to phone: magic, sequence number, then PCM.
 AUDIO = struct.Struct('!4sH')
 AUDIO_MAGIC = b'PBAU'
-# PC to phone: magic, strong and weak motor 0..65535, then ms left (0 = until the next message). Sent on change only.
+# PC to phone: magic, strong and weak motor 0..65535, then ms left (0 = until the next message), optional slot 1..3. Sent on change only.
 RUMBLE = struct.Struct('!4sHHH')
 RUMBLE_MAGIC = b'PBRM'
+# PC to phone: magic, then the mic switch shared with the phone: 0 off, 1 on, 2 on and muted. Phones skip messages they don't know.
+MIC_SET = struct.Struct('!4sB')
+MIC_SET_MAGIC = b'PBMS'
 # PC to phone over the cable: magic, then the PC name in UTF-8. Sent on every hello; Wi-Fi phones name PCs themselves.
 NAME_MAGIC = b'PBNM'
 RUMBLE_STOPPED = (0, 0, None)
@@ -65,6 +74,26 @@ def decode(data):
     return buttons, [min(max(v, low), high) for v, (low, high) in zip(axes, AXIS_LIMITS)]
 
 
+def slotted_packet(slot, state_bytes):
+    """Wrap a 20-byte state packet for slots 1..3 (slot 0 sends raw PACKET)."""
+    if slot == 0:
+        return state_bytes
+    return INPUT_MAGIC + bytes([slot]) + state_bytes
+
+
+def decode_input(data):
+    """Return (slot, (button bits, clamped axis values)), or None for a malformed packet."""
+    if len(data) == PACKET.size:
+        state = decode(data)
+        return (0, state) if state is not None else None
+    if len(data) == SLOTTED_PACKET.size and data[:4] == INPUT_MAGIC:
+        slot = data[4]
+        if 0 <= slot < MAX_PLAYERS:
+            state = decode(data[5:])
+            return (slot, state) if state is not None else None
+    return None
+
+
 def clean_name(raw):
     """Names come straight off the network, so they get no control characters or unbounded length."""
     text = raw.decode('utf-8', 'replace')
@@ -77,7 +106,7 @@ def name_message(name):
 
 
 def decode_hello(data):
-    """Return {name, controller, controller_connected, rtt, audio, rumble, stable, delay}, or None if this isn't a hello."""
+    """Return {name, controller, controller_connected, controllers, rtt, audio, rumble, stable, delay, mic}, or None if this isn't a hello."""
     if len(data) < HELLO.size or data[:4] != HELLO_MAGIC:
         return None
     _, connected, rtt = HELLO.unpack_from(data)
@@ -85,15 +114,25 @@ def decode_hello(data):
     controller, _, features = rest.partition(b'\0')
     flags = features[0] if features else 0
     delay = int.from_bytes(features[1:3], 'big') if len(features) >= 3 else 0
+    mic = features[3] if len(features) >= 4 and features[3] <= 3 else 0
+    if len(features) >= 5:
+        mask = features[4]
+        extra = features[5:].split(b'\0')
+        raw = [controller] + (extra[:MAX_PLAYERS - 1] + [b''] * (MAX_PLAYERS - 1))[:MAX_PLAYERS - 1]
+        controllers = [clean_name(raw[i]) if (mask & (1 << i)) else None for i in range(MAX_PLAYERS)]
+    else:
+        controllers = [clean_name(controller) if connected else None] + [None] * (MAX_PLAYERS - 1)
     return {
         'name': clean_name(phone),
         'controller': clean_name(controller),
-        'controller_connected': bool(connected),
+        'controller_connected': bool(connected) or any(c is not None for c in controllers),
+        'controllers': controllers,
         'rtt': rtt,
         'audio': bool(flags & FEATURE_AUDIO),
         'rumble': bool(flags & FEATURE_RUMBLE),
         'stable': bool(flags & FEATURE_STABLE),
         'delay': delay or None,
+        'mic': mic,
     }
 
 
@@ -101,59 +140,86 @@ def audio_message(seq, pcm):
     return AUDIO.pack(AUDIO_MAGIC, seq & 0xffff) + pcm
 
 
-def rumble_message(strong, weak, ms):
-    return RUMBLE.pack(RUMBLE_MAGIC, strong, weak, ms)
+def rumble_message(strong, weak, ms, slot=0):
+    base = RUMBLE.pack(RUMBLE_MAGIC, strong, weak, ms)
+    return base if slot == 0 else base + bytes([slot])
+
+
+def mic_set_message(state):
+    return MIC_SET.pack(MIC_SET_MAGIC, state)
+
+
+class _PadSlot:
+    """State for one of the four virtual controller slots."""
+
+    def __init__(self, index):
+        self.index = index
+        self.pad = None
+        self.last = NEUTRAL
+        self.last_state_at = 0
+        # What the game wants from the motors now: strong, weak, and when it ends (None = until told).
+        self.rumble = RUMBLE_STOPPED
+        self.rumble_sent = RUMBLE_STOPPED
+        self.rumble_sent_at = 0
 
 
 class Bridge:
-    """Drives one virtual pad from the first allowed phone that talks to it.
+    """Drives up to four virtual pads from the first allowed phone that talks to it.
 
-    The pad comes from `make_pad` and needs `apply(state)` and `close()`.
+    Each pad comes from `make_pad(slot)` and needs `apply(state)` and `close()`.
     """
 
     def __init__(self, sock, allowed, on_status, on_input=None, on_rumble=None, make_pad=None, clock=time.monotonic,
-                 send_usb=None):
+                 send_usb=None, on_mic=None):
         self.sock = sock
         self.send_usb = send_usb
         self.allowed = set(allowed)
         self.on_status = on_status
         self.on_input = on_input
         self.on_rumble = on_rumble
+        self.on_mic = on_mic
         self.make_pad = make_pad
         self.clock = clock
-        self.pad = None
+        self.slots = [_PadSlot(i) for i in range(MAX_PLAYERS)]
         self.pad_error = None
         self.active = None
         self.addr = None
         self.hello = None
-        self.last = NEUTRAL
-        self.last_state_at = 0
         self.last_seen = 0
         self.active_since = 0
         self.pending = {}
         self.pending_seen = {}
-        # What the game wants from the motors now: strong, weak, and when it ends (None = until told).
-        self.rumble = RUMBLE_STOPPED
-        self.rumble_sent = RUMBLE_STOPPED
-        self.rumble_sent_at = 0
+
+    @property
+    def pad(self):
+        return self.slots[0].pad
+
+    def open_pads(self):
+        return [(slot.index, slot.pad) for slot in self.slots if slot.pad is not None]
 
     def status(self):
         phone = None
         if self.active:
             hello = self.hello or {}
+            controllers = list(hello.get('controllers') or [None] * MAX_PLAYERS)
             phone = {
                 'ip': self.active,
                 'name': hello.get('name', ''),
                 # Version 0.2.0 sends no hello, so None means "can't tell", not "disconnected".
-                'controller': hello.get('controller') if hello.get('controller_connected') else None,
+                'controller': controllers[0],
+                'controllers': controllers,
                 'controller_known': self.hello is not None,
                 'rtt': hello.get('rtt'),
                 'audio': hello.get('audio', False),
                 'delay': hello.get('delay'),
+                # None until the first hello, so nobody mistakes "not told yet" for "off".
+                'mic': hello.get('mic'),
             }
+        pads = [slot.pad is not None for slot in self.slots]
         return {
             'phone': phone,
-            'pad': self.pad is not None,
+            'pad': any(pads),
+            'pads': pads,
             'pad_error': self.pad_error,
             'pending': [{'ip': ip, 'name': name} for ip, name in self.pending.items()],
         }
@@ -167,46 +233,56 @@ class Bridge:
             self._drop_phone()
         self.on_status()
 
-    def _apply(self, state):
-        self.pad.apply(state)
+    def _apply(self, slot, state):
+        slot.pad.apply(state)
 
-    def _forget_rumble(self):
-        self.rumble = RUMBLE_STOPPED
+    def _forget_rumble(self, slot):
+        slot.rumble = RUMBLE_STOPPED
 
-    def _wanted_rumble(self, now):
-        return self.rumble
+    def _wanted_rumble(self, slot, now):
+        return slot.rumble
 
-    def _sync_pad(self):
-        if self.hello is not None:
-            wanted = self.hello['controller_connected']
-        else:
-            # Waiting first stops a pad flashing on before a newer app's first hello arrives.
-            wanted = self.active is not None and self.clock() - self.active_since >= HELLO_WAIT
-        if wanted and self.pad is None and self.pad_error is None:
-            try:
-                self.pad = self.make_pad()
-                self.last = NEUTRAL
-            except OSError as ex:
-                self.pad_error = str(ex)
+    def _sync_pads(self):
+        changed = False
+        any_wanted = False
+        before_error = self.pad_error
+        for slot in self.slots:
+            if self.hello is not None:
+                wanted = self.hello['controllers'][slot.index] is not None
+            else:
+                # Waiting first stops a pad flashing on before a newer app's first hello arrives.
+                wanted = slot.index == 0 and self.active is not None and self.clock() - self.active_since >= HELLO_WAIT
+            any_wanted = any_wanted or wanted
+            if wanted and slot.pad is None and self.pad_error is None:
+                try:
+                    slot.pad = self.make_pad(slot.index)
+                    slot.last = NEUTRAL
+                    changed = True
+                except OSError as ex:
+                    self.pad_error = str(ex)
+            elif not wanted and slot.pad is not None:
+                self._close_pad(slot)
+                changed = True
+        if not any_wanted:
+            self.pad_error = None
+        if changed or self.pad_error != before_error:
             self.on_status()
-        elif not wanted and self.pad is not None:
-            self._close_pad()
-            self.on_status()
 
-    def _close_pad(self):
-        self._forget_rumble()
-        self._send_rumble()
-        self._apply(decode(NEUTRAL))
-        self.pad.close()
-        self.pad = None
-        self.last = NEUTRAL
+    def _close_pad(self, slot):
+        self._forget_rumble(slot)
+        self._send_rumble(slot)
+        self._apply(slot, decode(NEUTRAL))
+        slot.pad.close()
+        slot.pad = None
+        slot.last = NEUTRAL
         if self.on_input:
-            self.on_input(decode(NEUTRAL))
+            self.on_input(slot.index, decode(NEUTRAL))
 
     def _drop_phone(self):
         # Before forgetting the phone, so its final rumble stop still has somewhere to go.
-        if self.pad is not None:
-            self._close_pad()
+        for slot in self.slots:
+            if slot.pad is not None:
+                self._close_pad(slot)
         self.active = None
         self.addr = None
         self.hello = None
@@ -214,7 +290,7 @@ class Bridge:
 
     def _note_unknown(self, ip, data):
         hello = decode_hello(data)
-        if hello is None and len(data) not in (PING_SIZE, PACKET.size):
+        if hello is None and len(data) != PING_SIZE and decode_input(data) is None:
             return
         # A known name replaces the empty one, but junk can't grow the list without limit.
         if ip in self.pending:
@@ -233,6 +309,9 @@ class Bridge:
         if ip != USB and ip not in self.allowed:
             self._note_unknown(ip, data)
             return
+        # Junk from an allowed IP (a TV's stray packet) must not make it the active phone.
+        if decode_hello(data) is None and len(data) != PING_SIZE and decode_input(data) is None and not data.startswith(MIC_MAGIC):
+            return
         now = self.clock()
         if self.active != ip:
             # The cable takes over from Wi-Fi, and Wi-Fi from an unplugged cable. Both keep the hello so the pad doesn't drop out meanwhile.
@@ -247,6 +326,10 @@ class Bridge:
         # The app opens a new socket, so a new port, each time it resumes.
         self.addr = addr
 
+        if data.startswith(MIC_MAGIC) and len(data) >= 6:
+            if self.on_mic:
+                self.on_mic(int.from_bytes(data[4:6], 'big'), data[6:])
+            return
         hello = decode_hello(data)
         if hello is not None:
             if hello != self.hello:
@@ -254,7 +337,7 @@ class Bridge:
                 self.on_status()
             if ip == USB:
                 self.send_to_phone(name_message(socket.gethostname()))
-            self._sync_pad()
+            self._sync_pads()
             return
         if len(data) == PING_SIZE:
             try:
@@ -262,38 +345,42 @@ class Bridge:
             except OSError:
                 pass  # A failed echo must never take the pad down mid-game.
             return
-        self._sync_pad()
-        if data == self.last:
-            self.last_state_at = now
+        self._sync_pads()
+        parsed = decode_input(data)
+        if parsed is None:
             return
-        state = decode(data)
-        if state is None:
+        slot_index, state = parsed
+        slot = self.slots[slot_index]
+        raw = data[-PACKET.size:]
+        if raw == slot.last:
+            slot.last_state_at = now
             return
-        self.last_state_at = now
-        if self.pad is not None:
-            self._apply(state)
-            self.last = data
+        slot.last_state_at = now
+        if slot.pad is not None:
+            self._apply(slot, state)
+            slot.last = raw
             if self.on_input:
-                self.on_input(state)
+                self.on_input(slot.index, state)
 
-    def _send_rumble(self, refresh=False):
+    def _send_rumble(self, slot, refresh=False):
         now = self.clock()
-        wanted = self._wanted_rumble(now)
-        if wanted == self.rumble_sent and not (refresh and wanted != RUMBLE_STOPPED):
+        wanted = self._wanted_rumble(slot, now)
+        if wanted == slot.rumble_sent and not (refresh and wanted != RUMBLE_STOPPED):
             return
-        before = self.rumble_sent[:2]
-        self.rumble_sent = wanted
-        self.rumble_sent_at = now
+        before = slot.rumble_sent[:2]
+        slot.rumble_sent = wanted
+        slot.rumble_sent_at = now
         strong, weak, until = wanted
         ms = 0 if until is None else min(max(round((until - now) * 1000), 1), 0xffff)
-        self.send_to_phone(rumble_message(strong, weak, ms))
+        self.send_to_phone(rumble_message(strong, weak, ms, slot.index))
         if self.on_rumble and (strong, weak) != before:
-            self.on_rumble(round(strong / 0xffff, 2), round(weak / 0xffff, 2))
+            self.on_rumble(slot.index, round(strong / 0xffff, 2), round(weak / 0xffff, 2))
 
-    def set_rumble(self, strong, weak):
+    def set_rumble(self, strong, weak, slot=0):
         """For pads that report motor levels, 0..65535, instead of effects."""
-        self.rumble = (strong, weak, None) if strong or weak else RUMBLE_STOPPED
-        self._send_rumble()
+        target = self.slots[slot]
+        target.rumble = (strong, weak, None) if strong or weak else RUMBLE_STOPPED
+        self._send_rumble(target)
 
     def send_to_phone(self, message):
         """Send to the active phone over its link. Audio and rumble go only to a phone that said it can use them."""
@@ -312,6 +399,16 @@ class Bridge:
         except OSError:
             pass  # Like the ping echo, a failed send must never take the pad down.
 
+    def set_mic(self, state):
+        """Switch the phone's mic (0 off, 1 on, 2 muted). The status shows it at once; the phone's next hello confirms or corrects it."""
+        if self.hello is None:
+            return
+        self.send_to_phone(mic_set_message(state))
+        # A paused mic stays paused: only the phone knows when its speaker stops.
+        if state == 0 or self.hello.get('mic') != 3:
+            self.hello = {**self.hello, 'mic': state}
+        self.on_status()
+
     def wants_audio(self):
         """Sound goes to the active phone, on either link, once it said it can play it.
 
@@ -322,14 +419,15 @@ class Bridge:
     def on_tick(self):
         now = self.clock()
         if self.active:
-            self._sync_pad()
-        if self.pad is not None:
-            self._send_rumble(refresh=self.rumble_sent[2] is None and now - self.rumble_sent_at >= RUMBLE_REFRESH)
-        if self.pad is not None and self.last != NEUTRAL and now - self.last_state_at > TIMEOUT:
-            self._apply(decode(NEUTRAL))
-            self.last = NEUTRAL
-            if self.on_input:
-                self.on_input(decode(NEUTRAL))
+            self._sync_pads()
+        for slot in self.slots:
+            if slot.pad is not None:
+                self._send_rumble(slot, refresh=slot.rumble_sent[2] is None and now - slot.rumble_sent_at >= RUMBLE_REFRESH)
+            if slot.pad is not None and slot.last != NEUTRAL and now - slot.last_state_at > TIMEOUT:
+                self._apply(slot, decode(NEUTRAL))
+                slot.last = NEUTRAL
+                if self.on_input:
+                    self.on_input(slot.index, decode(NEUTRAL))
         if self.active and now - self.last_seen > PHONE_TIMEOUT:
             self._drop_phone()
             self.on_status()
@@ -342,8 +440,9 @@ class Bridge:
             self.on_status()
 
     def close(self):
-        if self.pad is not None:
-            self._close_pad()
+        for slot in self.slots:
+            if slot.pad is not None:
+                self._close_pad(slot)
 
 
 def write_event(fd, event):
@@ -363,13 +462,14 @@ def sync_sound(sound, wanted):
 
 
 def load_config(path=CONFIG_FILE):
-    config = {'phones': {}, 'tray': True, 'sound_enabled': True}
+    config = {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False}
     try:
         stored = json.loads(path.read_text())
         # shortcut: phones are identified by IP, so a phone whose IP changes asks for approval again, add pairing keys if that gets annoying.
         config['phones'] = {str(ip): str(name) for ip, name in stored.get('phones', {}).items()}
         config['tray'] = bool(stored.get('tray', True))
         config['sound_enabled'] = bool(stored.get('sound_enabled', True))
+        config['mic'] = bool(stored.get('mic', False))
     except FileNotFoundError:
         pass
     except (OSError, ValueError, AttributeError):

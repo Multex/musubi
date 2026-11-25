@@ -1,5 +1,6 @@
 package io.github.multex.musubi;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
@@ -28,8 +29,11 @@ import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioRecord;
 import android.media.AudioTimestamp;
 import android.media.AudioTrack;
+import android.media.audiofx.AutomaticGainControl;
+import android.media.MediaRecorder;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -91,6 +95,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 
 public class MainActivity extends Activity {
     static final int BACKGROUND = 0xFF0D0C0A, SURFACE = 0xFF171512, BORDER = 0xFF332E28, IDLE = 0xFF6B6256;
@@ -139,6 +144,9 @@ public class MainActivity extends Activity {
     private static final int PING_INTERVAL_MS = 1000;
     private static final int PING_SIZE = 8;
     private static final byte[] HELLO_MAGIC = {'P', 'B', 'H', 'I'};
+    private static final byte[] INPUT_MAGIC = {'P', 'B', 'I', 'N'};
+    private static final int INPUT_SIZE = 20;
+    private static final int SLOTTED_INPUT_SIZE = INPUT_MAGIC.length + 1 + INPUT_SIZE;
     // Below 0x20, so 0.5.x desktops drop it from the controller name as a control character.
     private static final byte FEATURE_AUDIO = 1;
     private static final byte FEATURE_RUMBLE = 2;
@@ -150,7 +158,16 @@ public class MainActivity extends Activity {
     // Magic, strong and weak motor 0..65535, then ms (0 = until the next message), matching RUMBLE in musubi.py.
     private static final byte[] RUMBLE_MAGIC = {'P', 'B', 'R', 'M'};
     private static final int RUMBLE_SIZE = RUMBLE_MAGIC.length + 6;
+    // Magic, sequence number, then 5 ms of s16le mono 48 kHz PCM from the phone's mic.
+    private static final byte[] MIC_MAGIC = {'P', 'B', 'M', 'C'};
+    private static final int MIC_HEADER = MIC_MAGIC.length + 2;
+    private static final int MIC_BYTES = 480;
+    // The mic byte at the end of the hello.
+    private static final int MIC_OFF = 0, MIC_LIVE = 1, MIC_MUTED = 2, MIC_PAUSED = 3;
+    private static final int MIC_PERMISSION = 1;
     // Magic, then the PC name in UTF-8, matching NAME_MAGIC in core.py. Only sent over the cable.
+    // Magic, then 0 = mic off, 1 = on, 2 = on and muted, matching MIC_SET in core.py.
+    private static final byte[] MIC_CMD_MAGIC = {'P', 'B', 'M', 'S'};
     private static final byte[] NAME_MAGIC = {'P', 'B', 'N', 'M'};
     private static final String USB_PC_NAME = "PC on USB";
     // The PC repeats an endless rumble every second, so a lost stop can't leave the pad buzzing past this.
@@ -183,12 +200,13 @@ public class MainActivity extends Activity {
     private static final String REPO = "https://github.com/Multex/musubi";
 
     // CONTROLLERS is the controllers page, opened from HOME.
-    private static final int CONTROLLERS = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6, HEADPHONES = 7;
+    private static final int CONTROLLERS = 0, GAME = 1, REMAP = 2, REMAP_DONE = 3, SETTINGS = 4, EDIT_PC = 5, HOME = 6, HEADPHONES = 7, MIC = 8, CONTROLLER_SETTINGS = 9;
     private static final int CONNECTING = 0, RESPONDING = 1, LOST = 2;
     private static final int PRIMARY = 0, SECONDARY = 1, PLAIN = 2;
     private static final int ICON_DOWN = 0, ICON_RIGHT = 1, ICON_LEFT = 2, ICON_ARROW_UP = 3, ICON_ARROW_DOWN = 4;
     private static final int ICON_SQUARE = 5, ICON_HALF = 6, ICON_INFO = 7, ICON_SLIDERS = 8;
-    private static final int NODE_LIVE = 0, NODE_IDLE = 1, NODE_LATER = 2;
+    // NODE_MUTED: an amber ring, for the mic that is still there on the PC but sends silence.
+    private static final int NODE_LIVE = 0, NODE_IDLE = 1, NODE_MUTED = 2;
     // How often the player thread re-measures the delay, in 5 ms chunks.
     private static final int DELAY_EVERY = 50;
 
@@ -225,7 +243,6 @@ public class MainActivity extends Activity {
     private long quietUntil;
     // What the AudioTrack queues ahead of the speaker, on top of the jitter buffer. Player thread only.
     private AudioBuffer.Track trackSize;
-    private int held;
     // Peaks of the PCM just played, for the headphones drawing; the UI thread takes and clears them.
     private volatile float peakLeft, peakRight;
     // Queued in Musubi plus what the track, mixer and output add, without the network; -1 until first measured.
@@ -237,9 +254,6 @@ public class MainActivity extends Activity {
         peakLeft = peakRight = 0;
         return true;
     };
-    private final short[] axes = new short[6];
-    // Sticks as the pad reports them, before the deadzone, for the Settings preview. UI thread only.
-    private float rawLx, rawLy, rawRx, rawRy;
     private boolean dirty;
     private InetAddress target;
 
@@ -253,6 +267,33 @@ public class MainActivity extends Activity {
     private UsbManager usbManager;
     private ParcelFileDescriptor usbFile;
     private volatile FileOutputStream usbOut;
+    // The mic thread writes to the cable too, so whole frames go out one at a time.
+    private final Object usbLock = new Object();
+    // The sender's socket; mic packets must leave from the same port, since the PC knows the phone by it.
+    private volatile DatagramSocket socket;
+    // Muted keeps the mic on for the PC but releases it on the phone.
+    private volatile boolean micOn, micMuted;
+    // "Allow anyway" with PC sound on the speaker; not saved, and cleared when the mic turns off.
+    private volatile boolean micAllowed;
+    // Android refused the mic permission; the Mic page says so until it's granted. UI thread only.
+    private boolean micDenied;
+    // The PC asked for muted while the permission prompt was up. UI thread only.
+    private boolean micAskMuted;
+    // Why the mic last stopped by itself, shown on the Mic page until the switch is used. UI thread only.
+    private String micError;
+    // The loudest sample since the drawing last took it, 0 to 1.
+    private volatile float micPeak;
+    private final MicView.Source micLevel = () -> {
+        if (this.micThread == null) return -1;
+        float peak = micPeak;
+        micPeak = 0;
+        return peak;
+    };
+    private MicView micView;
+    // Owns its AudioRecord and stops once this no longer points at it, like sender.
+    private volatile Thread micThread;
+    // A new mic thread waits here until the old one has released its AudioRecord.
+    private final Object micLock = new Object();
     private final Pc usbPc = new Pc(USB_PC_NAME, "Cable");
     private WifiManager.WifiLock wifiLock;
     private InputManager inputManager;
@@ -265,18 +306,45 @@ public class MainActivity extends Activity {
     private final List<Pc> pcs = new ArrayList<>();
     private int selectedPc;
     private boolean autoGameMode;
-    private volatile boolean vibration = true;
-    private volatile int vibrationStrength = 100;
-    // Stick deadzone radius, 0..1; read once per motion event.
-    private volatile float deadzone;
 
-    private volatile int deviceId = -1;
-    private volatile String deviceName;
-    private String descriptor;
-    private int stickXAxis = MotionEvent.AXIS_Z, stickYAxis = MotionEvent.AXIS_RZ;
-    private ButtonMap map = defaultMap();
-    private int axisButtons;
-    private String unmapped;
+    private static final int MAX_PLAYERS = PlayerSlots.MAX;
+
+    private final class PadSlot {
+        final int index;
+        volatile int deviceId = -1;
+        volatile String deviceName;
+        String descriptor;
+        int stickXAxis = MotionEvent.AXIS_Z, stickYAxis = MotionEvent.AXIS_RZ;
+        ButtonMap map = defaultMap();
+        // Stick deadzone radius, 0..1; read once per motion event.
+        volatile float deadzone;
+        volatile boolean vibration = true;
+        volatile int vibrationStrength = 100;
+        int axisButtons;
+        String unmapped;
+        int held;
+        final short[] axes = new short[6];
+        boolean dirty;
+        float rawLx, rawLy, rawRx, rawRy;
+        float rumbleStrong, rumbleWeak;
+        final Runnable endRumble = () -> showRumble(this, 0, 0, 0);
+
+        PadSlot(int index) {
+            this.index = index;
+        }
+
+        boolean connected() {
+            return deviceId != -1;
+        }
+    }
+
+    private final PlayerSlots playerSlots = new PlayerSlots();
+    private final PadSlot[] slots = new PadSlot[MAX_PLAYERS];
+    {
+        for (int i = 0; i < MAX_PLAYERS; i++) slots[i] = new PadSlot(i);
+    }
+    private int activeSlotIndex;
+    private int remapSlot;
 
     private int screen = HOME;
     private int renderedScreen = -1;
@@ -284,6 +352,7 @@ public class MainActivity extends Activity {
     private int gameFrom = HOME;
     private int selectedPlayer = 1;
     private int shownPcState = -1;
+    private int shownGameMic = -1;
     private long lastTouch;
     private long lastUiUpdate;
     private String draftName = "", draftIp = "", formError;
@@ -291,7 +360,7 @@ public class MainActivity extends Activity {
 
     private PadView padView;
     private StickPreview stickPreview;
-    private float rumbleStrong, rumbleWeak;
+    private PadSlot stickPreviewSlot;
     private TextView readout, pcDetail, settingsPing, settingsSoundNow, soundName, soundDetail;
     private TextView earbudsName, earbudsDetail, soundReadout, soundStatus;
     private HeadphonesView headphones;
@@ -359,12 +428,11 @@ public class MainActivity extends Activity {
         prefs = getPreferences(MODE_PRIVATE);
         ControllerReceiver.createChannel(this);
         autoGameMode = prefs.getBoolean("autoGameMode", true);
-        vibration = prefs.getBoolean("vibration", true);
-        vibrationStrength = prefs.getInt("vibration_strength", 100);
-        deadzone = prefs.getInt("deadzone", 0) / 100f;
         soundOn = prefs.getBoolean("sound", false);
         speaker = prefs.getBoolean("speaker", false);
         stableSound = "stable".equals(prefs.getString("sound_buffer", "low"));
+        micOn = prefs.getBoolean("mic", false);
+        micMuted = prefs.getBoolean("mic_muted", false);
         synchronized (audioLock) {
             audio.setSteady(stableSound);
         }
@@ -373,7 +441,7 @@ public class MainActivity extends Activity {
         refreshOutput();
         loadPcs();
         applySelectedPc();
-        findController();
+        findControllers();
         render();
     }
 
@@ -382,8 +450,12 @@ public class MainActivity extends Activity {
         super.onResume();
         onScreen = true;
         ControllerReceiver.cancel(this);
-        // Notifications may have been allowed in Android's settings meanwhile.
-        if (screen == SETTINGS) render();
+        // Notifications or the mic may have been allowed in Android's settings meanwhile.
+        boolean micAllowedByAndroid = hasMicPermission();
+        if (micAllowedByAndroid) micDenied = false;
+        // Android takes the mic back when the app closes ("Only this time"), so ask again.
+        else if (micOn && !micDenied) switchMic(true, micMuted);
+        if (screen == SETTINGS || screen == MIC) render();
         lastTouch = SystemClock.uptimeMillis();
         // Coming back from the background keeps the same socket, threads and AudioTrack.
         leaveBackground();
@@ -395,6 +467,7 @@ public class MainActivity extends Activity {
             targetSince = lastTouch;
         }
         openAccessory();
+        updateMic();
         inputManager.registerInputDeviceListener(deviceListener, handler);
         updateController();
         handler.post(tick);
@@ -408,14 +481,18 @@ public class MainActivity extends Activity {
         handler.removeCallbacks(finishCapture);
         capture.clear();
         inputManager.unregisterInputDeviceListener(deviceListener);
-        rumble(deviceId, 0, 0, 0);
-        showRumble(0, 0, 0);
         // The app gets no key-up events while in the background.
-        axisButtons = 0;
-        clearInput();
+        for (PadSlot slot : slots) {
+            if (slot.connected()) rumble(slot.deviceId, 0, 0, 0);
+            showRumble(slot, 0, 0, 0);
+            slot.axisButtons = 0;
+            clearInput(slot);
+        }
         // Connected, so keep the PC's sound playing; the sender keeps the neutral pad alive on the PC.
         if (prefs.getBoolean("background", true) && pcState() == RESPONDING) enterBackground();
         else stopAll();
+        // After the background state is settled: the mic keeps going only in background mode.
+        updateMic();
     }
 
     @Override
@@ -429,6 +506,7 @@ public class MainActivity extends Activity {
     private void stopAll() {
         if (!running) return;
         leaveBackground();
+        updateMic();
         running = false;
         sender.interrupt();
         wifiLock.release();
@@ -469,7 +547,7 @@ public class MainActivity extends Activity {
     /** Starts the service, or updates its notification when the cable comes or goes. */
     private void showKeepAlive() {
         startService(new Intent(this, KeepAliveService.class).putExtra(KeepAliveService.EXTRA_PC, currentPc().name)
-            .putExtra(KeepAliveService.EXTRA_SOUND, soundOn));
+            .putExtra(KeepAliveService.EXTRA_SOUND, soundOn).putExtra(KeepAliveService.EXTRA_MIC, micState() == MIC_LIVE));
     }
 
     /** Android only lists the accessory once Musubi on the PC has switched the phone over. */
@@ -546,7 +624,9 @@ public class MainActivity extends Activity {
         } else if (screen == GAME) {
             show(gameFrom);
         } else if (screen == REMAP || screen == REMAP_DONE) {
-            if (screen == REMAP_DONE) loadMap();
+            if (screen == REMAP_DONE) loadMap(slots[remapSlot]);
+            show(CONTROLLERS);
+        } else if (screen == CONTROLLER_SETTINGS) {
             show(CONTROLLERS);
         } else {
             show(HOME);
@@ -560,24 +640,53 @@ public class MainActivity extends Activity {
     }
 
     private void sendLoop() {
-        byte[] data = new byte[20];
+        byte[] data = new byte[INPUT_SIZE];
+        byte[] slotted = new byte[SLOTTED_INPUT_SIZE];
+        System.arraycopy(INPUT_MAGIC, 0, slotted, 0, INPUT_MAGIC.length);
         byte[] ping = new byte[PING_SIZE];
         DatagramPacket packet = new DatagramPacket(data, data.length);
         packet.setPort(PORT);
+        DatagramPacket slottedPacket = new DatagramPacket(slotted, slotted.length);
+        slottedPacket.setPort(PORT);
         DatagramPacket pingPacket = new DatagramPacket(ping, ping.length);
         pingPacket.setPort(PORT);
+        boolean[] send = new boolean[MAX_PLAYERS];
+        int[] snapHeld = new int[MAX_PLAYERS];
+        short[][] snapAxes = new short[MAX_PLAYERS][6];
+        long nextHeartbeat = 0;
         nextPing = 0;
         try (DatagramSocket socket = new DatagramSocket()) {
+            this.socket = socket;
             new Thread(() -> receiveLoop(socket), "musubi-receive").start();
             // A USB write blocks while the PC isn't reading, so an old sender can outlive onPause.
             while (running && sender == Thread.currentThread()) {
                 InetAddress address;
                 synchronized (lock) {
-                    if (!dirty) {
-                        lock.wait(HEARTBEAT_MS);
+                    while (running && sender == Thread.currentThread()) {
+                        long now = SystemClock.uptimeMillis();
+                        boolean anyDirty = dirty;
+                        for (int i = 0; !anyDirty && i < MAX_PLAYERS; i++) {
+                            if (slots[i].dirty) anyDirty = true;
+                        }
+                        if (anyDirty || now >= nextHeartbeat || now >= nextPing) break;
+                        long waitMs = Math.min(HEARTBEAT_MS, Math.min(nextHeartbeat - now, nextPing - now));
+                        if (waitMs > 0) lock.wait(waitMs);
                     }
+                    if (!running || sender != Thread.currentThread()) break;
+                    long now = SystemClock.uptimeMillis();
+                    boolean heartbeat = now >= nextHeartbeat;
+                    if (heartbeat) nextHeartbeat = now + HEARTBEAT_MS;
                     dirty = false;
-                    fill(ByteBuffer.wrap(data));
+                    for (int i = 0; i < MAX_PLAYERS; i++) {
+                        PadSlot slot = slots[i];
+                        boolean active = i == 0 || slot.connected();
+                        send[i] = active && (slot.dirty || heartbeat);
+                        slot.dirty = false;
+                        if (send[i]) {
+                            snapHeld[i] = slot.held;
+                            System.arraycopy(slot.axes, 0, snapAxes[i], 0, 6);
+                        }
+                    }
                     address = target;
                 }
                 FileOutputStream usb = usbOut;
@@ -600,11 +709,26 @@ public class MainActivity extends Activity {
                             socket.send(pingPacket);
                         }
                     }
-                    if (usb != null) {
-                        sendUsb(usb, data);
-                    } else {
-                        packet.setAddress(address);
-                        socket.send(packet);
+                    for (int i = 0; i < MAX_PLAYERS; i++) {
+                        if (!send[i]) continue;
+                        if (i == 0) {
+                            fill(ByteBuffer.wrap(data), snapHeld[0], snapAxes[0]);
+                            if (usb != null) {
+                                sendUsb(usb, data);
+                            } else {
+                                packet.setAddress(address);
+                                socket.send(packet);
+                            }
+                        } else {
+                            slotted[INPUT_MAGIC.length] = (byte) i;
+                            fill(ByteBuffer.wrap(slotted, INPUT_MAGIC.length + 1, INPUT_SIZE), snapHeld[i], snapAxes[i]);
+                            if (usb != null) {
+                                sendUsb(usb, slotted);
+                            } else {
+                                slottedPacket.setAddress(address);
+                                socket.send(slottedPacket);
+                            }
+                        }
                     }
                     networkError = null;
                 } catch (IOException ex) {
@@ -624,25 +748,53 @@ public class MainActivity extends Activity {
         frame[0] = (byte) (message.length >> 8);
         frame[1] = (byte) message.length;
         System.arraycopy(message, 0, frame, 2, message.length);
-        usb.write(frame);
+        synchronized (usbLock) {
+            usb.write(frame);
+        }
     }
 
-    /** Tells the PC who this phone is, matching HELLO in musubi.py. */
+    /** Tells the PC who this phone is, matching HELLO in core.py. */
     private byte[] helloPacket() {
-        String controller = deviceName;
-        byte[] names = (shorten(Build.MODEL) + "\0" + shorten(controller != null ? controller : ""))
-            .getBytes(StandardCharsets.UTF_8);
-        ByteBuffer out = ByteBuffer.allocate(HELLO_MAGIC.length + 3 + names.length + 4);
+        byte[] phone = utf8Name(Build.MODEL);
+        byte[][] ctrl = new byte[MAX_PLAYERS][];
+        int mask = 0;
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            boolean on = slots[i].connected();
+            String name = slots[i].deviceName;
+            if (on) mask |= 1 << i;
+            ctrl[i] = on ? utf8Name(name) : new byte[0];
+        }
+        int total = HELLO_MAGIC.length + 3 + phone.length + 1 + ctrl[0].length + 1 + 5
+            + ctrl[1].length + 1 + ctrl[2].length + 1 + ctrl[3].length;
+        ByteBuffer out = ByteBuffer.allocate(total);
         out.put(HELLO_MAGIC);
-        out.put((byte) (controller != null ? 1 : 0));
+        out.put((byte) ((mask & 1) != 0 ? 1 : 0));
         out.putShort((short) Math.min(rttMs, 65535));
-        out.put(names);
+        out.put(phone);
+        out.put((byte) 0);
+        out.put(ctrl[0]);
         out.put((byte) 0);
         out.put((byte) ((soundOn ? FEATURE_AUDIO : 0) | FEATURE_RUMBLE | (stableSound ? FEATURE_STABLE : 0)));
         // Same figure as the Headphones page; 0 means no reading.
         int delay = soundOn ? Math.max(soundDelay(), 0) : 0;
         out.putShort((short) Math.min(delay, 65535));
+        out.put((byte) micState());
+        out.put((byte) mask);
+        out.put(ctrl[1]);
+        out.put((byte) 0);
+        out.put(ctrl[2]);
+        out.put((byte) 0);
+        out.put(ctrl[3]);
         return out.array();
+    }
+
+    private static byte[] utf8Name(String name) {
+        if (name == null || name.isEmpty()) return new byte[0];
+        byte[] raw = shorten(name).getBytes(StandardCharsets.UTF_8);
+        if (raw.length <= MAX_NAME_LENGTH) return raw;
+        int end = MAX_NAME_LENGTH;
+        while (end > 0 && (raw[end] & 0xC0) == 0x80) end--;
+        return Arrays.copyOf(raw, end);
     }
 
     /** The network's half of the ping plus delayMs, to 10 ms, or -1 before the first reading. */
@@ -683,12 +835,22 @@ public class MainActivity extends Activity {
                 onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
             } else if (length >= RUMBLE_SIZE && magic == ByteBuffer.wrap(RUMBLE_MAGIC).getInt()) {
                 // The pad's input doesn't reach the PC from the background, so neither does its rumble.
-                if (running && !backgrounded && vibration) {
-                    int scale = vibrationStrength;
-                    int strong = (in.getShort() & 0xffff) * scale / 100, weak = (in.getShort() & 0xffff) * scale / 100, ms = in.getShort() & 0xffff;
-                    rumble(deviceId, strong, weak, ms);
-                    handler.post(() -> showRumble(strong, weak, ms));
+                if (running && !backgrounded) {
+                    int rawStrong = in.getShort() & 0xffff, rawWeak = in.getShort() & 0xffff, ms = in.getShort() & 0xffff;
+                    int index = in.hasRemaining() ? (in.get() & 0xff) : 0;
+                    if (index < MAX_PLAYERS) {
+                        PadSlot slot = slots[index];
+                        if (slot.vibration) {
+                            int scale = slot.vibrationStrength;
+                            int strong = rawStrong * scale / 100, weak = rawWeak * scale / 100;
+                            rumble(slot.deviceId, strong, weak, ms);
+                            handler.post(() -> showRumble(slot, strong, weak, ms));
+                        }
+                    }
                 }
+            } else if (length >= 5 && magic == ByteBuffer.wrap(MIC_CMD_MAGIC).getInt()) {
+                int command = in.get();
+                if (command >= 0 && command <= 2) handler.post(() -> onMicCommand(command));
             } else if (magic == ByteBuffer.wrap(NAME_MAGIC).getInt()) {
                 String name = shorten(new String(data, in.position(), in.remaining(), StandardCharsets.UTF_8)
                     .replaceAll("\\p{Cntrl}", "").trim());
@@ -703,15 +865,13 @@ public class MainActivity extends Activity {
     }
 
     /** Feeds the motor levels to the pad drawing, and zeroes them when the rumble expires. */
-    private void showRumble(int strong, int weak, int ms) {
-        handler.removeCallbacks(endRumble);
-        rumbleStrong = strong / 65535f;
-        rumbleWeak = weak / 65535f;
-        if (strong > 0 || weak > 0) handler.postDelayed(endRumble, ms > 0 ? ms : RUMBLE_CAP_MS);
-        if (padView != null) padView.setRumble(rumbleStrong, rumbleWeak);
+    private void showRumble(PadSlot slot, int strong, int weak, int ms) {
+        handler.removeCallbacks(slot.endRumble);
+        slot.rumbleStrong = strong / 65535f;
+        slot.rumbleWeak = weak / 65535f;
+        if (strong > 0 || weak > 0) handler.postDelayed(slot.endRumble, ms > 0 ? ms : RUMBLE_CAP_MS);
+        if (padView != null && slot == shownSlot()) padView.setRumble(slot.rumbleStrong, slot.rumbleWeak);
     }
-
-    private final Runnable endRumble = () -> showRumble(0, 0, 0);
 
     /** Drives the controller's motors; levels are 0..65535, and 0, 0 stops them. */
     private static void rumble(int id, int strong, int weak, int ms) {
@@ -985,18 +1145,55 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void fill(ByteBuffer out) {
+    private int connectedCount() {
+        int n = 0;
+        for (PadSlot slot : slots) {
+            if (slot.connected()) n++;
+        }
+        return n;
+    }
+
+    private PadSlot firstConnected() {
+        for (PadSlot slot : slots) {
+            if (slot.connected()) return slot;
+        }
+        return null;
+    }
+
+    private int firstConnectedPlayer() {
+        PadSlot first = firstConnected();
+        return first != null ? first.index + 1 : 1;
+    }
+
+    private PadSlot activeSlot() {
+        return slots[activeSlotIndex].connected() ? slots[activeSlotIndex] : firstConnected();
+    }
+
+    private PadSlot shownSlot() {
+        if (screen == CONTROLLERS || screen == CONTROLLER_SETTINGS) return slots[selectedPlayer - 1];
+        if (screen == REMAP || screen == REMAP_DONE) return slots[remapSlot];
+        return activeSlot();
+    }
+
+    private boolean anyCustomMap() {
+        for (PadSlot slot : slots) {
+            if (slot.connected() && hasCustomMap(slot)) return true;
+        }
+        return false;
+    }
+
+    private static void fill(ByteBuffer out, int held, short[] axes) {
         out.putInt(held & WIRE_BUTTONS);
         for (int i = 0; i < 4; i++) {
             out.putShort(axes[i]);
         }
         out.putShort((held & 1 << L2_BIT) != 0 ? TRIGGER_MAX : axes[4]);
         out.putShort((held & 1 << R2_BIT) != 0 ? TRIGGER_MAX : axes[5]);
-        out.putShort(hat(LEFT_BIT, RIGHT_BIT));
-        out.putShort(hat(UP_BIT, DOWN_BIT));
+        out.putShort(hat(held, LEFT_BIT, RIGHT_BIT));
+        out.putShort(hat(held, UP_BIT, DOWN_BIT));
     }
 
-    private short hat(int negative, int positive) {
+    private static short hat(int held, int negative, int positive) {
         if ((held & 1 << negative) != 0) return -1;
         if ((held & 1 << positive) != 0) return 1;
         return 0;
@@ -1009,16 +1206,18 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void clearInput() {
+    private void clearInput(PadSlot slot) {
         synchronized (lock) {
-            held = 0;
-            Arrays.fill(axes, (short) 0);
+            slot.held = 0;
+            Arrays.fill(slot.axes, (short) 0);
+            slot.dirty = true;
             dirty = true;
             lock.notify();
         }
-        rawLx = rawLy = rawRx = rawRy = 0;
-        unmapped = null;
-        pushPadState();
+        slot.rawLx = slot.rawLy = slot.rawRx = slot.rawRy = 0;
+        if (stickPreview != null && slot == stickPreviewSlot) stickPreview.setSticks(0, 0, 0, 0);
+        slot.unmapped = null;
+        if (slot == shownSlot()) pushPadState();
     }
 
     private static ButtonMap defaultMap() {
@@ -1035,57 +1234,199 @@ public class MainActivity extends Activity {
         return defaults;
     }
 
-    private String mapKey() {
-        return "map:" + descriptor;
+    private static String mapKey(PadSlot slot) {
+        return "map:" + slot.descriptor;
     }
 
-    private boolean hasCustomMap() {
-        return descriptor != null && prefs.contains(mapKey());
+    private boolean hasCustomMap(PadSlot slot) {
+        return slot.descriptor != null && prefs.contains(mapKey(slot));
     }
 
-    private void loadMap() {
-        ButtonMap saved = hasCustomMap() ? ButtonMap.decode(prefs.getString(mapKey(), "")) : null;
-        map = saved != null ? saved : defaultMap();
-        clearInput();
+    private void loadMap(PadSlot slot) {
+        ButtonMap saved = hasCustomMap(slot) ? ButtonMap.decode(prefs.getString(mapKey(slot), "")) : null;
+        slot.map = saved != null ? saved : defaultMap();
+        clearInput(slot);
+    }
+
+    private static String deadzoneKey(PadSlot slot) {
+        return "deadzone:" + slot.descriptor;
+    }
+
+    private void loadDeadzone(PadSlot slot) {
+        int pct = slot.descriptor != null ? prefs.getInt(deadzoneKey(slot), 0) : 0;
+        slot.deadzone = Math.max(0, Math.min(30, pct)) / 100f;
+    }
+
+    private void applyDeadzone(PadSlot slot) {
+        synchronized (lock) {
+            Deadzone.apply(slot.axes, 0, slot.rawLx, slot.rawLy, slot.deadzone);
+            Deadzone.apply(slot.axes, 2, slot.rawRx, slot.rawRy, slot.deadzone);
+            slot.dirty = true;
+            dirty = true;
+            lock.notify();
+        }
+    }
+
+    private void saveDeadzone(PadSlot slot, int percent) {
+        percent = Math.max(0, Math.min(30, percent));
+        float zone = percent / 100f;
+        slot.deadzone = zone;
+        applyDeadzone(slot);
+        if (slot.descriptor == null) return;
+        prefs.edit().putInt(deadzoneKey(slot), percent).apply();
+        for (PadSlot s : slots) {
+            if (s != slot && slot.descriptor.equals(s.descriptor)) {
+                s.deadzone = zone;
+                applyDeadzone(s);
+            }
+        }
+    }
+
+    private static String vibrationKey(PadSlot slot) {
+        return "vibration:" + slot.descriptor;
+    }
+
+    private static String strengthKey(PadSlot slot) {
+        return "vibration_strength:" + slot.descriptor;
+    }
+
+    private void loadVibration(PadSlot slot) {
+        slot.vibration = slot.descriptor == null || prefs.getBoolean(vibrationKey(slot), true);
+        int pct = slot.descriptor != null ? prefs.getInt(strengthKey(slot), 100) : 100;
+        slot.vibrationStrength = Math.max(10, Math.min(100, pct));
+    }
+
+    private void saveVibration(PadSlot slot, boolean on) {
+        slot.vibration = on;
+        if (!on) {
+            rumble(slot.deviceId, 0, 0, 0);
+            showRumble(slot, 0, 0, 0);
+        }
+        if (slot.descriptor == null) return;
+        prefs.edit().putBoolean(vibrationKey(slot), on).apply();
+        for (PadSlot s : slots) {
+            if (s != slot && slot.descriptor.equals(s.descriptor)) {
+                s.vibration = on;
+                if (!on) {
+                    rumble(s.deviceId, 0, 0, 0);
+                    showRumble(s, 0, 0, 0);
+                }
+            }
+        }
+    }
+
+    private void saveVibrationStrength(PadSlot slot, int strength) {
+        strength = Math.max(10, Math.min(100, strength));
+        slot.vibrationStrength = strength;
+        if (slot.descriptor == null) return;
+        prefs.edit().putInt(strengthKey(slot), strength).apply();
+        for (PadSlot s : slots) {
+            if (s != slot && slot.descriptor.equals(s.descriptor)) {
+                s.vibrationStrength = strength;
+            }
+        }
     }
 
     private void updateController() {
-        int before = deviceId;
-        findController();
-        if (deviceId != before) {
-            rumble(before, 0, 0, 0);
-            showRumble(0, 0, 0);
-            // A controller joining or dropping is always player 1 until multi-pad, so show that tab.
-            selectedPlayer = 1;
-        }
-        if (deviceId != before && (screen == CONTROLLERS || screen == HOME || screen == SETTINGS)) {
+        if (findControllers() && (screen == CONTROLLERS || screen == CONTROLLER_SETTINGS || screen == HOME || screen == SETTINGS || screen == GAME)) {
             render();
         }
     }
 
-    private void findController() {
-        for (int id : InputDevice.getDeviceIds()) {
-            InputDevice device = InputDevice.getDevice(id);
-            if (isGamepad(device)) {
-                adopt(device);
-                return;
-            }
-        }
-        deviceId = -1;
-        deviceName = null;
+    private static PlayerSlots.Device toSlotDevice(InputDevice device) {
+        return new PlayerSlots.Device(device.getId(), device.getName(), device.getDescriptor(), device.getControllerNumber());
     }
 
-    private void adopt(InputDevice device) {
-        if (device.getId() == deviceId) return;
-        deviceId = device.getId();
-        deviceName = device.getName();
-        descriptor = device.getDescriptor();
+    private void applySlotDevice(PadSlot slot, InputDevice device) {
+        slot.deviceName = device.getName();
+        slot.descriptor = device.getDescriptor();
+        slot.deviceId = device.getId();
+        slot.axisButtons = 0;
         // Most pads put the right stick on Z/RZ, but some only report RX/RY.
         boolean onlyRx = device.getMotionRange(MotionEvent.AXIS_Z) == null
             && device.getMotionRange(MotionEvent.AXIS_RX) != null;
-        stickXAxis = onlyRx ? MotionEvent.AXIS_RX : MotionEvent.AXIS_Z;
-        stickYAxis = onlyRx ? MotionEvent.AXIS_RY : MotionEvent.AXIS_RZ;
-        loadMap();
+        slot.stickXAxis = onlyRx ? MotionEvent.AXIS_RX : MotionEvent.AXIS_Z;
+        slot.stickYAxis = onlyRx ? MotionEvent.AXIS_RY : MotionEvent.AXIS_RZ;
+        loadMap(slot);
+        loadDeadzone(slot);
+        loadVibration(slot);
+    }
+
+    private boolean findControllers() {
+        List<PlayerSlots.Device> present = new ArrayList<>();
+        HashMap<Integer, InputDevice> byId = new HashMap<>();
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(id);
+            if (isGamepad(device)) {
+                present.add(toSlotDevice(device));
+                byId.put(id, device);
+            }
+        }
+        playerSlots.sync(present);
+        boolean changed = false;
+        int firstJoined = -1;
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            PadSlot slot = slots[i];
+            PlayerSlots.Device target = playerSlots.get(i);
+            int beforeId = slot.deviceId;
+            if (target == null) {
+                if (beforeId != -1) {
+                    rumble(beforeId, 0, 0, 0);
+                    showRumble(slot, 0, 0, 0);
+                    slot.deviceId = -1;
+                    slot.deviceName = null;
+                    slot.descriptor = null;
+                    slot.axisButtons = 0;
+                    slot.deadzone = 0;
+                    slot.vibration = true;
+                    slot.vibrationStrength = 100;
+                    clearInput(slot);
+                    changed = true;
+                }
+            } else if (target.id != beforeId || !Objects.equals(target.name, slot.deviceName)
+                    || !Objects.equals(target.descriptor, slot.descriptor)) {
+                if (beforeId != -1 && beforeId != target.id) {
+                    rumble(beforeId, 0, 0, 0);
+                    showRumble(slot, 0, 0, 0);
+                }
+                if (beforeId == -1 && firstJoined == -1) firstJoined = i;
+                applySlotDevice(slot, byId.get(target.id));
+                changed = true;
+            }
+        }
+        if ((screen == REMAP || screen == REMAP_DONE) && !slots[remapSlot].connected()) {
+            handler.removeCallbacks(finishCapture);
+            capture.clear();
+            screen = CONTROLLERS;
+            changed = true;
+        }
+        if (screen == CONTROLLER_SETTINGS && !slots[selectedPlayer - 1].connected()) {
+            screen = CONTROLLERS;
+            changed = true;
+        }
+        if (firstJoined != -1 && !slots[selectedPlayer - 1].connected()) {
+            selectedPlayer = firstJoined + 1;
+        }
+        if (changed) {
+            nextPing = 0;
+            flush();
+        }
+        return changed;
+    }
+
+    private PadSlot slotForEvent(InputDevice device) {
+        if (!isGamepad(device)) return null;
+        int idx = playerSlots.slotOf(device.getId());
+        if (idx == -1) {
+            idx = playerSlots.ensure(toSlotDevice(device));
+            if (idx == -1) return null;
+            applySlotDevice(slots[idx], device);
+            nextPing = 0;
+            flush();
+            if (!slots[selectedPlayer - 1].connected()) selectedPlayer = idx + 1;
+            if (screen == CONTROLLERS || screen == HOME || screen == SETTINGS || screen == GAME) render();
+        }
+        return slots[idx];
     }
 
     // SOURCE_GAMEPAD shares its class bit with keyboards, so test the whole mask.
@@ -1093,23 +1434,28 @@ public class MainActivity extends Activity {
     private static boolean isGamepad(InputDevice device) {
         if (device == null) return false;
         int sources = device.getSources();
-        return (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
-            || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
-                && device.getMotionRange(MotionEvent.AXIS_X, InputDevice.SOURCE_JOYSTICK) != null
-                && device.getMotionRange(MotionEvent.AXIS_Y, InputDevice.SOURCE_JOYSTICK) != null;
+        boolean gamepad = (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD;
+        boolean joystick = (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+        boolean hasSticks = joystick
+            && device.getMotionRange(MotionEvent.AXIS_X, InputDevice.SOURCE_JOYSTICK) != null
+            && device.getMotionRange(MotionEvent.AXIS_Y, InputDevice.SOURCE_JOYSTICK) != null;
+        boolean pointer = (sources & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD
+            || (sources & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE;
+        return PlayerSlots.isGamepad(gamepad, joystick, hasSticks, pointer, device.isVirtual());
     }
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        if (!isGamepad(event.getDevice())) {
+        PadSlot slot = slotForEvent(event.getDevice());
+        if (slot == null) {
             return super.dispatchKeyEvent(event);
         }
-        adopt(event.getDevice());
+        activeSlotIndex = slot.index;
         if (event.getRepeatCount() == 0) {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                onInput(event.getKeyCode(), true);
+                onInput(slot, event.getKeyCode(), true);
             } else if (event.getAction() == KeyEvent.ACTION_UP) {
-                onInput(event.getKeyCode(), false);
+                onInput(slot, event.getKeyCode(), false);
             }
         }
         return true;
@@ -1117,62 +1463,64 @@ public class MainActivity extends Activity {
 
     @Override
     public boolean dispatchGenericMotionEvent(MotionEvent event) {
-        if (!isGamepad(event.getDevice())) {
+        PadSlot slot = slotForEvent(event.getDevice());
+        if (slot == null) {
             return super.dispatchGenericMotionEvent(event);
         }
-        adopt(event.getDevice());
+        activeSlotIndex = slot.index;
         float hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X);
         float hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y);
         float left = Math.max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE));
         float right = Math.max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS));
-        setAxisButton(ButtonMap.HAT_LEFT, hatX < -0.5f);
-        setAxisButton(ButtonMap.HAT_RIGHT, hatX > 0.5f);
-        setAxisButton(ButtonMap.HAT_UP, hatY < -0.5f);
-        setAxisButton(ButtonMap.HAT_DOWN, hatY > 0.5f);
-        setAxisButton(ButtonMap.LEFT_TRIGGER, left > 0.5f);
-        setAxisButton(ButtonMap.RIGHT_TRIGGER, right > 0.5f);
+        setAxisButton(slot, ButtonMap.HAT_LEFT, hatX < -0.5f);
+        setAxisButton(slot, ButtonMap.HAT_RIGHT, hatX > 0.5f);
+        setAxisButton(slot, ButtonMap.HAT_UP, hatY < -0.5f);
+        setAxisButton(slot, ButtonMap.HAT_DOWN, hatY > 0.5f);
+        setAxisButton(slot, ButtonMap.LEFT_TRIGGER, left > 0.5f);
+        setAxisButton(slot, ButtonMap.RIGHT_TRIGGER, right > 0.5f);
         if (screen == REMAP) {
             return true;
         }
-        int leftControl = map.control(ButtonMap.LEFT_TRIGGER), rightControl = map.control(ButtonMap.RIGHT_TRIGGER);
+        int leftControl = slot.map.control(ButtonMap.LEFT_TRIGGER), rightControl = slot.map.control(ButtonMap.RIGHT_TRIGGER);
         float l2 = leftControl == L2_BIT ? left : rightControl == L2_BIT ? right : 0;
         float r2 = leftControl == R2_BIT ? left : rightControl == R2_BIT ? right : 0;
-        rawLx = event.getAxisValue(MotionEvent.AXIS_X);
-        rawLy = event.getAxisValue(MotionEvent.AXIS_Y);
-        rawRx = event.getAxisValue(stickXAxis);
-        rawRy = event.getAxisValue(stickYAxis);
-        if (stickPreview != null) stickPreview.setSticks(rawLx, rawLy, rawRx, rawRy);
-        float d = deadzone;
+        slot.rawLx = event.getAxisValue(MotionEvent.AXIS_X);
+        slot.rawLy = event.getAxisValue(MotionEvent.AXIS_Y);
+        slot.rawRx = event.getAxisValue(slot.stickXAxis);
+        slot.rawRy = event.getAxisValue(slot.stickYAxis);
+        if (stickPreview != null && slot == stickPreviewSlot) stickPreview.setSticks(slot.rawLx, slot.rawLy, slot.rawRx, slot.rawRy);
+        float d = slot.deadzone;
         synchronized (lock) {
-            Deadzone.apply(axes, 0, rawLx, rawLy, d);
-            Deadzone.apply(axes, 2, rawRx, rawRy, d);
-            axes[4] = (short) (l2 * TRIGGER_MAX);
-            axes[5] = (short) (r2 * TRIGGER_MAX);
+            Deadzone.apply(slot.axes, 0, slot.rawLx, slot.rawLy, d);
+            Deadzone.apply(slot.axes, 2, slot.rawRx, slot.rawRy, d);
+            slot.axes[4] = (short) (l2 * TRIGGER_MAX);
+            slot.axes[5] = (short) (r2 * TRIGGER_MAX);
+            slot.dirty = true;
             dirty = true;
             lock.notify();
         }
-        pushPadState();
+        if (slot == shownSlot()) pushPadState();
         return true;
     }
 
-    private void setAxisButton(int input, boolean down) {
+    private void setAxisButton(PadSlot slot, int input, boolean down) {
         int bit = 1 << (-input - 1);
-        if (((axisButtons & bit) != 0) == down) return;
-        axisButtons ^= bit;
-        onInput(input, down);
+        if (((slot.axisButtons & bit) != 0) == down) return;
+        slot.axisButtons ^= bit;
+        onInput(slot, input, down);
     }
 
-    private void onInput(int input, boolean down) {
+    private void onInput(PadSlot slot, int input, boolean down) {
         if (screen == REMAP) {
-            if (down) remapInput(input);
+            if (slot.index == remapSlot && down) remapInput(input);
             return;
         }
-        int control = map.control(input);
+        int control = slot.map.control(input);
         if (control < 0) {
             // Unmapped keys stay visible here so the pad can be calibrated by hand.
             if (down && input > 0) {
-                unmapped = KeyEvent.keyCodeToString(input) + " (not mapped)";
-                updateReadout(true);
+                slot.unmapped = KeyEvent.keyCodeToString(input) + " (not mapped)";
+                if (slot == shownSlot()) updateReadout(true);
             }
             return;
         }
@@ -1181,19 +1529,25 @@ public class MainActivity extends Activity {
             && (control == L2_BIT || control == R2_BIT);
         if (!analog) {
             synchronized (lock) {
-                held = down ? held | 1 << control : held & ~(1 << control);
+                slot.held = down ? slot.held | 1 << control : slot.held & ~(1 << control);
+                slot.dirty = true;
                 dirty = true;
                 lock.notify();
             }
         }
-        unmapped = null;
-        pushPadState();
+        slot.unmapped = null;
+        if (slot == shownSlot()) pushPadState();
     }
 
     private void pushPadState() {
         if (padView != null) {
-            padView.setState(held, shown(axes[0]), shown(axes[1]), shown(axes[2]), shown(axes[3]),
-                triggerShown(L2_BIT, axes[4]), triggerShown(R2_BIT, axes[5]));
+            PadSlot slot = shownSlot();
+            if (slot == null) {
+                padView.setState(0, 0, 0, 0, 0, 0, 0);
+            } else {
+                padView.setState(slot.held, shown(slot.axes[0]), shown(slot.axes[1]), shown(slot.axes[2]), shown(slot.axes[3]),
+                    triggerShown(slot, L2_BIT, slot.axes[4]), triggerShown(slot, R2_BIT, slot.axes[5]));
+            }
         }
         updateReadout(false);
     }
@@ -1203,8 +1557,8 @@ public class MainActivity extends Activity {
         return Math.abs(value) < DISPLAY_DEAD_ZONE ? 0 : value;
     }
 
-    private float triggerShown(int bit, short axis) {
-        return (held & 1 << bit) != 0 ? 1 : axis / (float) TRIGGER_MAX;
+    private static float triggerShown(PadSlot slot, int bit, short axis) {
+        return (slot.held & 1 << bit) != 0 ? 1 : axis / (float) TRIGGER_MAX;
     }
 
     private void updateReadout(boolean force) {
@@ -1213,23 +1567,24 @@ public class MainActivity extends Activity {
         long now = SystemClock.uptimeMillis();
         if (!force && now - lastUiUpdate < UI_INTERVAL_MS) return;
         lastUiUpdate = now;
-        String text = describeInput();
+        String text = describeInput(shownSlot());
         readout.setText(text.isEmpty() ? "Press a button to test" : text);
         readout.setTextColor(text.isEmpty() ? MUTED : ACTIVE);
     }
 
-    private String describeInput() {
-        if (unmapped != null) return unmapped;
+    private static String describeInput(PadSlot slot) {
+        if (slot == null) return "";
+        if (slot.unmapped != null) return slot.unmapped;
         List<String> parts = new ArrayList<>();
         for (int i = 0; i < BUTTON_NAMES.length; i++) {
-            if ((held & 1 << i) != 0) parts.add(BUTTON_NAMES[i]);
+            if ((slot.held & 1 << i) != 0) parts.add(BUTTON_NAMES[i]);
         }
-        if (axes[4] > 0 && (held & 1 << L2_BIT) == 0) parts.add("L2 " + axes[4] * 100 / TRIGGER_MAX + "%");
-        if (axes[5] > 0 && (held & 1 << R2_BIT) == 0) parts.add("R2 " + axes[5] * 100 / TRIGGER_MAX + "%");
-        addAxis(parts, "LX", axes[0]);
-        addAxis(parts, "LY", axes[1]);
-        addAxis(parts, "RX", axes[2]);
-        addAxis(parts, "RY", axes[3]);
+        if (slot.axes[4] > 0 && (slot.held & 1 << L2_BIT) == 0) parts.add("L2 " + slot.axes[4] * 100 / TRIGGER_MAX + "%");
+        if (slot.axes[5] > 0 && (slot.held & 1 << R2_BIT) == 0) parts.add("R2 " + slot.axes[5] * 100 / TRIGGER_MAX + "%");
+        addAxis(parts, "LX", slot.axes[0]);
+        addAxis(parts, "LY", slot.axes[1]);
+        addAxis(parts, "RX", slot.axes[2]);
+        addAxis(parts, "RY", slot.axes[3]);
         return TextUtils.join(" · ", parts);
     }
 
@@ -1314,10 +1669,14 @@ public class MainActivity extends Activity {
     private void refreshStatus() {
         int state = pcState();
         refreshOutput();
+        // Picks up the cable or a PC coming and going.
+        updateMic();
+        if (micView != null && micThread != null) micView.start();
         if (state != shownPcState) {
             shownPcState = state;
-            if (((screen == CONTROLLERS || screen == HOME || screen == HEADPHONES) && currentPc() != null) || screen == GAME || screen == SETTINGS) render();
+            if (((screen == CONTROLLERS || screen == HOME || screen == HEADPHONES || screen == MIC) && currentPc() != null) || screen == GAME || screen == SETTINGS) render();
         }
+        if (screen == GAME && micState() != shownGameMic) render();
         if (pcDetail != null) pcDetail.setText(pcDetailText(state));
         if (settingsPing != null) {
             CharSequence ping = pcUseText(savedPc());
@@ -1326,7 +1685,7 @@ public class MainActivity extends Activity {
         if (settingsSoundNow != null) updateSoundNow();
         updateSound();
         updateReadout(true);
-        if ((screen == CONTROLLERS || screen == HOME) && autoGameMode && deviceId != -1 && currentPc() != null
+        if ((screen == CONTROLLERS || screen == HOME) && autoGameMode && connectedCount() > 0 && currentPc() != null
                 && SystemClock.uptimeMillis() - lastTouch >= AUTO_GAME_MODE_MS) {
             openGame();
         }
@@ -1358,6 +1717,7 @@ public class MainActivity extends Activity {
         // The PC hears about it with the next hello instead of up to a second later.
         nextPing = 0;
         refreshOutput();
+        updateMic();
         render();
     }
 
@@ -1368,7 +1728,197 @@ public class MainActivity extends Activity {
         // The route is chosen when the track is built, so the next packet builds one for the new output.
         stopPlayer();
         refreshOutput();
+        // The speaker may pause the mic, or stop pausing it.
+        nextPing = 0;
+        updateMic();
         render();
+    }
+
+    /** Paused: the mic would pick up PC sound from the speaker, until "Allow anyway". */
+    private int micState() {
+        if (!micOn || !hasMicPermission()) return MIC_OFF;
+        if (micMuted) return MIC_MUTED;
+        return soundOn && useSpeaker() && !micAllowed ? MIC_PAUSED : MIC_LIVE;
+    }
+
+    /** The PC repeats its state, so only a change acts; the prompt can't show from the background. */
+    private void onMicCommand(int command) {
+        if (command == 0 ? !micOn : micOn && micMuted == (command == 2)) return;
+        if (command == 0 || onScreen || hasMicPermission()) switchMic(command != 0, command == 2);
+    }
+
+    private void switchMic(boolean on, boolean muted) {
+        micError = null;
+        if (!on) setMic(false, false);
+        else if (hasMicPermission()) setMic(true, muted);
+        else {
+            micAskMuted = muted;
+            requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, MIC_PERMISSION);
+        }
+    }
+
+    private void allowMic() {
+        micAllowed = true;
+        nextPing = 0;
+        updateMic();
+        render();
+    }
+
+    /** Styled like the Switch PC dialog. */
+    private void confirmAllowMic() {
+        AlertDialog dialog = new AlertDialog.Builder(this).create();
+        LinearLayout panel = dialogPanel("Use the mic with the speaker on?");
+        TextView body = text("People on the call may hear your game through the mic. This lasts until you turn the mic off.", 14, TEXT);
+        body.setLineSpacing(0, 1.45f);
+        panel.addView(body);
+        LinearLayout.LayoutParams allowParams = buttonParams(48);
+        allowParams.topMargin = dp(20);
+        panel.addView(button("Allow anyway", PRIMARY, () -> {
+            dialog.dismiss();
+            allowMic();
+        }), allowParams);
+        panel.addView(spaced(button("Cancel", SECONDARY, dialog::dismiss), 44));
+        showPanel(dialog, panel);
+    }
+
+    private void openAppSettings() {
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", getPackageName(), null)));
+        } catch (ActivityNotFoundException missing) {
+            Toast.makeText(this, "This phone has no app settings to open", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private boolean hasMicPermission() {
+        return Build.VERSION.SDK_INT < 23
+            || checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        if (requestCode != MIC_PERMISSION) return;
+        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+            micDenied = false;
+            setMic(true, micAskMuted);
+        } else {
+            // After "Don't ask again" Android answers without showing anything, so the page says where to fix it.
+            micDenied = true;
+            render();
+        }
+    }
+
+    private void setMic(boolean on, boolean muted) {
+        micOn = on;
+        micMuted = muted;
+        if (!on) micAllowed = false;
+        prefs.edit().putBoolean("mic", on).putBoolean("mic_muted", muted).apply();
+        // The PC hears about it with the next hello instead of up to a second later.
+        nextPing = 0;
+        updateMic();
+        if (backgrounded) showKeepAlive();
+        render();
+    }
+
+    /** Records only while live (not muted or paused), on screen or in background mode, allowed, and there's a PC to send to; otherwise the mic is released. */
+    private void updateMic() {
+        boolean linked;
+        synchronized (lock) {
+            linked = target != null;
+        }
+        boolean record = micState() == MIC_LIVE && (onScreen || backgrounded) && (linked || usbOut != null);
+        if (record == (micThread != null)) return;
+        Thread thread = record ? new Thread(this::micLoop, "musubi-mic") : null;
+        micThread = thread;
+        if (thread != null) thread.start();
+    }
+
+    /** Sends each 5 ms chunk the moment it's read, on the sender's socket or the cable. */
+    private void micLoop() {
+        Thread self = Thread.currentThread();
+        String error = null;
+        synchronized (micLock) {
+            AudioRecord record = null;
+            AutomaticGainControl gain = null;
+            try {
+                int size = AudioRecord.getMinBufferSize(AUDIO_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                // Unlike VOICE_COMMUNICATION, this leaves Bluetooth earbuds on A2DP and doesn't squash the voice.
+                record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, AUDIO_RATE,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(size, MIC_BYTES));
+                if (record.getState() != AudioRecord.STATE_INITIALIZED) throw new IllegalStateException("The mic didn't open");
+                // VOICE_RECOGNITION has no gain control, so speech from a desk is far too quiet without this.
+                try {
+                    if (AutomaticGainControl.isAvailable()) {
+                        gain = AutomaticGainControl.create(record.getAudioSessionId());
+                        if (gain != null) gain.setEnabled(true);
+                    }
+                } catch (RuntimeException ignored) {
+                    // The mic works without it, just quieter.
+                }
+                // Otherwise connected earbuds may become the input and leave A2DP.
+                if (Build.VERSION.SDK_INT >= 23) {
+                    for (AudioDeviceInfo device : audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+                        if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
+                            record.setPreferredDevice(device);
+                            break;
+                        }
+                    }
+                }
+                record.startRecording();
+                if (record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                    throw new IllegalStateException("Another app is using the mic");
+                }
+                // The cable's length prefix comes first, so both transports send this one array.
+                byte[] frame = new byte[2 + MIC_HEADER + MIC_BYTES];
+                ByteBuffer.wrap(frame).putShort((short) (MIC_HEADER + MIC_BYTES)).put(MIC_MAGIC);
+                DatagramPacket packet = new DatagramPacket(frame, 2, MIC_HEADER + MIC_BYTES);
+                packet.setPort(PORT);
+                for (int sequence = 0; micThread == self; sequence++) {
+                    // Bytes, so the PCM is already little-endian.
+                    int read = record.read(frame, 2 + MIC_HEADER, MIC_BYTES);
+                    if (read != MIC_BYTES) throw new IllegalStateException("The mic stopped recording (" + read + ")");
+                    int peak = 0;
+                    for (int i = 2 + MIC_HEADER; i < frame.length; i += 2) {
+                        peak = Math.max(peak, Math.abs((short) (frame[i] & 0xFF | frame[i + 1] << 8)));
+                    }
+                    micPeak = Math.max(micPeak, Math.min(1, peak / 32767f));
+                    frame[6] = (byte) (sequence >> 8);
+                    frame[7] = (byte) sequence;
+                    FileOutputStream usb = usbOut;
+                    InetAddress address;
+                    synchronized (lock) {
+                        address = target;
+                    }
+                    DatagramSocket udp = socket;
+                    try {
+                        if (usb != null) {
+                            synchronized (usbLock) {
+                                usb.write(frame);
+                            }
+                        } else if (address != null && udp != null) {
+                            packet.setAddress(address);
+                            udp.send(packet);
+                        }
+                    } catch (IOException lost) {
+                        // One chunk is 5 ms of sound; the sender already reports a broken link.
+                    }
+                }
+            } catch (RuntimeException ex) {
+                error = ex.getMessage() != null ? ex.getMessage() : "The mic didn't open";
+            } finally {
+                if (gain != null) gain.release();
+                if (record != null) record.release();
+            }
+        }
+        if (error != null) {
+            String reason = error;
+            handler.post(() -> {
+                if (micThread != self) return;
+                micThread = null;
+                micError = reason;
+                setMic(false, false);
+            });
+        }
     }
 
     private boolean soundLive() {
@@ -1462,6 +2012,7 @@ public class MainActivity extends Activity {
         scroller = null;
         padView = null;
         stickPreview = null;
+        stickPreviewSlot = null;
         readout = null;
         pcDetail = null;
         settingsPing = null;
@@ -1473,6 +2024,7 @@ public class MainActivity extends Activity {
         soundReadout = null;
         soundStatus = null;
         headphones = null;
+        micView = null;
         if (screen != EDIT_PC && screen != HOME) formError = null;
         applyGameWindow(screen == GAME);
         shownPcState = pcState();
@@ -1484,6 +2036,8 @@ public class MainActivity extends Activity {
             case SETTINGS: setContentView(buildSettings()); break;
             case EDIT_PC: setContentView(buildEditPc()); break;
             case HEADPHONES: setContentView(buildHeadphones()); break;
+            case MIC: setContentView(buildMic()); break;
+            case CONTROLLER_SETTINGS: setContentView(buildControllerSettings()); break;
             default: setContentView(currentPc() != null ? buildControllers(currentPc()) : buildMain()); break;
         }
         renderedScreen = screen;
@@ -1516,7 +2070,8 @@ public class MainActivity extends Activity {
     /** Controller drawing between the parts of a screen. Middle may be null. */
     private View withPad(int control, View top, View middle, View bottom) {
         padView = new PadView(this);
-        padView.setRumble(rumbleStrong, rumbleWeak);
+        PadSlot shown = shownSlot();
+        padView.setRumble(shown != null ? shown.rumbleStrong : 0, shown != null ? shown.rumbleWeak : 0);
         padView.setContentDescription("Controller");
         padView.setTarget(control);
         int padding = dp(8);
@@ -1544,9 +2099,11 @@ public class MainActivity extends Activity {
     private View buildHome(Pc pc) {
         boolean lost = shownPcState == LOST, answering = shownPcState == RESPONDING;
         boolean soundLive = soundLive();
-        int players = deviceId != -1 ? 1 : 0;
-        // Below the last live feature the cord is always off.
-        int toControllers = answering ? ACTIVE : BORDER, toSound = soundLive ? ACTIVE : BORDER;
+        int players = connectedCount();
+        int mic = micState();
+        // Below the last live feature the cord is always off; a paused or muted mic still counts.
+        int toMic = answering && mic != MIC_OFF ? ACTIVE : BORDER;
+        int toControllers = answering ? ACTIVE : BORDER, toSound = soundLive || toMic == ACTIVE ? ACTIVE : BORDER;
 
         LinearLayout pcBlock = column();
         pcBlock.setPadding(0, 0, 0, dp(16));
@@ -1577,7 +2134,7 @@ public class MainActivity extends Activity {
         square.setBackground(squareShape);
 
         LinearLayout controllers = clickableRow(() -> {
-                selectedPlayer = 1;
+                selectedPlayer = firstConnectedPlayer();
                 show(CONTROLLERS);
             },
             "Controllers, " + players + " of 4 players connected, open");
@@ -1586,13 +2143,14 @@ public class MainActivity extends Activity {
         LinearLayout controllerText = featureText("Controllers · to PC", players + " of 4 players", TEXT);
         LinearLayout chips = row();
         chips.setPadding(0, dp(2), 0, 0);
-        for (int i = 1; i <= 4; i++) chips.addView(chip(i, i <= players));
+        for (int i = 1; i <= MAX_PLAYERS; i++) chips.addView(chip(i, slots[i - 1].connected()));
         controllerText.addView(chips);
         controllers.addView(controllerText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         padView = new PadView(this);
         padView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        padView.setRumble(rumbleStrong, rumbleWeak);
-        padView.setAlpha(deviceId != -1 ? 1 : 0.35f);
+        PadSlot preview = activeSlot();
+        padView.setRumble(preview != null ? preview.rumbleStrong : 0, preview != null ? preview.rumbleWeak : 0);
+        padView.setAlpha(players > 0 ? 1 : 0.35f);
         controllers.addView(padView, gapped(84, 49));
         controllers.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
@@ -1608,18 +2166,22 @@ public class MainActivity extends Activity {
         sound.addView(headphones, gapped(60, 60));
         sound.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
-        LinearLayout mic = row();
-        mic.setMinimumHeight(dp(64));
-        mic.setPadding(dp(4), dp(6), dp(4), dp(6));
-        LinearLayout micText = featureText("Mic · to PC", "Coming later", MUTED);
-        micText.addView(detail("A spot for the next feature. Not built yet."));
-        mic.addView(micText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        String micTitle = mic == MIC_LIVE ? "Phone mic" : mic == MIC_MUTED ? "Muted" : mic == MIC_PAUSED ? "Paused" : "Off";
+        LinearLayout micRow = clickableRow(() -> show(MIC), "Mic, " + micTitle + ", open");
+        micRow.setMinimumHeight(dp(64));
+        micRow.setPadding(dp(4), dp(6), dp(4), dp(6));
+        LinearLayout micText = featureText("Mic · to PC", micTitle, TEXT);
+        micText.addView(mono(mic == MIC_LIVE ? "Live as Musubi mic" : mic == MIC_MUTED ? "Musubi mic sends silence"
+            : mic == MIC_PAUSED ? "Sound is on the speaker" : "Uses the phone's own mic"));
+        micRow.addView(micText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        micRow.addView(micDrawing(mic), gapped(60, 54));
+        micRow.addView(new IconView(this, ICON_RIGHT), gapped(20, 20));
 
         LinearLayout features = column();
         features.setAlpha(lost ? 0.45f : 1);
         features.addView(strand(toControllers, 26, node(answering && players > 0 ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), 24, toSound, controllers, true));
-        features.addView(strand(toSound, 26, node(soundLive ? NODE_LIVE : NODE_IDLE, ICON_ARROW_DOWN), 24, BORDER, sound, true));
-        features.addView(strand(BORDER, 26, node(NODE_LATER, ICON_ARROW_UP), 24, 0, mic, true));
+        features.addView(strand(toSound, 26, node(soundLive ? NODE_LIVE : NODE_IDLE, ICON_ARROW_DOWN), 24, toMic, sound, true));
+        features.addView(strand(toMic, 26, micNode(mic), 24, 0, micRow, true));
 
         LinearLayout cord = column();
         cord.setPadding(dp(16), dp(16), dp(16), 0);
@@ -1673,11 +2235,10 @@ public class MainActivity extends Activity {
             shape.setColor(ACTIVE);
         } else {
             shape.setColor(BACKGROUND);
-            if (kind == NODE_IDLE) shape.setStroke(dp(2), IDLE);
-            else shape.setStroke(dp(2), LATER, dp(3), dp(2));
+            shape.setStroke(dp(2), kind == NODE_MUTED ? ACTIVE : IDLE);
         }
         node.setBackground(shape);
-        int arrow = kind == NODE_LIVE ? BACKGROUND : kind == NODE_IDLE ? MUTED : IDLE;
+        int arrow = kind == NODE_LIVE ? BACKGROUND : kind == NODE_MUTED ? ACTIVE : MUTED;
         node.addView(new IconView(this, icon, arrow),
             new FrameLayout.LayoutParams(dp(12), dp(12), Gravity.CENTER));
         return node;
@@ -1725,6 +2286,7 @@ public class MainActivity extends Activity {
     private TextView settingsNote(String value) {
         TextView view = detail(value);
         view.setLineSpacing(0, 1.35f);
+        view.setPadding(0, dp(2), 0, 0);
         return view;
     }
 
@@ -1743,12 +2305,14 @@ public class MainActivity extends Activity {
     }
 
     private View controllerBlock() {
+        int players = connectedCount();
+        PadSlot first = firstConnected();
         LinearLayout block = column();
         block.addView(text("Controller", 12, MUTED));
-        TextView name = text(deviceName != null ? deviceName : "Not connected", 16, TEXT);
+        TextView name = text(players == 0 ? "Not connected" : players == 1 && first != null ? first.deviceName : players + " controllers", 16, TEXT);
         name.setTypeface(medium());
         block.addView(name);
-        TextView status = text(deviceName != null ? "Connected" : "Pair your controller in the phone's Bluetooth settings.", 13, MUTED);
+        TextView status = text(players > 0 ? "Connected" : "Pair your controller in the phone's Bluetooth settings.", 13, MUTED);
         block.addView(status);
         return block;
     }
@@ -1779,17 +2343,7 @@ public class MainActivity extends Activity {
     /** Always the dialog, even with one PC: its "Manage PCs" button is the way to add another. */
     private void switchPc() {
         AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout panel = column();
-        panel.setPadding(dp(16), dp(16), dp(16), dp(16));
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(SURFACE);
-        background.setStroke(dp(1), BORDER);
-        background.setCornerRadius(dp(6));
-        panel.setBackground(background);
-        TextView title = text("Switch PC", 18, TEXT);
-        title.setTypeface(medium());
-        title.setPadding(0, 0, 0, dp(8));
-        panel.addView(title);
+        LinearLayout panel = dialogPanel("Switch PC");
         boolean onCable = currentPc() == usbPc;
         if (onCable) {
             // The cable always wins while it's plugged in, so Wi-Fi rows here would look like they do nothing.
@@ -1811,6 +2365,26 @@ public class MainActivity extends Activity {
             dialog.dismiss();
             show(SETTINGS);
         }), 44));
+        showPanel(dialog, panel);
+    }
+
+    /** A dialog's surface panel with its title; showPanel puts it on screen. */
+    private LinearLayout dialogPanel(String heading) {
+        LinearLayout panel = column();
+        panel.setPadding(dp(16), dp(16), dp(16), dp(16));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(SURFACE);
+        background.setStroke(dp(1), BORDER);
+        background.setCornerRadius(dp(6));
+        panel.setBackground(background);
+        TextView title = text(heading, 18, TEXT);
+        title.setTypeface(medium());
+        title.setPadding(0, 0, 0, dp(8));
+        panel.addView(title);
+        return panel;
+    }
+
+    private void showPanel(AlertDialog dialog, View panel) {
         dialog.setView(panel);
         dialog.show();
         if (dialog.getWindow() != null) {
@@ -1841,22 +2415,43 @@ public class MainActivity extends Activity {
 
     private View buildGame() {
         LinearLayout root = column();
-        root.setGravity(Gravity.CENTER);
         root.setBackgroundColor(GAME_BG);
-        root.setClickable(true);
-        root.setContentDescription("Game mode. Tap to go back");
-        root.setOnClickListener(view -> show(gameFrom));
+        // Only this area goes back, so a tap on the mute bar below never does.
+        LinearLayout tap = column();
+        tap.setGravity(Gravity.CENTER);
+        tap.setClickable(true);
+        tap.setContentDescription("Game mode. Tap to go back");
+        tap.setOnClickListener(view -> show(gameFrom));
+        root.addView(tap, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
         Pc pc = currentPc();
         boolean lost = shownPcState == LOST;
-        String status = lost ? "PC not responding"
-            : (deviceName != null ? deviceName : "No controller") + " to " + (pc != null ? pc.name : "no PC");
+        int players = connectedCount();
+        PadSlot first = firstConnected();
+        String pads = players == 0 ? "No controller" : players == 1 && first != null ? first.deviceName : players + " controllers";
+        String status = lost ? "PC not responding" : pads + " to " + (pc != null ? pc.name : "no PC");
         TextView line = text(status, 16, lost ? ALERT : MUTED);
         line.setGravity(Gravity.CENTER);
-        root.addView(line);
+        tap.addView(line);
+        int mic = shownGameMic = micState();
+        if (mic != MIC_OFF) {
+            TextView micLine = text(mic == MIC_LIVE ? "Mic live" : mic == MIC_MUTED ? "Mic muted" : "Mic paused · sound is on the speaker",
+                16, mic == MIC_LIVE ? ACTIVE : MUTED);
+            micLine.setGravity(Gravity.CENTER);
+            micLine.setPadding(0, dp(4), 0, 0);
+            tap.addView(micLine);
+        }
         TextView back = text("Tap to go back", 13, MUTED);
         back.setGravity(Gravity.CENTER);
         back.setPadding(0, dp(8), 0, 0);
-        root.addView(back);
+        tap.addView(back);
+        if (mic == MIC_LIVE || mic == MIC_MUTED) {
+            // The margin around the bar does nothing, so a near miss neither mutes nor leaves Game mode.
+            LinearLayout dock = column();
+            dock.setPadding(dp(16), 0, dp(16), dp(32));
+            dock.addView(button(mic == MIC_MUTED ? "Unmute mic" : "Mute mic", mic == MIC_MUTED ? PRIMARY : SECONDARY,
+                () -> setMic(true, !micMuted)), buttonParams(72));
+            root.addView(dock);
+        }
         return root;
     }
 
@@ -1919,57 +2514,158 @@ public class MainActivity extends Activity {
         return withHeader("Headphones", node(soundLive() ? NODE_LIVE : NODE_IDLE, ICON_ARROW_DOWN), () -> show(HOME), body);
     }
 
-    /** Spec 4.3. Until multi-pad ships only player 1 is real; players 2 to 4 are placeholders. */
+    /** Laid out like the Headphones page: the state, the drawing, the switch, then Mute or what keeps the mic from working. */
+    private View buildMic() {
+        int mic = micState();
+        boolean live = mic == MIC_LIVE, muted = mic == MIC_MUTED, paused = mic == MIC_PAUSED, denied = micDenied;
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(16), dp(16), dp(16));
+        body.addView(text("Phone mic", 12, MUTED));
+        TextView title = text(denied ? "No mic permission" : live ? "Phone mic" : muted ? "Muted" : paused ? "Paused" : "Off",
+            16, denied ? ALERT : TEXT);
+        title.setTypeface(medium());
+        title.setPadding(0, dp(6), 0, 0);
+        body.addView(title);
+        TextView sub = detail(denied ? "Android blocked Musubi from using the mic."
+            : mic == MIC_OFF ? (micError != null ? micError : "Uses the phone's own mic, so your earbuds keep their full sound.")
+            : paused ? "PC sound plays on the phone speaker, so the mic would pick up your game."
+            : muted ? "Musubi mic stays picked in Discord but sends silence."
+            : soundOn && useSpeaker() ? "On while PC sound plays on the speaker. People on the call may hear your game."
+            : "The phone's own mic. Your earbuds keep their full sound.");
+        sub.setPadding(0, dp(6), 0, 0);
+        body.addView(sub);
+
+        FrameLayout stage = new FrameLayout(this);
+        stage.setPadding(0, dp(16), 0, dp(8));
+        MicView drawing = micDrawing(denied ? MIC_PAUSED : mic);
+        if (denied) drawing.setContentDescription("Mic, not allowed");
+        stage.addView(drawing, new FrameLayout.LayoutParams(dp(200), dp(180), Gravity.CENTER));
+        body.addView(stage, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        TextView readout = mono(denied ? "Mic not allowed" : live ? "Hearing you" : muted ? "Muted"
+            : paused ? "Mic paused" : "Turn on to send your voice");
+        readout.setTextColor(denied ? ALERT : live ? ACTIVE : MUTED);
+        readout.setGravity(Gravity.CENTER);
+        readout.setPadding(0, 0, 0, dp(8));
+        body.addView(readout);
+
+        LinearLayout send = row();
+        LinearLayout sendText = column();
+        TextView sendTitle = text("Send my voice", 16, TEXT);
+        sendTitle.setTypeface(medium());
+        sendText.addView(sendTitle);
+        // Without the permission the mic is off for the PC too, even though the wish to have it on is kept.
+        boolean shownOn = mic != MIC_OFF;
+        sendText.addView(mono(shownOn ? "Shows up on the PC as Musubi mic" : "Off here and on the PC"));
+        send.addView(sendText, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        SwitchView toggle = new SwitchView(this);
+        toggle.setChecked(shownOn);
+        toggle.setContentDescription("Send my voice");
+        toggle.setBackground(ripple(new ColorDrawable(0)));
+        toggle.setOnCheckedChangeListener((button, on) -> switchMic(on, false));
+        send.addView(toggle, gapped(56, 44));
+        body.addView(divided(send));
+
+        LinearLayout action = column();
+        if (paused) {
+            action.addView(button("Play on headphones", SECONDARY, () -> setSpeaker(false)), buttonParams(44));
+            action.addView(hint("Moves PC sound off the speaker"));
+            action.addView(spaced(button("Allow anyway", SECONDARY, this::confirmAllowMic), 44));
+        } else if (denied) {
+            action.addView(button("Allow the mic", SECONDARY, this::openAppSettings), buttonParams(44));
+            action.addView(hint("Opens Musubi in the phone's settings"));
+        } else {
+            Button mute = button(muted ? "Unmute" : "Mute", muted ? PRIMARY : SECONDARY, () -> setMic(true, !micMuted));
+            if (!micOn) {
+                mute.setEnabled(false);
+                mute.setAlpha(0.5f);
+            }
+            action.addView(mute, buttonParams(48));
+        }
+        body.addView(divided(action));
+
+        LinearLayout tip = column();
+        tip.addView(text("On the PC", 12, MUTED));
+        TextView tipNote = detail("In Discord or your game, pick “Musubi mic” as the input.");
+        tipNote.setPadding(0, dp(8), 0, 0);
+        tip.addView(tipNote);
+        body.addView(divided(tip));
+        return withHeader("Mic", micNode(mic), () -> show(HOME), body);
+    }
+
+    /** Amber only while the PC answers: filled when live, a ring when muted. */
+    private View micNode(int mic) {
+        boolean answering = shownPcState == RESPONDING;
+        return node(answering && mic == MIC_LIVE ? NODE_LIVE : answering && mic == MIC_MUTED ? NODE_MUTED : NODE_IDLE, ICON_ARROW_UP);
+    }
+
+    private MicView micDrawing(int mic) {
+        micView = new MicView(this, micLevel);
+        micView.setMode(mic == MIC_LIVE ? MicView.ON : mic == MIC_MUTED ? MicView.MUTED : mic == MIC_PAUSED ? MicView.PAUSED : MicView.OFF);
+        micView.setContentDescription(mic == MIC_LIVE ? "Mic, live" : mic == MIC_MUTED ? "Mic, muted"
+            : mic == MIC_PAUSED ? "Mic, paused" : "Mic, off");
+        micView.start();
+        return micView;
+    }
+
+    /** The small centred line under a button, like "Opens the phone's Bluetooth settings". */
+    private TextView hint(String value) {
+        TextView view = text(value, 12, MUTED);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(0, dp(6), 0, 0);
+        return view;
+    }
+
     private View buildControllers(Pc pc) {
-        boolean connected = deviceId != -1;
         int n = selectedPlayer;
+        PadSlot slot = slots[n - 1];
+        boolean connected = slot.connected();
+        int players = connectedCount();
         LinearLayout strip = row();
         strip.setPadding(dp(12), dp(8), dp(12), 0);
-        for (int i = 1; i <= 4; i++) {
+        for (int i = 1; i <= MAX_PLAYERS; i++) {
             if (i > 1) strip.addView(new View(this), new LinearLayout.LayoutParams(dp(4), 0));
-            strip.addView(playerTab(i, connected), weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+            strip.addView(playerTab(i), weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
 
         LinearLayout body = column();
         body.setPadding(dp(16), dp(16), dp(16), dp(16));
-        TextView value = text(n > 1 ? "Player " + n : connected ? deviceName : "Player 1 is free", 16, TEXT);
+        TextView value = text(connected ? slot.deviceName : "Player " + n + " is free", 16, TEXT);
         value.setTypeface(medium());
         body.addView(value);
-        body.addView(detail(n > 1 ? "More controllers at once are coming in a later version."
-            : connected ? "Player 1 · games see Xbox 360 controller 1"
-            : "Turn on a controller paired with this phone. Games will see it as Xbox 360 controller 1."));
-        if (n == 1 && connected && !canVibrate(deviceId)) body.addView(detail("Can't vibrate over Bluetooth"));
-        if (n > 1) {
-            body.addView(new View(this), weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        body.addView(detail(connected ? "Player " + n + " · games see Xbox 360 controller " + n
+            : "Turn on a controller paired with this phone. Games will see it as Xbox 360 controller " + n + "."));
+        if (connected && !canVibrate(slot.deviceId)) body.addView(detail("Needs a newer Android to vibrate"));
+        PadView pad = new PadView(this);
+        pad.setContentDescription("Controller");
+        int padding = dp(8);
+        pad.setPadding(padding, padding, padding, padding);
+        body.addView(pad, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        TextView status = mono(connected ? "" : "Waiting for a controller");
+        status.setGravity(Gravity.CENTER);
+        status.setPadding(0, 0, 0, dp(8));
+        body.addView(status);
+        if (connected) {
+            padView = pad;
+            pad.setRumble(slot.rumbleStrong, slot.rumbleWeak);
+            readout = status;
+            LinearLayout actions = pair(
+                button("Remap", SECONDARY, this::startRemap),
+                button("Settings", SECONDARY, () -> show(CONTROLLER_SETTINGS)));
+            ((LinearLayout.LayoutParams) actions.getLayoutParams()).topMargin = 0;
+            body.addView(actions);
         } else {
-            PadView pad = new PadView(this);
-            pad.setContentDescription("Controller");
-            int padding = dp(8);
-            pad.setPadding(padding, padding, padding, padding);
-            body.addView(pad, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
-            TextView status = mono(connected ? "" : "Waiting for a controller");
-            status.setGravity(Gravity.CENTER);
-            status.setPadding(0, 0, 0, dp(8));
-            body.addView(status);
-            if (connected) {
-                padView = pad;
-                pad.setRumble(rumbleStrong, rumbleWeak);
-                readout = status;
-                body.addView(button("Remap", SECONDARY, this::startRemap), buttonParams(44));
-            } else {
-                pad.setAlpha(0.35f);
-                body.addView(button("Pair a new controller", SECONDARY, () -> {
-                    try {
-                        startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));
-                    } catch (ActivityNotFoundException missing) {
-                        Toast.makeText(this, "This phone has no Bluetooth settings to open", Toast.LENGTH_SHORT).show();
-                    }
-                }), buttonParams(44));
-                TextView caption = text("Opens the phone's Bluetooth settings", 12, MUTED);
-                caption.setGravity(Gravity.CENTER);
-                caption.setPadding(0, dp(6), 0, 0);
-                body.addView(caption);
-            }
+            pad.setAlpha(0.35f);
+            body.addView(button("Pair a new controller", SECONDARY, () -> {
+                try {
+                    startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));
+                } catch (ActivityNotFoundException missing) {
+                    Toast.makeText(this, "This phone has no Bluetooth settings to open", Toast.LENGTH_SHORT).show();
+                }
+            }), buttonParams(44));
+            TextView caption = text("Opens the phone's Bluetooth settings", 12, MUTED);
+            caption.setGravity(Gravity.CENTER);
+            caption.setPadding(0, dp(6), 0, 0);
+            body.addView(caption);
         }
         LinearLayout footer = column();
         footer.addView(detail("Controllers only work while Musubi is open. Game mode keeps it open with the screen dimmed."));
@@ -1982,24 +2678,96 @@ public class MainActivity extends Activity {
         page.addView(strip);
         page.addView(cordLine(BORDER), buttonParams(1));
         page.addView(body, weighted(ViewGroup.LayoutParams.MATCH_PARENT, 0));
-        LinearLayout root = (LinearLayout) withHeader("Controllers", node(shownPcState == RESPONDING && deviceId != -1 ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), () -> show(HOME), page);
+        LinearLayout root = (LinearLayout) withHeader("Controllers", node(shownPcState == RESPONDING && players > 0 ? NODE_LIVE : NODE_IDLE, ICON_ARROW_UP), () -> show(HOME), page);
         LinearLayout header = (LinearLayout) root.getChildAt(0);
         header.getChildAt(0).setContentDescription("Back to " + pc.name);
         header.addView(new View(this), weighted(0, 0));
-        header.addView(mono((connected ? 1 : 0) + " of 4"));
+        header.addView(mono(players + " of 4"));
         return root;
     }
 
+    private View playerBadge(int n) {
+        TextView badge = text(String.valueOf(n), 12, BACKGROUND);
+        badge.setTypeface(Typeface.DEFAULT_BOLD);
+        badge.setGravity(Gravity.CENTER);
+        badge.setIncludeFontPadding(false);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setShape(GradientDrawable.OVAL);
+        shape.setColor(ACTIVE);
+        badge.setBackground(shape);
+        return badge;
+    }
+
+    private View buildControllerSettings() {
+        PadSlot slot = slots[selectedPlayer - 1];
+        if (!slot.connected()) {
+            screen = CONTROLLERS;
+            return currentPc() != null ? buildControllers(currentPc()) : buildMain();
+        }
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(16), dp(16), dp(16));
+        TextView title = text(slot.deviceName, 16, TEXT);
+        title.setTypeface(medium());
+        body.addView(title);
+        body.addView(detail("Saved for this controller only."));
+        body.addView(divided(vibrationSection(slot)));
+        body.addView(divided(deadzoneRow(slot)));
+        LinearLayout root = (LinearLayout) withHeader("Player " + selectedPlayer, playerBadge(selectedPlayer), () -> show(CONTROLLERS), body);
+        ((LinearLayout) root.getChildAt(0)).getChildAt(0).setContentDescription("Back to Controllers");
+        return root;
+    }
+
+    private LinearLayout vibrationSection(PadSlot slot) {
+        LinearLayout section = column();
+        boolean stuck = !canVibrate(slot.deviceId);
+        LinearLayout row = row();
+        row.setMinimumHeight(dp(52));
+        row.setPadding(0, dp(4), 0, dp(4));
+        LinearLayout text = column();
+        TextView title = text("Vibration", 15, TEXT);
+        title.setTypeface(medium());
+        text.addView(title);
+        text.addView(settingsNote(stuck ? "Needs a newer Android to vibrate" : "Rumble from games"));
+        row.addView(text, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
+        SwitchView toggle = new SwitchView(this);
+        toggle.setChecked(slot.vibration);
+        toggle.setContentDescription("Vibration");
+        toggle.setBackground(ripple(new ColorDrawable(0)));
+        if (stuck) {
+            toggle.setEnabled(false);
+            toggle.setAlpha(0.5f);
+        } else {
+            toggle.setOnCheckedChangeListener((view, checked) -> {
+                saveVibration(slot, checked);
+                render();
+            });
+        }
+        row.addView(toggle, gapped(56, 44));
+        section.addView(row);
+        if (slot.vibration && !stuck) {
+            if (canVaryStrength(slot.deviceId)) {
+                section.addView(strengthRow(slot));
+            } else {
+                LinearLayout testRow = row();
+                testRow.setPadding(0, dp(8), 0, 0);
+                testRow.addView(testButton(slot));
+                section.addView(testRow);
+            }
+        }
+        return section;
+    }
+
     /** Number over label; the selected tab gets the surface fill and a cream bottom edge, like the output tabs. */
-    private View playerTab(int n, boolean connected) {
-        boolean real = n == 1, on = real && connected, selected = n == selectedPlayer;
+    private View playerTab(int n) {
+        PadSlot slot = slots[n - 1];
+        boolean on = slot.connected(), selected = n == selectedPlayer;
         LinearLayout tab = column();
         tab.setGravity(Gravity.CENTER_HORIZONTAL);
         tab.setPadding(0, dp(10), 0, 0);
         tab.setClickable(true);
         tab.setFocusable(true);
         tab.setSelected(selected);
-        tab.setContentDescription("Player " + n + (on ? ", " + deviceName : real ? ", free" : ", coming later"));
+        tab.setContentDescription("Player " + n + (on ? ", " + slot.deviceName : ", free"));
         tab.setOnClickListener(view -> {
             selectedPlayer = n;
             render();
@@ -2019,7 +2787,7 @@ public class MainActivity extends Activity {
         else shape.setStroke(dp(2), IDLE, dp(3), dp(2));
         number.setBackground(shape);
         tab.addView(number, new LinearLayout.LayoutParams(dp(28), dp(28)));
-        TextView label = text(on ? "Connected" : real ? "Free" : "Later", 11, selected ? TEXT : MUTED);
+        TextView label = text(on ? "Connected" : "Free", 11, selected ? TEXT : MUTED);
         label.setGravity(Gravity.CENTER);
         label.setSingleLine(true);
         label.setEllipsize(TextUtils.TruncateAt.END);
@@ -2064,7 +2832,10 @@ public class MainActivity extends Activity {
     }
 
     private void startRemap() {
-        pending = map.copy();
+        PadSlot slot = slots[selectedPlayer - 1];
+        if (!slot.connected()) return;
+        remapSlot = slot.index;
+        pending = slot.map.copy();
         history.clear();
         claimed.clear();
         capture.clear();
@@ -2074,7 +2845,7 @@ public class MainActivity extends Activity {
         ignoreInputUntil = SystemClock.uptimeMillis() + STEP_COOLDOWN_MS;
         screen = REMAP;
         // The game shouldn't react to presses meant for the setup.
-        clearInput();
+        clearInput(slot);
         render();
     }
 
@@ -2121,8 +2892,9 @@ public class MainActivity extends Activity {
             render();
             return;
         }
-        map = pending;
-        clearInput();
+        PadSlot slot = slots[remapSlot];
+        slot.map = pending;
+        clearInput(slot);
         show(REMAP_DONE);
     }
 
@@ -2187,30 +2959,46 @@ public class MainActivity extends Activity {
         counts.setTypeface(Typeface.MONOSPACE);
         counts.setPadding(0, dp(12), 0, 0);
         top.addView(counts);
-        TextView forDevice = text("For " + deviceName, 13, MUTED);
+        PadSlot slot = slots[remapSlot];
+        TextView forDevice = text("For " + slot.deviceName, 13, MUTED);
         forDevice.setPadding(0, dp(4), 0, 0);
         top.addView(forDevice);
 
         LinearLayout actions = column();
         actions.addView(button("Save", PRIMARY, () -> {
-            prefs.edit().putString(mapKey(), map.encode()).apply();
+            if (slot.descriptor != null) {
+                prefs.edit().putString(mapKey(slot), slot.map.encode()).apply();
+                for (PadSlot s : slots) {
+                    if (s != slot && slot.descriptor.equals(s.descriptor)) loadMap(s);
+                }
+            }
             show(CONTROLLERS);
         }), buttonParams(48));
         actions.addView(pair(
             button("Start over", SECONDARY, () -> {
-                loadMap();
+                loadMap(slot);
+                selectedPlayer = slot.index + 1;
                 startRemap();
             }),
             button("Reset", SECONDARY, () -> {
-                resetLayout();
+                resetLayout(slot);
                 show(CONTROLLERS);
             })));
         return withPad(-1, top, null, actions);
     }
 
-    private void resetLayout() {
-        prefs.edit().remove(mapKey()).apply();
-        loadMap();
+    private void resetLayout(PadSlot slot) {
+        if (slot.descriptor == null) return;
+        prefs.edit().remove(mapKey(slot)).apply();
+        for (PadSlot s : slots) {
+            if (slot.descriptor.equals(s.descriptor)) loadMap(s);
+        }
+    }
+
+    private void resetConnectedLayouts() {
+        for (PadSlot slot : slots) {
+            if (slot.connected() && hasCustomMap(slot)) resetLayout(slot);
+        }
     }
 
     private View buildSettings() {
@@ -2226,8 +3014,8 @@ public class MainActivity extends Activity {
         cableNote.setPadding(0, dp(10), 0, 0);
         pcSection.addView(cableNote);
 
-        // Until multi-pad ships at most one controller is connected.
-        boolean controller = deviceId != -1;
+        int players = connectedCount();
+        boolean controller = players > 0;
         LinearLayout generalSection = column();
         generalSection.addView(sectionHeading("General", false, ICON_SLIDERS, null));
         generalSection.addView(prefRow("Keep the screen on", "While Musubi is open. Game mode always keeps it on.", "keep_screen",
@@ -2261,48 +3049,26 @@ public class MainActivity extends Activity {
         updateSoundNow();
 
         LinearLayout controllerSection = column();
-        controllerSection.addView(sectionHeading("Controllers", controller, ICON_ARROW_UP, controller ? "1 connected" : null));
-        TextView layouts = text("Button layouts", 15, TEXT);
+        controllerSection.addView(sectionHeading("Controllers", controller, ICON_ARROW_UP, controller ? players + " connected" : null));
+        TextView layouts = text("Per-controller settings", 15, TEXT);
         layouts.setTypeface(medium());
         layouts.setPadding(0, dp(4), 0, 0);
         controllerSection.addView(layouts);
-        controllerSection.addView(settingsNote("Each controller keeps its own layout. Change one from Controllers, on its player, with Remap."));
-        boolean canReset = controller && hasCustomMap();
-        Button reset = button("Reset layout", SECONDARY, () -> {
-            resetLayout();
+        controllerSection.addView(settingsNote("Each controller keeps its own button layout, vibration, and stick deadzone. Change them from Controllers, on each player's tab."));
+        boolean canReset = anyCustomMap();
+        Button reset = button("Reset button layouts", SECONDARY, () -> {
+            resetConnectedLayouts();
             render();
         });
         reset.setEnabled(canReset);
         reset.setAlpha(canReset ? 1 : 0.5f);
         controllerSection.addView(spaced(reset, 44));
-        boolean stuck = controller && !canVibrate(deviceId);
-        LinearLayout vibrationRow = prefRow("Vibration", stuck ? deviceName + " can't vibrate over Bluetooth" : "Rumble from games", "vibration",
-            () -> {
-                vibration = prefs.getBoolean("vibration", true);
-                render();
-            });
-        if (stuck) {
-            View toggle = vibrationRow.getChildAt(1);
-            toggle.setEnabled(false);
-            toggle.setAlpha(0.5f);
-        }
-        vibrationRow.setPadding(0, dp(8), 0, 0);
-        controllerSection.addView(vibrationRow);
-        if (vibration && !stuck) {
-            if (!controller || canVaryStrength(deviceId)) {
-                controllerSection.addView(strengthRow(controller));
-            } else {
-                LinearLayout testRow = row();
-                testRow.addView(testButton());
-                controllerSection.addView(testRow);
-            }
-        }
-        controllerSection.addView(deadzoneRow(controller));
 
         LinearLayout gameSection = column();
         gameSection.addView(sectionHeading("Game mode", false, ICON_HALF, null));
         LinearLayout autoRow = row();
         autoRow.setMinimumHeight(dp(52));
+        autoRow.setPadding(0, dp(6), 0, dp(6));
         LinearLayout autoText = column();
         TextView autoTitle = text("Turn on by itself", 15, TEXT);
         autoTitle.setTypeface(medium());
@@ -2367,8 +3133,6 @@ public class MainActivity extends Activity {
             sections[i].setPadding(dp(16), dp(16), dp(16), dp(12));
             body.addView(sections[i]);
         }
-        // The 44dp deadzone slider already carries its own air below the track.
-        controllerSection.setPadding(dp(16), dp(16), dp(16), dp(4));
         return withHeader("Settings", null, () -> show(HOME), body);
     }
 
@@ -2394,7 +3158,7 @@ public class MainActivity extends Activity {
         dotParams.leftMargin = dotParams.rightMargin = dp(4);
         row.addView(dot, dotParams);
         LinearLayout text = column();
-        text.setPadding(dp(12), dp(4), 0, dp(4));
+        text.setPadding(dp(12), dp(6), 0, dp(6));
         TextView name = text(title, 15, TEXT);
         name.setTypeface(medium());
         text.addView(name);
@@ -2441,10 +3205,11 @@ public class MainActivity extends Activity {
         settingsSoundNow.setVisibility(now.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
-    private Button testButton() {
+    private Button testButton(PadSlot slot) {
         Button test = button("Test", SECONDARY, () -> {
-            int level = 65535 * vibrationStrength / 100;
-            rumble(deviceId, level, level, 500);
+            int level = 65535 * slot.vibrationStrength / 100;
+            rumble(slot.deviceId, level, level, 500);
+            showRumble(slot, level, level, 500);
         });
         test.setContentDescription("Test vibration");
         test.setPadding(dp(14), 0, dp(14), 0);
@@ -2452,29 +3217,26 @@ public class MainActivity extends Activity {
         return test;
     }
 
-    private LinearLayout strengthRow(boolean withTest) {
+    private LinearLayout strengthRow(PadSlot slot) {
         LinearLayout box = column();
         box.setPadding(0, dp(8), 0, 0);
         LinearLayout labels = row();
-        TextView name = text("Strength", 14, TEXT);
+        TextView name = text("Strength", 15, TEXT);
         name.setTypeface(medium());
         labels.addView(name, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView value = mono(vibrationStrength + "%");
+        TextView value = mono(slot.vibrationStrength + "%");
         value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         labels.addView(value);
-        if (withTest) {
-            Button test = testButton();
-            ((LinearLayout.LayoutParams) test.getLayoutParams()).leftMargin = dp(12);
-            labels.addView(test);
-        }
+        Button test = testButton(slot);
+        ((LinearLayout.LayoutParams) test.getLayoutParams()).leftMargin = dp(12);
+        labels.addView(test);
         box.addView(labels);
 
-        StrengthView bar = new StrengthView(this, "Vibration strength", 10, 100, 10, vibrationStrength, true);
+        StrengthView bar = new StrengthView(this, "Vibration strength", 10, 100, 10, slot.vibrationStrength, true);
         bar.setListener(new StrengthView.Listener() {
             @Override public void onChange(int strength) {
-                vibrationStrength = strength;
+                saveVibrationStrength(slot, strength);
                 value.setText(strength + "%");
-                prefs.edit().putInt("vibration_strength", strength).apply();
             }
             @Override public void onHold(boolean held) {
                 value.setTextColor(held ? ACTIVE : MUTED);
@@ -2484,42 +3246,39 @@ public class MainActivity extends Activity {
         return box;
     }
 
-    private LinearLayout deadzoneRow(boolean controller) {
+    private LinearLayout deadzoneRow(PadSlot slot) {
         LinearLayout box = column();
         box.setPadding(0, dp(8), 0, 0);
         LinearLayout labels = row();
-        TextView name = text("Stick deadzone", 14, TEXT);
+        TextView name = text("Stick deadzone", 15, TEXT);
         name.setTypeface(medium());
         labels.addView(name, weighted(0, ViewGroup.LayoutParams.WRAP_CONTENT));
-        int percent = Math.round(deadzone * 100);
+        int percent = Math.round(slot.deadzone * 100);
         TextView value = mono(percent == 0 ? "Off" : percent + "%");
         value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         labels.addView(value);
         box.addView(labels);
         box.addView(settingsNote("Ignores small stick moves, for a stick that drifts."));
 
-        StickPreview preview = new StickPreview(this, controller);
-        preview.setDeadzone(deadzone);
-        preview.setSticks(rawLx, rawLy, rawRx, rawRy);
-        preview.setVisibility(View.GONE);
+        StickPreview preview = new StickPreview(this, true);
+        preview.setDeadzone(slot.deadzone);
+        preview.setSticks(slot.rawLx, slot.rawLy, slot.rawRx, slot.rawRy);
+        stickPreview = preview;
+        stickPreviewSlot = slot;
         StrengthView bar = new StrengthView(this, "Stick deadzone", 0, 30, 1, percent, false);
         bar.setListener(new StrengthView.Listener() {
             @Override public void onChange(int next) {
-                deadzone = next / 100f;
+                saveDeadzone(slot, next);
                 value.setText(next == 0 ? "Off" : next + "%");
-                preview.setDeadzone(deadzone);
-                prefs.edit().putInt("deadzone", next).apply();
+                preview.setDeadzone(slot.deadzone);
             }
             @Override public void onHold(boolean held) {
                 value.setTextColor(held ? ACTIVE : MUTED);
-                preview.setVisibility(held ? View.VISIBLE : View.GONE);
-                stickPreview = held ? preview : null;
-                if (held) preview.setSticks(rawLx, rawLy, rawRx, rawRy);
             }
         });
         box.addView(bar, buttonParams(44));
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        previewParams.topMargin = dp(4);
+        previewParams.topMargin = dp(6);
         previewParams.bottomMargin = dp(8);
         box.addView(preview, previewParams);
         return box;
@@ -2540,6 +3299,7 @@ public class MainActivity extends Activity {
     private LinearLayout prefRow(String title, String note, String key, Runnable changed) {
         LinearLayout row = row();
         row.setMinimumHeight(dp(52));
+        row.setPadding(0, dp(6), 0, dp(6));
         LinearLayout text = column();
         TextView name = text(title, 15, TEXT);
         name.setTypeface(medium());
@@ -3170,7 +3930,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Both sticks at their raw position, with the deadzone drawn as a dashed disc. Shown while the deadzone slider is held. */
+    /** Both sticks at their raw position, with the deadzone drawn as a dashed disc. Shown under the deadzone slider. */
     private static final class StickPreview extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint dashed = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -3181,7 +3941,7 @@ public class MainActivity extends Activity {
         private float zone, lx, ly, rx, ry;
         private String text = "";
         private int shownPercent = -1;
-        private boolean shownIgnored;
+        private boolean shownIgnored, shownRight;
 
         StickPreview(Context context, boolean connected) {
             super(context);
@@ -3232,14 +3992,17 @@ public class MainActivity extends Activity {
             drawStick(canvas, 12 * d + inner / 4, cy, lx, ly, "Left stick", captionY);
             drawStick(canvas, 12 * d + inner * 3 / 4, cy, rx, ry, "Right stick", captionY);
             if (!connected) return;
-            float m = (float) Math.sqrt(lx * lx + ly * ly);
+            float lm = (float) Math.sqrt(lx * lx + ly * ly), rm = (float) Math.sqrt(rx * rx + ry * ry);
+            boolean right = rm > lm;
+            float m = right ? rm : lm;
             int percent = Math.round(m * 100);
             boolean ignored = m <= zone;
             // Rebuilt only when the words change, not on every motion event.
-            if (percent != shownPercent || ignored != shownIgnored) {
+            if (percent != shownPercent || ignored != shownIgnored || right != shownRight) {
                 shownPercent = percent;
                 shownIgnored = ignored;
-                text = "Left stick at rest: " + percent + "%. " + (ignored ? "Ignored." : "Sent as a small move.");
+                shownRight = right;
+                text = (right ? "Right" : "Left") + " stick at rest: " + percent + "%. " + (ignored ? "Ignored." : "Sent as a small move.");
                 setContentDescription(text);
             }
             canvas.drawText(text, getWidth() / 2f, captionY + caption.descent() + 10 * d - line.ascent(), line);

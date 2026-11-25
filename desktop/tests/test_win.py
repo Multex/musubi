@@ -51,8 +51,11 @@ class FakePad:
         self.closed = True
 
 
-def hello(features=core.FEATURE_RUMBLE, rtt=9):
-    return HELLO.pack(HELLO_MAGIC, 1, rtt) + b'Pixel\0Xbox pad\0' + bytes([features])
+def hello(features=core.FEATURE_RUMBLE, rtt=9, slots_mask=None, extra=()):
+    pkt = HELLO.pack(HELLO_MAGIC, 1, rtt) + b'Pixel\0Xbox pad\0' + bytes([features])
+    if slots_mask is None:
+        return pkt
+    return pkt + bytes([0, 0, 0, slots_mask]) + b'\0'.join(extra)
 
 
 class ConsoleTest(unittest.TestCase):
@@ -73,9 +76,11 @@ class ConsoleTest(unittest.TestCase):
         for sock in (self.sock, self.phone, self.console.wake, self.console.waker):
             sock.close()
 
-    def make_pad(self):
-        self.pads.append(FakePad())
-        return self.pads[-1]
+    def make_pad(self, slot=0):
+        pad = FakePad()
+        pad.slot = slot
+        self.pads.append(pad)
+        return pad
 
     def send(self, data):
         self.phone.sendto(data, self.sock.getsockname())
@@ -137,6 +142,17 @@ class ConsoleTest(unittest.TestCase):
         self.phone.settimeout(0.2)
         with self.assertRaises(TimeoutError):
             self.phone.recv(64)
+
+    def test_multi_pad_routes_input_and_rumble_per_slot(self):
+        self.allow()
+        self.send(hello(slots_mask=0b0011, extra=(b'Pad 2',)))
+        self.assertEqual([pad.slot for pad in self.pads], [0, 1])
+        self.send(core.slotted_packet(1, PACKET.pack(2, 0, 0, 0, 0, 0, 0, 0, 0)))
+        self.assertEqual(self.pads[0].states, [])
+        self.assertEqual(self.pads[1].states[-1], (2, [0] * 8))
+        self.console.on_rumble(255, 0, 1)
+        self.console.step(timeout=2)
+        self.assertEqual(self.phone.recv(64), core.rumble_message(0xffff, 0, 0, slot=1))
 
 
 class XInputState(ctypes.Structure):

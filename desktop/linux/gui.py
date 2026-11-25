@@ -21,7 +21,7 @@ HUB_COMMANDS = ('stop', 'start', 'ignored', 'reload', 'page')
 
 
 def idle_status(sound_enabled):
-    return {'event': 'status', 'phone': None, 'pad': False, 'pad_error': None, 'pending': [],
+    return {'event': 'status', 'phone': None, 'pad': False, 'pads': [False] * 4, 'pad_error': None, 'pending': [],
             'sound_enabled': sound_enabled}
 
 
@@ -146,6 +146,7 @@ class Hub(Gio.Application):
             return
         self.send_receiver({'allow': list(self.config['phones'])})
         self.send_receiver({'sound': self.config['sound_enabled']})
+        self.send_receiver({'mic_keep': self.config['mic']})
         if self.watch:
             self.send_receiver({'watch': True})
 
@@ -172,8 +173,21 @@ class Hub(Gio.Application):
             return
         if event['event'] == 'status':
             self.status = event
+            self.remember_mic(event['phone'])
             self.refresh()
         self.send_window(line)
+
+    def remember_mic(self, phone):
+        """The phone owns the mic switch. Saving its choice brings Musubi mic back at the next start, before the phone."""
+        if not phone or phone.get('mic') is None or (phone['mic'] != 0) == self.config['mic']:
+            return
+        # Read fresh, so a phone the window approved a moment ago isn't saved away.
+        config = {**system.load_config(), 'mic': phone['mic'] != 0}
+        try:
+            system.save_config(config)
+        except OSError:
+            return  # The next status tries again.
+        self.config = config
 
     def on_receiver_end(self, process):
         if process is not self.receiver:
