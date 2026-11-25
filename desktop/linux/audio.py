@@ -5,12 +5,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from array import array
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is shared with Windows, one folder up
 
-from core import CHANNELS, CHUNK, HANGOVER, RATE, SILENCE, STABLE_CHUNK, number_chunks, split_chunks  # noqa: E402,F401
+from core import CHANNELS, CHUNK, HANGOVER, Levels, RATE, SILENCE, STABLE_CHUNK, number_chunks, split_chunks  # noqa: E402,F401
 
 SINK = 'musubi'
 LOAD = ['pactl', 'load-module', 'module-null-sink', f'sink_name={SINK}',
@@ -18,41 +17,6 @@ LOAD = ['pactl', 'load-module', 'module-null-sink', f'sink_name={SINK}',
 # The latency request also shrinks PipeWire's quantum to 256 frames, so reads arrive every 5.3 ms instead of 21.
 CAPTURE = ['parec', '-d', f'{SINK}.monitor', '--raw', '--format=s16le', f'--rate={RATE}',
            f'--channels={CHANNELS}', '--latency-msec=5']
-
-
-class Levels:
-    """Peaks of each channel of the PCM, 0..1, at most `interval` apart.
-
-    Peak because max() and min() over array slices run in C, so a 5 ms chunk costs a few microseconds.
-    """
-
-    def __init__(self, interval=1 / 25, channels=CHANNELS):
-        self.interval = interval
-        self.channels = channels
-        self.peak = [0] * channels
-        self.last = 0.0
-        self.live = False
-
-    def add(self, chunk):
-        samples = array('h', chunk)
-        for side in range(self.channels):
-            channel = samples[side::self.channels]
-            self.peak[side] = max(self.peak[side], max(channel), -min(channel))
-
-    def poll(self, now):
-        """Return a peak per channel when one is due, a single all-zero one once the sound has stopped, else None."""
-        if now - self.last < self.interval:
-            return None
-        self.last = now
-        peaks = self.peak
-        self.peak = [0] * self.channels
-        if any(peaks):
-            self.live = True
-        elif self.live:
-            self.live = False
-        else:
-            return None
-        return tuple(round(min(peak / 32767, 1), 2) for peak in peaks)
 
 
 class PhoneAudio:

@@ -153,7 +153,7 @@ class Console:
                 self.rumbled = True
                 log.info('first rumble from a game: %s %s', large, small)
             self.bridge.set_rumble(large * 257, small * 257, slot=slot)
-        elif details[0].lower() in ('y', 'yes'):
+        elif kind == 'line' and details[0].lower() in ('y', 'yes'):
             pending = self.bridge.status()['pending']
             if not pending:
                 self.say('No phone is waiting.')
@@ -233,6 +233,30 @@ def log_network():
         log.info('%s', line)
 
 
+def setup_log():
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=256 * 1024, backupCount=1, encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
+def ensure_firewall(say=lambda _: None):
+    """Asks for the firewall rule if this exe has none, and logs the network on a thread."""
+    if not getattr(sys, 'frozen', False):
+        log.info('firewall check skipped, not frozen')
+    elif firewall.rule_ok(sys.executable):
+        log.info('firewall rule found')
+    else:
+        say('Windows will ask for permission so phones can reach Musubi through the firewall.')
+        if firewall.ask_to_open(sys.executable):
+            log.info('firewall rule added')
+        else:
+            log.warning('firewall rule missing, permission refused or failed')
+            say('Without that permission, phones may not reach Musubi. It will ask again next time.')
+    threading.Thread(target=log_network, daemon=True).start()
+
+
 def run():
     keep_running_when_clicked()
     print(f'Musubi for Windows, test build ({BUILD})')
@@ -247,18 +271,7 @@ def run():
         print(f'ViGEmBus driver: {ex}')
         print('The controller will not work until that is fixed. Then start Musubi again.')
 
-    if not getattr(sys, 'frozen', False):
-        log.info('firewall check skipped, not frozen')
-    elif firewall.rule_ok(sys.executable):
-        log.info('firewall rule found')
-    else:
-        print('Windows will ask for permission so phones can reach Musubi through the firewall.')
-        if firewall.ask_to_open(sys.executable):
-            log.info('firewall rule added')
-        else:
-            log.warning('firewall rule missing, permission refused or failed')
-            print('Without that permission, phones may not reach Musubi. It will ask again next time.')
-    threading.Thread(target=log_network, daemon=True).start()
+    ensure_firewall(print)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -298,11 +311,7 @@ def run():
 def main():
     if '--firewall' in sys.argv:
         sys.exit(0 if firewall.open_port(sys.executable) else 1)
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=256 * 1024, backupCount=1, encoding='utf-8')
-    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
-    log.addHandler(handler)
-    log.setLevel(logging.INFO)
+    setup_log()
     try:
         run()
     except KeyboardInterrupt:

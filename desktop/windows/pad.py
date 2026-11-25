@@ -58,6 +58,10 @@ def load():
     return lib
 
 
+class DriverMissing(OSError):
+    """ViGEmBus is not installed, which the user can fix, unlike a plug-in that failed."""
+
+
 class Pad:
     """One Xbox 360 pad. `on_rumble(large, small)` gets motor levels 0..255 on a driver thread."""
 
@@ -77,7 +81,7 @@ class Pad:
         self.client = self.lib.vigem_alloc()
         error = self.lib.vigem_connect(self.client)
         if error == BUS_NOT_FOUND:
-            raise OSError(f'The ViGEmBus driver is not installed. Get it from {DRIVER_PAGE}')
+            raise DriverMissing(f'The ViGEmBus driver is not installed. Get it from {DRIVER_PAGE}')
         self._check(error, 'connect to the driver')
         self.target = self.lib.vigem_target_x360_alloc()
         self._check(self.lib.vigem_target_add(self.client, self.target), 'plug in the virtual pad')
