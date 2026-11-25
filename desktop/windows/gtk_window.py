@@ -34,11 +34,30 @@ sys.modules['system'] = win_system
 try:
     import window  # noqa: E402
     __import__('gi').require_version('PangoCairo', '1.0')
-    from gi.repository import GLib, Gtk, Pango, PangoCairo  # noqa: E402
+    from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo  # noqa: E402
 except Exception:
     # A windowed exe has nowhere else to say why GTK did not load.
     log.exception('could not load the window')
     raise
+
+# Windows fonts, and dark title bar buttons that window.py's global button rule would otherwise box in.
+WINDOWS_CSS = """
+window, .root { font-family: "Segoe UI", sans-serif; }
+.address, .mono, .mono-subnet, .readout { font-family: "Consolas", monospace; }
+headerbar, .titlebar { background: #0D0C0A; background-image: none; color: #E6DEC8;
+                       border-bottom: 1px solid #332E28; box-shadow: none; min-height: 36px; padding: 0 6px; }
+headerbar:backdrop, .titlebar:backdrop { background: #0D0C0A; background-image: none; color: #8F8573; }
+windowcontrols { border-spacing: 2px; }
+windowcontrols button { min-height: 28px; min-width: 32px; margin: 0; padding: 0; border: none; border-radius: 6px;
+                        background: transparent; background-image: none; box-shadow: none; color: #E6DEC8; }
+headerbar windowcontrols.end > button:last-child { padding-right: 0; }
+windowcontrols button > image { min-height: 16px; min-width: 16px; border-radius: 0; background: none; }
+windowcontrols button:hover { background: #171512; }
+windowcontrols button:active { background: #332E28; }
+windowcontrols button.close:hover { background: #E04F3E; color: #0D0C0A; }
+windowcontrols button.close:active { background: #B5382A; color: #F4EDDA; }
+windowcontrols button:backdrop { color: #8F8573; }
+"""
 
 
 class Text:
@@ -47,7 +66,8 @@ class Text:
     def __init__(self, cr):
         self.cr = cr
         self.font = Pango.FontDescription()
-        self.font.set_family('Roboto, Segoe UI, sans-serif')
+        # PangoWin32 drops a comma list whose first font is missing and falls back to generic Sans.
+        self.font.set_family('Segoe UI')
 
     def __getattr__(self, name):
         return getattr(self.cr, name)
@@ -125,8 +145,18 @@ class App(window.App):
 
     def do_startup(self):
         window.App.do_startup(self)
-        # The title bar is GTK's own on Windows, and it should be dark like the rest.
-        Gtk.Settings.get_default().set_property('gtk-application-prefer-dark-theme', True)
+        provider = Gtk.CssProvider()
+        provider.load_from_string(WINDOWS_CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_USER + 2)
+        # Windows needs GTK told to draw a dark title bar and to hint font metrics for crisp text at 1080p.
+        settings = Gtk.Settings.get_default()
+        if hasattr(Gtk, 'InterfaceColorScheme'):
+            settings.set_property('gtk-interface-color-scheme', Gtk.InterfaceColorScheme.DARK)
+        else:
+            settings.set_property('gtk-application-prefer-dark-theme', True)
+        if settings.find_property('gtk-hint-font-metrics') is not None:
+            settings.set_property('gtk-hint-font-metrics', True)
 
     def do_activate(self):
         if self.window is not None:

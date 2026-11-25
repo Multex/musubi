@@ -263,7 +263,7 @@ def run():
     print(f'Log file: {LOG_FILE}')
     log.info('build %s, %s, python %s, %s MB', BUILD, platform.platform(), platform.python_version(), memory_mb())
     try:
-        win_pad.Pad(lambda large, small: None).close()
+        win_pad.check_driver()
         log.info('driver found')
         print('ViGEmBus driver: found.')
     except OSError as ex:

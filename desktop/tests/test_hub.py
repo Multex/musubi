@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import paths  # noqa: F401
 import core
@@ -194,6 +195,20 @@ class HubTest(unittest.TestCase):
         self.thread.join(2)
         self.assertFalse(self.thread.is_alive())
         self.assertIsNone(self.hub.receiver)
+
+
+class DriverCheckTest(unittest.TestCase):
+    def test_the_driver_check_never_plugs_in_a_pad(self):
+        with mock.patch.object(hub.win_pad, 'Pad') as pad, mock.patch.object(hub.win_pad, 'check_driver') as check:
+            self.assertFalse(hub.driver_missing())
+            check.side_effect = hub.win_pad.DriverMissing('not installed')
+            with self.assertLogs('musubi', 'WARNING'):
+                self.assertTrue(hub.driver_missing())
+            check.side_effect = OSError('timed out')
+            with self.assertLogs('musubi', 'WARNING'):
+                self.assertFalse(hub.driver_missing())
+        self.assertEqual(check.call_count, 3)
+        pad.assert_not_called()
 
 
 if __name__ == '__main__':

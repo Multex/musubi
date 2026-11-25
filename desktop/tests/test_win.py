@@ -300,13 +300,13 @@ class XInputState(ctypes.Structure):
 
 
 class PlugTest(unittest.TestCase):
-    def pad(self, plug_results):
+    def pad(self, plug_results, on_rumble=lambda large, small: None):
         lib = mock.MagicMock()
         lib.vigem_connect.return_value = win_pad.SUCCESS
         lib.vigem_target_x360_register_notification.return_value = win_pad.SUCCESS
         lib.vigem_target_add.side_effect = plug_results
         with mock.patch.object(win_pad, 'load', return_value=lib):
-            return win_pad.Pad(lambda large, small: None), lib
+            return win_pad.Pad(on_rumble), lib
 
     def test_a_plug_in_that_times_out_is_tried_again_on_a_new_connection(self):
         pad, lib = self.pad([0xE0000007, win_pad.SUCCESS])
@@ -316,6 +316,49 @@ class PlugTest(unittest.TestCase):
     def test_it_gives_up_after_three_tries(self):
         with self.assertRaisesRegex(OSError, 'plug in the virtual pad'):
             self.pad([0xE0000007] * 3)
+
+    def driver(self, connect_result):
+        lib = mock.MagicMock()
+        lib.vigem_connect.return_value = connect_result
+        patcher = mock.patch.object(win_pad, 'load', return_value=lib)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return lib
+
+    def test_check_driver_connects_without_plugging_in_a_pad(self):
+        lib = self.driver(win_pad.SUCCESS)
+        win_pad.check_driver()
+        lib.vigem_connect.assert_called_once()
+        lib.vigem_disconnect.assert_called_once()
+        lib.vigem_free.assert_called_once()
+        lib.vigem_target_add.assert_not_called()
+
+    def test_check_driver_reports_missing_driver(self):
+        lib = self.driver(win_pad.BUS_NOT_FOUND)
+        with self.assertRaises(win_pad.DriverMissing):
+            win_pad.check_driver()
+        lib.vigem_disconnect.assert_not_called()
+        lib.vigem_target_add.assert_not_called()
+        lib.vigem_free.assert_called_once()
+
+    def test_check_driver_raises_on_other_connect_error(self):
+        lib = self.driver(0xE0000007)
+        with self.assertRaises(OSError) as raised:
+            win_pad.check_driver()
+        self.assertNotIsInstance(raised.exception, win_pad.DriverMissing)
+        lib.vigem_disconnect.assert_not_called()
+        lib.vigem_free.assert_called_once()
+
+    def test_notify_logs_assigned_xinput_player_once_and_forwards_rumble(self):
+        rumbles = []
+        pad, lib = self.pad([win_pad.SUCCESS], lambda large, small: rumbles.append((large, small)))
+        notify = lib.vigem_target_x360_register_notification.call_args.args[2]
+        with self.assertLogs('musubi', 'INFO') as logs:
+            notify(None, None, 10, 20, 2, None)
+            notify(None, None, 30, 40, 2, None)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn('XInput player 3', logs.output[0])
+        self.assertEqual(rumbles, [(10, 20), (30, 40)])
 
 
 class FirewallTest(unittest.TestCase):

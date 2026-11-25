@@ -35,7 +35,7 @@ def driver_missing():
     """Whether a virtual pad can't be made because ViGEmBus isn't installed. Any other failure shows up when a
     controller connects, with its own message."""
     try:
-        win_pad.Pad(lambda large, small: None).close()
+        win_pad.check_driver()
     except win_pad.DriverMissing:
         log.warning('the ViGEmBus driver is not installed')
         return True

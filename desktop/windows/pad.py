@@ -1,5 +1,6 @@
 """The virtual Xbox 360 pad on Windows, through the ViGEmBus driver."""
 import ctypes
+import logging
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ PLUG_TRIES = 3
 # Same bit order as the packet: A, B, X, Y, LB, RB, Back, Start, Guide, left stick, right stick.
 BUTTON_BITS = [0x1000, 0x2000, 0x4000, 0x8000, 0x0100, 0x0200, 0x0020, 0x0010, 0x0400, 0x0040, 0x0080]
 DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT = 0x1, 0x2, 0x4, 0x8
+log = logging.getLogger('musubi')
 
 
 class Report(ctypes.Structure):
@@ -62,12 +64,32 @@ class DriverMissing(OSError):
     """ViGEmBus is not installed, which the user can fix, unlike a plug-in that failed."""
 
 
+def check_driver():
+    """Connects to ViGEmBus without plugging in a virtual pad. Raises DriverMissing if it isn't installed."""
+    lib = load()
+    client = lib.vigem_alloc()
+    connected = False
+    try:
+        error = lib.vigem_connect(client)
+        if error == BUS_NOT_FOUND:
+            raise DriverMissing(f'The ViGEmBus driver is not installed. Get it from {DRIVER_PAGE}')
+        if error != SUCCESS:
+            raise OSError(f'ViGEm could not connect to the driver (error {error:#x}).')
+        connected = True
+    finally:
+        if connected:
+            lib.vigem_disconnect(client)
+        if client:
+            lib.vigem_free(client)
+
+
 class Pad:
     """One Xbox 360 pad. `on_rumble(large, small)` gets motor levels 0..255 on a driver thread."""
 
     def __init__(self, on_rumble):
         self.lib = load()
         self.client = self.target = None
+        self.xinput_slot = None
         for attempt in range(PLUG_TRIES):
             try:
                 self._plug(on_rumble)
@@ -85,8 +107,15 @@ class Pad:
         self._check(error, 'connect to the driver')
         self.target = self.lib.vigem_target_x360_alloc()
         self._check(self.lib.vigem_target_add(self.client, self.target), 'plug in the virtual pad')
+
+        def on_notify(client, target, large, small, led, data):
+            if led != self.xinput_slot:
+                self.xinput_slot = led
+                log.info('virtual pad assigned to XInput player %d', led + 1)
+            on_rumble(large, small)
+
         # Kept on self: ctypes frees a callback nobody holds, and the driver would call freed memory.
-        self.notify = NOTIFY(lambda client, target, large, small, led, data: on_rumble(large, small))
+        self.notify = NOTIFY(on_notify)
         self._check(self.lib.vigem_target_x360_register_notification(self.client, self.target, self.notify, None),
                     'listen for rumble')
 
@@ -98,6 +127,7 @@ class Pad:
         self.lib.vigem_target_x360_update(self.client, self.target, Report(*xbox_report(state)))
 
     def close(self):
+        self.xinput_slot = None
         if self.target:
             self.lib.vigem_target_x360_unregister_notification(self.target)
             self.lib.vigem_target_remove(self.client, self.target)
