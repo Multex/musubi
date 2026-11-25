@@ -175,9 +175,20 @@ class App(window.App):
         log.info('window shown after %.1f s', time.perf_counter() - STARTED)
 
     def read_hub(self):
-        for line in sys.stdin.buffer:
-            if line.strip():
-                GLib.idle_add(self.on_hub_line, line)
+        # Raw os.read avoids holding BufferedReader's lock on sys.stdin during shutdown.
+        fd = sys.stdin.fileno()
+        partial = b''
+        while True:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                break
+            if not data:
+                break
+            *lines, partial = (partial + data).split(b'\n')
+            for line in lines:
+                if line.strip():
+                    GLib.idle_add(self.on_hub_line, line)
         GLib.idle_add(self.quit)  # The hub quit or died.
 
     def on_hub_line(self, line):
@@ -204,9 +215,18 @@ class App(window.App):
 def main():
     log.info('window process, python %s, GTK %s.%s.%s', sys.version.split()[0], Gtk.get_major_version(),
              Gtk.get_minor_version(), Gtk.get_micro_version())
+    code = 0
     try:
-        App().run([sys.argv[0]])
+        code = App().run([sys.argv[0]]) or 0
     except Exception:
         log.exception('crashed')
-        raise
-    log.info('closed')
+        code = 1
+    else:
+        log.info('closed')
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+    # Skip Python's stdin teardown: on Windows, closing stdin while read_hub blocks in ReadFile hangs or aborts.
+    os._exit(code)

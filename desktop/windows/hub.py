@@ -151,6 +151,7 @@ class Hub:
         self.tray = None
         self.asking = []
         self.outbox = None
+        self.reader = None
         self.writer = None
         self.events = queue.SimpleQueue()
 
@@ -199,7 +200,8 @@ class Hub:
         # One queue per window, so an old writer thread can't take the next window's lines.
         self.outbox = queue.Queue(maxsize=256)
         log.info('window started')
-        threading.Thread(target=self.read_window, args=(self.window,), daemon=True).start()
+        self.reader = threading.Thread(target=self.read_window, args=(self.window,), daemon=True)
+        self.reader.start()
         self.writer = threading.Thread(target=self.write_window, args=(self.window.stdin, self.outbox), daemon=True)
         self.writer.start()
         self.send_state()
@@ -274,6 +276,8 @@ class Hub:
     def close_window(self):
         window, self.window = self.window, None
         outbox, self.outbox = self.outbox, None
+        reader, self.reader = self.reader, None
+        writer, self.writer = self.writer, None
         if window is None:
             return
         try:
@@ -285,9 +289,10 @@ class Hub:
                 pass
             outbox.put_nowait(None)
         # Closing stdin waits for a write in progress, which only ends if a stuck window dies first.
-        self.writer.join(1)
-        if self.writer.is_alive():
-            window.kill()
+        if writer is not None:
+            writer.join(1)
+            if writer.is_alive():
+                window.kill()
         try:
             window.stdin.close()
         except (OSError, ValueError):
@@ -297,6 +302,8 @@ class Hub:
         except subprocess.TimeoutExpired:
             window.kill()
             window.wait()
+        if reader is not None and threading.current_thread() is not reader:
+            reader.join(1)
         try:
             window.stdout.close()
         except OSError:

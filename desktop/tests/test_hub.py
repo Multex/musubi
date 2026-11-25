@@ -3,6 +3,8 @@
 import json
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -318,6 +320,39 @@ class DriverCheckTest(unittest.TestCase):
                 self.assertFalse(hub.driver_missing())
         self.assertEqual(check.call_count, 3)
         pad.assert_not_called()
+
+
+class WindowExitTest(unittest.TestCase):
+    def test_window_exits_immediately_while_stdin_stays_open(self):
+        try:
+            import gi
+            gi.require_version('Gtk', '4.0')
+        except (ImportError, ValueError):
+            self.skipTest('needs GTK 4')
+        local_app_data = Path(tempfile.mkdtemp())
+        code = (
+            f"import sys, threading, time\n"
+            f"sys.path.insert(0, {str(paths.DESKTOP / 'windows')!r})\n"
+            "import gtk_window\n"
+            "def fake_run(self, _):\n"
+            "    threading.Thread(target=self.read_hub, daemon=True).start()\n"
+            "    time.sleep(0.05)\n"
+            "    return 0\n"
+            "gtk_window.App.run = fake_run\n"
+            "gtk_window.main()\n"
+        )
+        env = {**os.environ, 'LOCALAPPDATA': str(local_app_data)}
+        proc = subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+        try:
+            self.assertEqual(proc.wait(timeout=2), 0)
+            self.assertEqual(proc.stdout.read(), b'')
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            proc.stdin.close()
+            proc.stdout.close()
+        self.assertIn('closed', (local_app_data / 'musubi' / 'musubi-window.log').read_text(encoding='utf-8'))
 
 
 if __name__ == '__main__':
