@@ -91,6 +91,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -2874,8 +2875,15 @@ public class MainActivity extends Activity {
 
     private void finishCapture() {
         if (capture.isEmpty() || screen != REMAP) return;
+        int control = STEP_CONTROLS[step];
+        if (control == L2_BIT || control == R2_BIT) {
+            ButtonMap.pairTriggerAxis(capture, KeyEvent.KEYCODE_BUTTON_L2, ButtonMap.LEFT_TRIGGER,
+                claimed.containsKey(ButtonMap.LEFT_TRIGGER));
+            ButtonMap.pairTriggerAxis(capture, KeyEvent.KEYCODE_BUTTON_R2, ButtonMap.RIGHT_TRIGGER,
+                claimed.containsKey(ButtonMap.RIGHT_TRIGGER));
+        }
         history.add(pending.copy());
-        pending.assign(STEP_CONTROLS[step], capture);
+        pending.assign(control, capture);
         for (int input : capture) claimed.put(input, step);
         stepMapped[step] = true;
         capture.clear();
@@ -2886,6 +2894,7 @@ public class MainActivity extends Activity {
         handler.removeCallbacks(finishCapture);
         capture.clear();
         history.add(pending.copy());
+        pending.assign(STEP_CONTROLS[step], Collections.emptyList());
         stepMapped[step] = false;
         nextStep();
     }
