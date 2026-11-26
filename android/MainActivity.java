@@ -830,42 +830,41 @@ public class MainActivity extends Activity {
 
     /** One message from the PC, over Wi-Fi or the cable. Anything unknown is from a newer PC and skipped. */
     private void onPcMessage(byte[] data, int offset, int length) {
+        if (length < 4) return;
         ByteBuffer in = ByteBuffer.wrap(data, offset, length);
-        if (length == PING_SIZE) {
-            rttMs = (System.nanoTime() - in.getLong()) / 1000000;
-            lastPongAt = SystemClock.uptimeMillis();
-        } else if (length >= 4) {
-            int magic = in.getInt();
-            if (length >= AUDIO_HEADER && magic == ByteBuffer.wrap(AUDIO_MAGIC).getInt()) {
-                onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
-            } else if (length >= RUMBLE_SIZE && magic == ByteBuffer.wrap(RUMBLE_MAGIC).getInt()) {
-                // The pad's input doesn't reach the PC from the background, so neither does its rumble.
-                if (running && !backgrounded) {
-                    int rawStrong = in.getShort() & 0xffff, rawWeak = in.getShort() & 0xffff, ms = in.getShort() & 0xffff;
-                    int index = in.hasRemaining() ? (in.get() & 0xff) : 0;
-                    if (index < MAX_PLAYERS) {
-                        PadSlot slot = slots[index];
-                        if (slot.vibration) {
-                            int scale = slot.vibrationStrength;
-                            int strong = rawStrong * scale / 100, weak = rawWeak * scale / 100;
-                            rumble(slot.deviceId, strong, weak, ms);
-                            handler.post(() -> showRumble(slot, strong, weak, ms));
-                        }
+        int magic = in.getInt();
+        if (length >= AUDIO_HEADER && magic == ByteBuffer.wrap(AUDIO_MAGIC).getInt()) {
+            onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
+        } else if (length >= RUMBLE_SIZE && magic == ByteBuffer.wrap(RUMBLE_MAGIC).getInt()) {
+            // The pad's input doesn't reach the PC from the background, so neither does its rumble.
+            if (running && !backgrounded) {
+                int rawStrong = in.getShort() & 0xffff, rawWeak = in.getShort() & 0xffff, ms = in.getShort() & 0xffff;
+                int index = in.hasRemaining() ? (in.get() & 0xff) : 0;
+                if (index < MAX_PLAYERS) {
+                    PadSlot slot = slots[index];
+                    if (slot.vibration) {
+                        int scale = slot.vibrationStrength;
+                        int strong = rawStrong * scale / 100, weak = rawWeak * scale / 100;
+                        rumble(slot.deviceId, strong, weak, ms);
+                        handler.post(() -> showRumble(slot, strong, weak, ms));
                     }
                 }
-            } else if (length >= 5 && magic == ByteBuffer.wrap(MIC_CMD_MAGIC).getInt()) {
-                int command = in.get();
-                if (command >= 0 && command <= 2) handler.post(() -> onMicCommand(command));
-            } else if (magic == ByteBuffer.wrap(NAME_MAGIC).getInt()) {
-                String name = shorten(new String(data, in.position(), in.remaining(), StandardCharsets.UTF_8)
-                    .replaceAll("\\p{Cntrl}", "").trim());
-                if (!name.isEmpty()) handler.post(() -> {
-                    if (name.equals(usbPc.name)) return;
-                    usbPc.name = name;
-                    if (backgrounded && currentPc() == usbPc) showKeepAlive();
-                    render();
-                });
             }
+        } else if (length >= 5 && magic == ByteBuffer.wrap(MIC_CMD_MAGIC).getInt()) {
+            int command = in.get();
+            if (command >= 0 && command <= 2) handler.post(() -> onMicCommand(command));
+        } else if (magic == ByteBuffer.wrap(NAME_MAGIC).getInt()) {
+            String name = shorten(new String(data, in.position(), in.remaining(), StandardCharsets.UTF_8)
+                .replaceAll("\\p{Cntrl}", "").trim());
+            if (!name.isEmpty()) handler.post(() -> {
+                if (name.equals(usbPc.name)) return;
+                usbPc.name = name;
+                if (backgrounded && currentPc() == usbPc) showKeepAlive();
+                render();
+            });
+        } else if (length == PING_SIZE) {
+            rttMs = (System.nanoTime() - in.getLong(offset)) / 1000000;
+            lastPongAt = SystemClock.uptimeMillis();
         }
     }
 
