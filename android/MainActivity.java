@@ -580,6 +580,7 @@ public class MainActivity extends Activity {
 
     private void transportChanged() {
         nextPing = 0;
+        flush();
         lastPongAt = 0;
         targetSince = SystemClock.uptimeMillis();
         if (backgrounded) {
@@ -663,6 +664,10 @@ public class MainActivity extends Activity {
                 InetAddress address;
                 synchronized (lock) {
                     while (running && sender == Thread.currentThread()) {
+                        if (target == null && usbOut == null) {
+                            lock.wait();
+                            continue;
+                        }
                         long now = SystemClock.uptimeMillis();
                         boolean anyDirty = dirty;
                         for (int i = 0; !anyDirty && i < MAX_PLAYERS; i++) {
@@ -1645,8 +1650,10 @@ public class MainActivity extends Activity {
             } catch (IOException ignored) {
             }
         }
+        nextPing = 0;
         synchronized (lock) {
             target = address;
+            lock.notify();
         }
         targetSince = SystemClock.uptimeMillis();
         lastPongAt = 0;
