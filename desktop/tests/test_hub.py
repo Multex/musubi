@@ -355,5 +355,165 @@ class WindowExitTest(unittest.TestCase):
         self.assertIn('closed', (local_app_data / 'musubi' / 'musubi-window.log').read_text(encoding='utf-8'))
 
 
+class WindowsWindowUITest(unittest.TestCase):
+    def test_unplugged_mic_and_windows_copy_and_drawing(self):
+        try:
+            import cairo  # noqa: F401
+            import gi
+            gi.require_version('Gtk', '4.0')
+            gi.require_version('PangoCairo', '1.0')
+            from gi.repository import Gtk
+            if not Gtk.init_check():
+                self.skipTest('needs a display')
+        except (ImportError, ValueError):
+            self.skipTest('needs GTK 4 and PyCairo')
+
+        temp_dir = Path(tempfile.mkdtemp())
+        code = f"""
+import sys
+sys.path.insert(0, {str(paths.DESKTOP / 'windows')!r})
+import cairo
+from gi.repository import Gtk
+import gtk_window
+
+def all_labels(root):
+    out = []
+    if isinstance(root, Gtk.Label):
+        out.append(root.get_label())
+    child = root.get_first_child()
+    while child is not None:
+        out.extend(all_labels(child))
+        child = child.get_next_sibling()
+    return out
+
+def count_switches(root):
+    n = 1 if isinstance(root, Gtk.Switch) else 0
+    child = root.get_first_child()
+    while child is not None:
+        n += count_switches(child)
+        child = child.get_next_sibling()
+    return n
+
+app = gtk_window.App()
+app.register()
+app.build_window()
+app.local_ip = '192.168.1.20'
+
+# 1. Waiting state: custom sidebar nodes, no USB cable copy, Ignored phone still shows.
+app.on_event({{
+    'event': 'status',
+    'phone': None,
+    'pad': False,
+    'pads': [False, False, False, False],
+    'pad_error': None,
+    'pending': [{{'ip': '192.168.1.99', 'name': 'Ignored Pixel'}}],
+    'sound_enabled': True,
+    'cable_error': None,
+    'driver_missing': False,
+}})
+app.ignored = {{'192.168.1.99'}}
+app.refresh()
+
+assert isinstance(app.sound_node, gtk_window.SoundCordNode)
+assert isinstance(app.mic_node, gtk_window.UnpluggedCordNode)
+assert app.mic_caption.get_label() == 'Coming to Windows'
+waiting_labels = all_labels(app.panel)
+assert 'Phone and PC need the same Wi-Fi network.' in waiting_labels, waiting_labels
+assert not any('USB cable' in s or 'File transfer' in s for s in waiting_labels), waiting_labels
+assert 'Ignored phone' in waiting_labels, waiting_labels
+
+# 2. Connected with mic=1 and audio=False: cord stays unlit.
+phone = {{
+    'ip': '192.168.1.34',
+    'name': 'Galaxy A12',
+    'controller': None,
+    'controllers': [None, None, None, None],
+    'controller_known': True,
+    'rtt': 4,
+    'audio': False,
+    'delay': None,
+    'mic': 1,
+}}
+app.on_event({{
+    'event': 'status',
+    'phone': phone,
+    'pad': False,
+    'pads': [False, False, False, False],
+    'pad_error': None,
+    'pending': [],
+    'sound_enabled': True,
+    'cable_error': None,
+    'driver_missing': False,
+}})
+assert app.source_cord.line_active is False
+assert app.ctrl_node.line_above is False
+assert app.ctrl_node.line_below is False
+assert app.sound_node.line_above is False
+
+# 3. Connected with audio=True: Unplugged Mic & Windows Sound copy.
+phone['audio'] = True
+app.on_event({{
+    'event': 'status',
+    'phone': phone,
+    'pad': False,
+    'pads': [False, False, False, False],
+    'pad_error': None,
+    'pending': [],
+    'sound_enabled': True,
+    'cable_error': None,
+    'driver_missing': False,
+}})
+assert isinstance(app.overview_mic_area, gtk_window.UnpluggedMicArea)
+assert isinstance(app.mic_area, gtk_window.UnpluggedMicArea)
+assert app.mic_switch is None
+assert app.mic_mute is None
+assert app.overview_mic_value.get_label() == 'Unplugged on Windows'
+assert app.overview_mic_detail.get_label() == 'Needs a virtual mic driver first'
+assert app.mic_status.get_label() == 'Unplugged'
+assert app.mic_detail.get_label() == 'Coming to Windows'
+
+assert app.sound_value.get_label() == 'Playing'
+assert app.sound_detail.get_label() == "From this PC's default output"
+sound_labels = all_labels(app.sound_panel)
+assert "When off, Musubi stops listening to this PC's sound" in sound_labels, sound_labels
+assert 'Musubi copies whatever plays on your default output. Change it in the Windows sound settings.' in sound_labels, sound_labels
+assert not any('Musubi" output' in s for s in sound_labels), sound_labels
+
+app.on_event({{'event': 'mic_level', 'level': 0.9}})
+assert app.mic_area.left == 0.0
+
+# 4. Settings: Start with my PC has no switch; tray caption updates live; Open logs present.
+app.refresh_settings()
+settings_labels = all_labels(app.settings_panel)
+assert 'Start with my PC' in settings_labels, settings_labels
+assert 'Coming to Windows' in settings_labels, settings_labels
+assert 'Open logs' in settings_labels, settings_labels
+assert count_switches(app.settings_panel) == 1, count_switches(app.settings_panel)
+assert app.tray_caption.get_label() == 'Closing the window keeps Musubi on'
+app.on_tray_setting(False)
+assert app.tray_caption.get_label() == 'Closing the window stops Musubi'
+
+# 5. Cairo drawing smoke check on all custom widgets.
+for widget, w, h in (
+    (app.sound_node, 24, 48),
+    (app.mic_node, 24, 48),
+    (app.overview_mic_area, 80, 72),
+    (app.mic_area, 120, 108),
+):
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+    cr = cairo.Context(surf)
+    widget.draw(widget, cr, w, h)
+
+app.window.destroy()
+"""
+        env = {**os.environ, 'LOCALAPPDATA': str(temp_dir), 'XDG_CONFIG_HOME': str(temp_dir)}
+        proc = subprocess.run([sys.executable, '-c', code], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              env=env, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        log_text = (temp_dir / 'musubi' / 'musubi-window.log').read_text(encoding='utf-8')
+        for bad in ('Traceback', 'ERROR', 'CRITICAL'):
+            self.assertNotIn(bad, log_text)
+
+
 if __name__ == '__main__':
     unittest.main()
