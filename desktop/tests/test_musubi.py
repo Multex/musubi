@@ -508,6 +508,13 @@ class BridgeTest(unittest.TestCase):
         bridge.on_datagram(hello(), self.PHONE)
         self.assertIn('uinput', bridge.status()['pad_error'])
 
+    def test_uinput_error_from_make_pad_is_reported_instead_of_crashing(self):
+        with mock.patch.object(musubi, 'Pad', side_effect=musubi.UInputError('"/dev/uinput" cannot be opened for writing')):
+            bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status, clock=lambda: self.now)
+            bridge.on_datagram(hello(), self.PHONE)
+        self.assertIn('/dev/uinput', bridge.status()['pad_error'])
+        self.assertIsNone(bridge.pad)
+
     def test_multi_pad_creates_slots_in_order_and_routes_input_independently(self):
         inputs = []
         self.bridge.on_input = lambda slot, state: inputs.append((slot, state))

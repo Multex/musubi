@@ -68,8 +68,11 @@ class Pad(UInput):
 
 def make_pad(slot=0, name=None):
     name = name or ('Musubi' if slot == 0 else f'Musubi {slot + 1}')
-    return Pad({e.EV_KEY: BUTTONS, e.EV_ABS: AXES, e.EV_FF: [e.FF_RUMBLE]}, name=name, vendor=0x045e,
-               product=0x028e, version=0x110, bustype=e.BUS_USB, max_effects=MAX_EFFECTS)
+    try:
+        return Pad({e.EV_KEY: BUTTONS, e.EV_ABS: AXES, e.EV_FF: [e.FF_RUMBLE]}, name=name, vendor=0x045e,
+                   product=0x028e, version=0x110, bustype=e.BUS_USB, max_effects=MAX_EFFECTS)
+    except UInputError as ex:
+        raise OSError(str(ex)) from ex
 
 
 class _FfState:
