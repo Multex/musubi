@@ -208,7 +208,11 @@ class UnpluggedMicArea(window.MicArea):
 
 class App(window.App):
     driver_missing = False
+    sound_error = None
     tray_caption = None
+
+    def sound_alert(self, phone):
+        return bool(phone and self.sound_enabled() and phone.get('audio') and self.sound_error)
 
     def build_sidebar(self):
         sidebar = window.App.build_sidebar(self)
@@ -217,9 +221,16 @@ class App(window.App):
         return sidebar
 
     def update_sidebar(self, state, phone, pending):
-        # Mask phone mic so phones with mic enabled never light up Windows cord segments.
-        win_phone = {**phone, 'mic': None} if phone else phone
+        alert = state == 'connected' and self.sound_alert(phone)
+        # Mask phone mic (and failed sound) so inactive Windows features never light up cord segments.
+        win_phone = ({**phone, 'mic': None, 'audio': False if alert else phone.get('audio')}
+                     if phone else phone)
         window.App.update_sidebar(self, state, win_phone, pending)
+        if alert:
+            self.sound_caption.set_label("Can't play")
+            self.sound_caption.add_css_class('alert')
+        else:
+            self.sound_caption.remove_css_class('alert')
         self.mic_caption.set_label('Coming to Windows')
         self.mic_btn.update_property([Gtk.AccessibleProperty.LABEL], ['Mic, Coming to Windows'])
 
@@ -297,9 +308,24 @@ class App(window.App):
 
     def sound_state(self, phone):
         on, value, detail = window.App.sound_state(self, phone)
+        if on and self.sound_error:
+            return False, "Can't play", self.sound_error
         if on:
             return on, value, "From this PC's default output"
         return on, value, detail
+
+    def has_sound_delay(self, phone):
+        return not self.sound_error and window.App.has_sound_delay(self, phone)
+
+    def update_sound(self, phone):
+        window.App.update_sound(self, phone)
+        alert = self.sound_alert(phone)
+        for label in (self.overview_sound_value, self.sound_value):
+            if label is not None:
+                if alert:
+                    label.add_css_class('alert')
+                else:
+                    label.remove_css_class('alert')
 
     def panel_sound(self, phone):
         window.App.panel_sound(self, phone)
@@ -327,6 +353,7 @@ class App(window.App):
     def on_event(self, event):
         if event['event'] == 'status':
             self.driver_missing = bool(event.get('driver_missing'))
+            self.sound_error = event.get('sound_error')
         window.App.on_event(self, event)
 
     def panel_controllers(self, phone):

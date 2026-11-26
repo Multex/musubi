@@ -30,7 +30,7 @@ DEFAULT = object()  # Stands for "this OS's tray", because None already means no
 
 def idle_status(sound_enabled):
     return {'event': 'status', 'phone': None, 'pad': False, 'pads': [False] * core.MAX_PLAYERS, 'pad_error': None,
-            'pending': [], 'sound_enabled': sound_enabled}
+            'pending': [], 'sound_enabled': sound_enabled, 'sound_error': None}
 
 
 def driver_missing():
@@ -71,7 +71,7 @@ class Receiver(win_main.Console):
         if self.driver_missing:
             status['pad_error'] = NO_DRIVER
         self.emit({'event': 'status', **status, 'cable_error': None, 'sound_enabled': self.config['sound_enabled'],
-                   'driver_missing': self.driver_missing})
+                   'sound_error': self.sound.error, 'driver_missing': self.driver_missing})
 
     def on_status(self):
         super().on_status()
@@ -102,10 +102,15 @@ class Receiver(win_main.Console):
             self.watching = bool(command['watch'])
         if 'sound' in command:
             self.config['sound_enabled'] = bool(command['sound'])
+            core.sync_sound(self.sound, self.config['sound_enabled'] and self.bridge.wants_audio())
+            self.sound_said = (self.sound.capturing, self.sound.error)
             self.send_status()
 
     def step(self, timeout=core.TICK):
+        sound_said = self.sound_said
         super().step(timeout)
+        if self.sound_said != sound_said:
+            self.next_status = 0
         now = time.monotonic()
         if self.watching:
             pair = self.levels.poll(now)

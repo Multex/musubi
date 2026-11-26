@@ -15,6 +15,7 @@ from unittest import mock
 import paths  # noqa: F401
 import core
 import hub
+import sound as win_sound
 from core import HELLO, HELLO_MAGIC, PACKET
 from test_win import FakePad, FakeSound, hello as slots_hello
 
@@ -205,6 +206,26 @@ class HubTest(unittest.TestCase):
         self.hello()
         self.status()
         self.assertFalse(self.sounds[0].capturing)
+
+    def test_sound_error_reaches_the_window_and_clears_when_sound_stops(self):
+        def failing_open(_on_pcm):
+            raise OSError('PC sound needs 48000 Hz')
+
+        def make_failing_sound(on_pcm):
+            snd = win_sound.Sound(on_pcm, open_capture=failing_open)
+            self.sounds.append(snd)
+            return snd
+
+        with mock.patch.object(self, 'make_sound', side_effect=make_failing_sound), \
+                mock.patch.object(win_sound.log, 'error') as log_error:
+            self.start(['127.0.0.1'])
+            self.hello(features=core.FEATURE_AUDIO)
+            failed = self.status(lambda event: event.get('sound_error'))
+            self.assertEqual(failed['sound_error'], 'PC sound needs 48000 Hz')
+            self.wait_for(lambda: log_error.called)
+            self.command(sound=False)
+            cleared = self.status(lambda event: event['sound_enabled'] is False)
+            self.assertIsNone(cleared['sound_error'])
 
     def test_stop_frees_the_port_and_start_takes_it_back(self):
         self.start()
@@ -481,6 +502,61 @@ assert not any('Musubi" output' in s for s in sound_labels), sound_labels
 
 app.on_event({{'event': 'mic_level', 'level': 0.9}})
 assert app.mic_area.left == 0.0
+
+# 3b. Sound error shows Can't play alert in Sidebar, Overview, and Sound panel, then recovers cleanly.
+phone = {{**phone, 'audio': True, 'delay': 80}}
+app.on_event({{
+    'event': 'status',
+    'phone': phone,
+    'pad': False,
+    'pads': [False, False, False, False],
+    'pad_error': None,
+    'pending': [],
+    'sound_enabled': True,
+    'sound_error': 'PC sound needs 48000 Hz',
+    'cable_error': None,
+    'driver_missing': False,
+}})
+assert app.sound_caption.get_label() == "Can't play"
+assert app.sound_caption.has_css_class('alert')
+assert app.source_cord.line_active is False
+assert app.sound_node.state == 'idle'
+assert app.sound_node.line_above is False
+assert app.overview_sound_value.get_label() == "Can't play"
+assert app.overview_sound_value.has_css_class('alert')
+assert app.overview_sound_detail.get_label() == 'PC sound needs 48000 Hz'
+assert app.overview_headphones.mode == 'off'
+assert app.overview_delay.get_visible() is False
+assert app.sound_value.get_label() == "Can't play"
+assert app.sound_value.has_css_class('alert')
+assert app.sound_detail.get_label() == 'PC sound needs 48000 Hz'
+assert app.sound_headphones.mode == 'off'
+assert app.sound_delay.get_label() == ''
+
+app.on_event({{
+    'event': 'status',
+    'phone': phone,
+    'pad': False,
+    'pads': [False, False, False, False],
+    'pad_error': None,
+    'pending': [],
+    'sound_enabled': True,
+    'sound_error': None,
+    'cable_error': None,
+    'driver_missing': False,
+}})
+assert app.sound_caption.get_label() == 'Playing'
+assert not app.sound_caption.has_css_class('alert')
+assert app.sound_node.state == 'live'
+assert app.overview_sound_value.get_label() == 'Playing'
+assert not app.overview_sound_value.has_css_class('alert')
+assert app.overview_sound_detail.get_label() == "From this PC's default output"
+assert app.overview_headphones.mode == 'on'
+assert app.sound_value.get_label() == 'Playing'
+assert not app.sound_value.has_css_class('alert')
+assert app.sound_detail.get_label() == "From this PC's default output"
+assert app.sound_headphones.mode == 'on'
+assert app.sound_delay.get_label() == 'Delay ≈ 80 ms'
 
 # 4. Settings: Start with my PC has no switch; tray caption updates live; Open logs present.
 app.refresh_settings()
