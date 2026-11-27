@@ -1072,6 +1072,60 @@ class PhoneAudioTest(unittest.TestCase):
         self.assertEqual(self.pactl.calls[-1], ['pactl', 'unload-module', '42'])
         self.assertIsNone(self.sound.capture)
 
+    def test_stop_clears_failure_so_a_later_start_retries(self):
+        self.pactl.fail = True
+        with mock.patch('sys.stderr'):
+            self.sound.remove_stale()
+            self.sound.start()
+        self.assertTrue(self.sound.failed)
+        self.assertEqual(self.pactl.calls, [['pactl', 'list', 'short', 'modules']])
+        self.sound.stop()
+        self.assertFalse(self.sound.failed)
+        self.pactl.fail = False
+        self.sound.start()
+        self.assertEqual(self.pactl.calls[-1], audio.LOAD)
+        self.assertIs(self.sound.capture, self.capture)
+
+    def test_capture_that_dies_retries_only_after_stop(self):
+        self.sound.start()
+        with mock.patch('sys.stderr'), mock.patch.object(audio.os, 'read', return_value=b''):
+            self.assertEqual(self.sound.read(), [])
+        self.assertTrue(self.sound.failed)
+        calls = len(self.pactl.calls)
+        self.sound.start()
+        self.assertEqual(len(self.pactl.calls), calls)
+        self.sound.stop()
+        self.assertFalse(self.sound.failed)
+        self.sound.start()
+        self.assertEqual(self.pactl.calls[-1], audio.LOAD)
+        self.assertIs(self.sound.capture, self.capture)
+
+    def test_failed_popen_unloads_sink_and_does_not_retry_until_stop(self):
+        popen = mock.Mock(side_effect=OSError('parec missing'))
+        sound = audio.PhoneAudio(run=self.pactl, popen=popen)
+        with mock.patch('sys.stderr'):
+            sound.start()
+        self.assertEqual(self.pactl.calls, [audio.LOAD, ['pactl', 'unload-module', '42']])
+        self.assertTrue(sound.failed)
+        sound.start()
+        self.assertEqual(popen.call_count, 1)
+        sound.stop()
+        self.assertFalse(sound.failed)
+        sound.popen = mock.Mock(return_value=self.capture)
+        sound.start()
+        self.assertIs(sound.capture, self.capture)
+
+    def test_stop_clears_failure_even_when_unload_fails(self):
+        self.sound.start()
+        self.pactl.fail = True
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            self.sound.stop()
+        self.assertEqual(stderr.getvalue().count('\n'), 1)
+        self.assertFalse(self.sound.failed)
+        self.pactl.fail = False
+        self.sound.start()
+        self.assertIs(self.sound.capture, self.capture)
+
 
 if __name__ == '__main__':
     unittest.main()

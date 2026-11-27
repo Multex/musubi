@@ -518,6 +518,7 @@ public class MainActivity extends Activity {
     private void stopPlayer() {
         synchronized (audioLock) {
             player = null;
+            audioBroken = false;
             audio.reset();
             audioLock.notifyAll();
         }
@@ -981,8 +982,10 @@ public class MainActivity extends Activity {
         AudioTrack track = newTrack();
         if (track == null) {
             synchronized (audioLock) {
-                audioBroken = true;
-                if (player == self) player = null;
+                if (player == self) {
+                    audioBroken = true;
+                    player = null;
+                }
             }
             return;
         }
@@ -1050,6 +1053,9 @@ public class MainActivity extends Activity {
         } catch (InterruptedException | IllegalStateException stopped) {
         } finally {
             track.release();
+            synchronized (audioLock) {
+                if (player == self) player = null;
+            }
         }
     }
 

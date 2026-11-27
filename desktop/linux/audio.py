@@ -110,9 +110,9 @@ class PhoneAudio:
             self.capture = self.popen(CAPTURE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError) as ex:
             self._fail(ex)
-            self.stop()
+            self._close()
 
-    def stop(self):
+    def _close(self):
         if self.capture is not None:
             self.capture.terminate()
             self.capture.wait()
@@ -127,8 +127,12 @@ class PhoneAudio:
         self.buffered = b''
         self.quiet = HANGOVER
 
+    def stop(self):
+        self._close()
+        self.failed = False
+
     def _fail(self, ex):
-        """Sound is extra, so it gives up for this run and the pad carries on."""
+        """Sound is extra, so it gives up until stopped and the pad carries on."""
         if not self.failed:
             print(f'musubi: no phone audio: {ex}', file=sys.stderr)
         self.failed = True
@@ -141,7 +145,7 @@ class PhoneAudio:
         data = os.read(self.capture.stdout.fileno(), 65536)
         if not data:
             self._fail(RuntimeError('parec stopped'))
-            self.stop()
+            self._close()
             return []
         chunks, self.buffered = split_chunks(self.buffered + data, self.chunk)
         numbered = []
