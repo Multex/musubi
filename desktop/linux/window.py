@@ -1,9 +1,13 @@
 """Musubi's GTK window. gui.py starts it only while it's open and talks to it over stdin and stdout."""
 import json
+import logging
 import math
 import os
+import platform
+import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import gi
 
@@ -16,8 +20,12 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 import system  # noqa: E402
+from core import VERSION  # noqa: E402 (not through system, which Windows swaps for its own)
 
-VERSION = '0.10.0'
+log = logging.getLogger('musubi')
+if not log.handlers:
+    log.addHandler(logging.NullHandler())
+
 REPO = 'https://github.com/Multex/musubi'
 BUTTON_NAMES = ['A', 'B', 'X', 'Y', 'L1', 'R1', 'Select', 'Start', 'Guide', 'L3', 'R3']
 A, B, X, Y, L1, R1, SELECT, START, _, L3, R3 = range(11)
@@ -1013,6 +1021,8 @@ class App(Gtk.Application):
             return
         self.build_window()
         self.local_ip, self.network = system.read_network()
+        fw_kind, fw_sources = system.firewall_status()
+        log.info('network ip=%s subnet=%s firewall=%s rules=%d', self.local_ip, self.network, fw_kind, len(fw_sources))
         GLib.io_add_watch(sys.stdin.fileno(), GLib.PRIORITY_DEFAULT, GLib.IOCondition.IN | GLib.IOCondition.HUP,
                           self.on_hub_output)
         GLib.timeout_add_seconds(FIREWALL_CHECK_SECONDS, self.check_firewall)
@@ -2119,6 +2129,7 @@ class App(Gtk.Application):
         try:
             system.save_config(self.config)
         except OSError as ex:
+            log.error('could not save config: %s', ex)
             self.firewall_message = None
             self.error = f"Couldn't save your settings: {ex}"
         else:
@@ -2146,18 +2157,21 @@ class App(Gtk.Application):
         try:
             process = Gio.Subprocess.new(['pkexec', *system.open_port_command(self.network)],
                                          Gio.SubprocessFlags.STDERR_MERGE | Gio.SubprocessFlags.STDOUT_PIPE)
-        except GLib.Error:
+        except GLib.Error as ex:
+            log.warning('pkexec failed to launch: %s', ex)
             self.on_open_port_failed()
             return
         process.communicate_utf8_async(None, None, self.on_port_opened)
 
     def on_port_opened(self, process, result):
+        output = None
         try:
-            process.communicate_utf8_finish(result)
+            _, output, _ = process.communicate_utf8_finish(result)
             worked = process.get_successful()
         except GLib.Error:
             worked = False
         if worked:
+            log.info('firewall port opened for %s', self.network)
             self.blocked = set()
             # The log still holds the old blocks for a while, and they'd bring this screen back.
             self.firewall_dismissed = True
@@ -2165,6 +2179,7 @@ class App(Gtk.Application):
             self.refresh()
             self.refresh_settings()
         else:
+            log.warning('firewall open failed: %s', (output or '').strip() or 'cancelled or failed')
             self.on_open_port_failed()
 
     def on_open_port_failed(self):
@@ -2267,6 +2282,12 @@ class App(Gtk.Application):
         about_box.append(text('About', 'caption', ellipsize=True))
         about_box.append(self.link('Setup guide', f'{REPO}#setup'))
         about_box.append(self.link('Source code', REPO))
+        if self.log_dir() is not None:
+            logs = Gtk.Button(child=text('Open logs', 'link-text'), halign=Gtk.Align.START)
+            logs.add_css_class('row')
+            logs.update_property([Gtk.AccessibleProperty.LABEL], ['Open logs'])
+            logs.connect('clicked', lambda _: self.open_logs())
+            about_box.append(logs)
         right.append(about_box)
         right.append(spacer())
         version_line = text(f'Musubi {VERSION} · MIT license', 'mono', ellipsize=True)
@@ -2332,6 +2353,8 @@ class App(Gtk.Application):
         threading.Thread(target=work, daemon=True).start()
 
     def on_autostart_done(self, error):
+        if error:
+            log.warning('autostart update failed: %s', error)
         message = (f"That didn't work ({error}). Add this to your desktop's startup instead: "
                    f'{system.startup_command()}') if error else None
         if message != self.autostart_message:
@@ -2348,6 +2371,46 @@ class App(Gtk.Application):
         widget.add_css_class('row')
         widget.connect('clicked', lambda _: Gtk.UriLauncher(uri=url).launch(self.window, None, None))
         return widget
+
+    def log_dir(self):
+        return getattr(system, 'LOG_DIR', None)
+
+    def open_logs(self):
+        folder = self.log_dir()
+        if folder is None:
+            return
+        folder = Path(folder)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as ex:
+            log.warning('could not create the log folder: %s', ex)
+            return
+        if hasattr(Gtk, 'FileLauncher'):
+            launcher = Gtk.FileLauncher(file=Gio.File.new_for_path(str(folder)))
+            launcher.launch(self.window, None, self._on_open_logs_done, folder)
+        else:
+            self._open_folder_fallback(folder)
+
+    def _on_open_logs_done(self, launcher, result, folder):
+        try:
+            launcher.launch_finish(result)
+        except GLib.Error as ex:
+            if ex.matches(Gtk.DialogError.quark(), Gtk.DialogError.DISMISSED):
+                return
+            log.warning('could not open the log folder: %s', ex)
+            self._open_folder_fallback(folder)
+
+    def _open_folder_fallback(self, folder):
+        try:
+            if Gio.AppInfo.launch_default_for_uri(folder.as_uri(), None):
+                return
+        except GLib.Error as ex:
+            log.warning('no default app for the log folder: %s', ex)
+        try:
+            subprocess.Popen(['xdg-open', str(folder)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except OSError as ex:
+            log.warning('xdg-open failed: %s', ex)
 
     def open_phones(self):
         self.refresh_phones()
@@ -2442,4 +2505,16 @@ class App(Gtk.Application):
 
 
 def main():
-    return App().run([sys.argv[0]])
+    # Windows swaps in its own system module, which sets its log up itself.
+    if hasattr(system, 'setup_log'):
+        system.setup_log('musubi-window.log', rotate=False, capture_stderr=True)
+    log.info('musubi %s window started, %s, python %s, GTK %d.%d.%d, GSK_RENDERER %s, session %s', VERSION,
+             platform.platform(), platform.python_version(), Gtk.get_major_version(), Gtk.get_minor_version(),
+             Gtk.get_micro_version(), os.environ.get('GSK_RENDERER'), os.environ.get('XDG_SESSION_TYPE') or 'unknown')
+    try:
+        return App().run([sys.argv[0]])
+    except Exception:
+        log.exception('window crashed')
+        raise
+    finally:
+        log.info('window closed')

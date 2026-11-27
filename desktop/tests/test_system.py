@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 import ipaddress
 import json
+import logging
+import logging.handlers
+import os
 import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import paths  # noqa: F401
+import paths
+import system
 from system import (blocked_sources, covers, default_network, load_config, save_config, startup_command,
                     ufw_allowed_sources, ufw_enabled)
 
@@ -121,6 +127,80 @@ class AutostartTest(unittest.TestCase):
                 mock.patch('sys.executable', '/usr/bin/python3'):
             self.assertEqual(shlex.split(startup_command()),
                              ['/usr/bin/python3', '/home/me/My Apps/musubi/gui.py', '--hidden'])
+
+
+class LoggingTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.state = folder.name
+        self.dir = Path(folder.name) / 'state' / 'musubi'
+        self.log = logging.getLogger('musubi')
+        before, level = list(self.log.handlers), self.log.level
+
+        def restore():
+            for handler in [h for h in self.log.handlers if h not in before]:
+                self.log.removeHandler(handler)
+                handler.close()
+                if getattr(handler, 'stream', None):
+                    handler.stream.close()  # StreamHandler.close leaves its stream open.
+            self.log.setLevel(level)
+
+        self.addCleanup(restore)
+
+    def test_rotating_log_is_created_once(self):
+        handler = system.setup_log('musubi.log', log_dir=self.dir)
+        self.assertIsInstance(handler, logging.handlers.RotatingFileHandler)
+        self.assertEqual((handler.maxBytes, handler.backupCount), (system.LOG_MAX_BYTES, system.LOG_BACKUPS))
+        count = len(self.log.handlers)
+        self.assertIsNone(system.setup_log('musubi.log', log_dir=self.dir))
+        self.assertIsNone(system.setup_log('other.log', log_dir=self.dir))
+        self.assertEqual(len(self.log.handlers), count)
+        self.assertFalse((self.dir / 'other.log').exists())
+        self.log.info('hello %s', 'there')
+        self.assertRegex((self.dir / 'musubi.log').read_text(), r'^\d{4}-\d\d-\d\d [\d:,]+ INFO hello there\n$')
+
+    def test_the_window_log_starts_fresh(self):
+        self.dir.mkdir(parents=True)
+        path = self.dir / 'musubi-window.log'
+        path.write_text('last launch\n')
+        with mock.patch.object(system.os, 'dup2') as dup2:
+            system.setup_log(path.name, rotate=False, log_dir=self.dir)
+        self.log.info('this launch')
+        dup2.assert_not_called()
+        self.assertNotIn('last launch', path.read_text())
+        self.assertIn('this launch', path.read_text())
+
+    def test_stderr_goes_to_the_file_without_a_terminal(self):
+        terminal = mock.Mock(isatty=mock.Mock(return_value=False))
+        with mock.patch('sys.stderr', terminal), mock.patch.object(system.os, 'dup2') as dup2:
+            handler = system.setup_log('musubi-window.log', rotate=False, capture_stderr=True, log_dir=self.dir)
+            self.assertIs(sys.stderr, handler.stream)
+            dup2.assert_called_once_with(handler.stream.fileno(), 2)
+            print('a traceback', file=sys.stderr)
+        self.assertIn('a traceback', (self.dir / 'musubi-window.log').read_text())
+
+    def test_a_terminal_keeps_stderr(self):
+        terminal = mock.Mock(isatty=mock.Mock(return_value=True))
+        with mock.patch('sys.stderr', terminal), mock.patch.object(system.os, 'dup2') as dup2:
+            handler = system.setup_log('musubi-window.log', rotate=False, capture_stderr=True, log_dir=self.dir)
+            self.assertIs(sys.stderr, terminal)
+        dup2.assert_not_called()
+        self.assertIsInstance(handler, logging.FileHandler)
+
+    def test_an_unwritable_folder_is_not_fatal(self):
+        blocker = Path(self.state) / 'file'
+        blocker.write_text('')
+        count = len(self.log.handlers)
+        self.assertIsNone(system.setup_log('musubi.log', log_dir=blocker / 'musubi'))
+        self.assertIsNone(system.setup_log('musubi.log', rotate=False, log_dir=blocker))
+        self.assertEqual(len(self.log.handlers), count)
+
+    def test_the_log_folder_follows_xdg_state_home(self):
+        code = f"import sys; sys.path.insert(0, {str(paths.DESKTOP / 'linux')!r}); import system; print(system.LOG_DIR)"
+        result = subprocess.run([sys.executable, '-c', code], env={**os.environ, 'XDG_STATE_HOME': self.state},
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.strip(), str(Path(self.state) / 'musubi'))
 
 
 if __name__ == '__main__':

@@ -109,6 +109,22 @@ class HubPipeTest(unittest.TestCase):
         self.assertEqual(self.hub.page, 'sound')
 
 
+class HubLogTest(unittest.TestCase):
+    def test_receiver_errors_and_exits_are_logged(self):
+        config = {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False}
+        with mock.patch('gui.system.load_config', return_value=config):
+            hub = Hub(hidden=False)
+        with self.assertLogs('musubi', 'INFO') as logs, mock.patch('gui.close'):
+            hub.on_receiver_line(b'{"event": "error", "message": "port busy"}')
+            for error in ('port busy', None):
+                hub.error = error
+                hub.receiver = mock.Mock(returncode=1)
+                hub.on_receiver_end(hub.receiver)
+        self.assertEqual(logs.output, ['ERROR:musubi:receiver error: port busy',
+                                       'INFO:musubi:receiver exited (code 1)',
+                                       'WARNING:musubi:receiver exited unexpectedly (code 1)'])
+
+
 class HubImportTest(unittest.TestCase):
     def test_hub_does_not_load_gtk(self):
         # GTK is most of the window's memory, and the hub stays running while the window is closed.

@@ -1129,6 +1129,29 @@ class PhoneAudioTest(unittest.TestCase):
         self.assertIs(self.sound.capture, self.capture)
 
 
+class LogTest(unittest.TestCase):
+    def payload(self, rtt=9, delay=40, mic=1):
+        return {'event': 'status', 'phone': {'ip': '192.168.1.20', 'rtt': rtt, 'delay': delay, 'mic': mic}}
+
+    def test_status_key_ignores_numbers_that_keep_moving(self):
+        payload = self.payload()
+        self.assertEqual(musubi.status_key(payload), musubi.status_key(self.payload(rtt=30, delay=55)))
+        self.assertEqual(payload, self.payload())
+
+    def test_status_key_keeps_real_changes(self):
+        key = musubi.status_key(self.payload())
+        self.assertNotEqual(key, musubi.status_key(self.payload(delay=None)))
+        self.assertNotEqual(key, musubi.status_key(self.payload(mic=2)))
+        self.assertNotEqual(key, musubi.status_key({'event': 'status', 'phone': None}))
+
+    def test_audio_and_mic_failures_are_warnings_in_the_log(self):
+        for device, message in ((audio.PhoneAudio(), 'no phone audio'), (audio.PhoneMic(), 'no phone mic')):
+            with self.assertLogs('musubi', 'WARNING') as logs, mock.patch('sys.stderr', new_callable=io.StringIO):
+                device._fail(OSError('boom'))
+                device._fail(OSError('again'))
+            self.assertEqual(logs.output, [f'WARNING:musubi:{message}: boom'])
+
+
 class ServiceTest(unittest.TestCase):
     def test_stdin_allow_is_handled_before_waiting_udp_packets(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

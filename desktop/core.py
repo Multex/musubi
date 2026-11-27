@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+VERSION = '0.10.0'
 PORT = 9999
 # The app resends the state 20 times per second, so this means the link is gone.
 TIMEOUT = 0.5

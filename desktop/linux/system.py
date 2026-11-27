@@ -1,6 +1,8 @@
 """What the desktop app needs from the system: saved settings, the firewall, the network and autostart."""
 import ipaddress
 import json
+import logging
+import logging.handlers
 import os
 import shlex
 import subprocess
@@ -9,13 +11,57 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is shared with Windows, one folder up
 
-from core import CONFIG_DIR, PORT, load_config, save_config  # noqa: F401 (gui.py reads the config through here)
+from core import CONFIG_DIR, PORT, VERSION, load_config, save_config  # noqa: F401 (gui.py reads the config through here)
 
 UNIT_NAME = 'musubi-desktop.service'
 UNIT_FILE = CONFIG_DIR / 'systemd' / 'user' / UNIT_NAME
 GUI_SCRIPT = Path(__file__).resolve().parent / 'gui.py'
 UFW_RULES = Path('/etc/ufw/user.rules')
 UFW_CONF = Path('/etc/ufw/ufw.conf')
+STATE_DIR = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local' / 'state')
+LOG_DIR = STATE_DIR / 'musubi'
+LOG_MAX_BYTES = 256 * 1024
+LOG_BACKUPS = 1
+LOG_FORMAT = '%(asctime)s %(levelname)s %(message)s'
+
+# With no handler at all, logging would print warnings to stderr.
+if not logging.getLogger('musubi').handlers:
+    logging.getLogger('musubi').addHandler(logging.NullHandler())
+
+
+def setup_log(name, *, rotate=True, capture_stderr=False, log_dir=None):
+    """Send the 'musubi' log to a file. Return the new handler, or None if one exists or the file can't be opened."""
+    log = logging.getLogger('musubi')
+    if any(isinstance(h, logging.FileHandler) or getattr(h, '_musubi_log', False) for h in log.handlers):
+        return None
+    path = (Path(log_dir) if log_dir is not None else LOG_DIR) / name
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if rotate:
+            handler = logging.handlers.RotatingFileHandler(path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS,
+                                                           encoding='utf-8')
+        else:
+            try:
+                is_tty = bool(sys.stderr and sys.stderr.isatty())
+            except (OSError, ValueError):
+                is_tty = False
+            if capture_stderr and not is_tty:
+                stream = open(path, 'w', encoding='utf-8', buffering=1)
+                sys.stderr = stream
+                try:
+                    os.dup2(stream.fileno(), 2)  # GTK's C warnings write to file 2, not to sys.stderr.
+                except (OSError, ValueError):
+                    pass
+                handler = logging.StreamHandler(stream)
+            else:
+                handler = logging.FileHandler(path, mode='w', encoding='utf-8')
+    except OSError:
+        return None
+    handler._musubi_log = True
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    return handler
 
 
 def ufw_allowed_sources(rules_text, port=PORT):
