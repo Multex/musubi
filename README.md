@@ -8,7 +8,17 @@
   <strong>Use your phone as the Bluetooth hub your PC doesn't have.</strong>
 </p>
 
-Pair up to four Bluetooth gamepads with an Android phone, and your Linux PC gets a virtual Xbox 360 pad for each one that games treat as a normal controller. Since 0.6.0 it also works the other way: your PC's sound can play on the earbuds paired with the phone. I built it because my PC has no Bluetooth and I had an old phone lying around.
+<p align="center">
+  <a href="#setup">Setup</a> ·
+  <a href="#windows-beta">Windows (beta)</a> ·
+  <a href="#desktop-app">Desktop app</a> ·
+  <a href="#limits">Limits</a> ·
+  <a href="#troubleshooting">Troubleshooting</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#ai-disclosure">AI disclosure</a>
+</p>
+
+Pair up to four Bluetooth gamepads with an Android phone, and your PC gets a virtual Xbox 360 pad for each one that games treat as a normal controller. It also works the other way: your PC's sound can play on the earbuds paired with the phone, and the phone's own mic can work as a PC mic so your earbuds keep their full sound. Linux is the main version, with a [Windows beta](#windows-beta) available too (controllers and PC sound only for now). I built it because my PC has no Bluetooth and I had an old phone lying around.
 
 <p align="center">
   <img src="docs/assets/home.png" alt="Musubi Home screen on Android showing the connected PC over Wi-Fi, 2 of 4 players, sound on the phone speaker with a 170 ms delay, and the mic off." width="250">
@@ -18,7 +28,7 @@ Pair up to four Bluetooth gamepads with an Android phone, and your Linux PC gets
   <img src="docs/assets/headphones.png" alt="Musubi Headphones screen on Android with amber level meters and wave showing sound arriving over Wi-Fi." width="250">
 </p>
 
-**Early stage.** It has run on two Arch-based PCs and four Android phones, including an LG K40S, a Samsung A12 and a Motorola Edge 60 Fusion. I've played Persona 5 Royal with it on one PC using a BSP G6 pad. On the second PC I only checked the controller on a gamepad tester page. Please open an issue if something fails on your setup.
+**Early stage.** It has run on two Arch-based PCs, Windows 10 and Windows 11, and four Android phones, including an LG K40S, a Samsung A12 and a Motorola Edge 60 Fusion. I've played Persona 5 Royal with it on one Linux PC using a BSP G6 pad. On the second Linux PC I only checked the controller on a gamepad tester page. Please open an issue if something fails on your setup.
 
 ## Why "Musubi"?
 
@@ -28,14 +38,24 @@ That's what this app does. Your Bluetooth devices and your PC can't reach each o
 
 ## What you need
 
-- A Linux PC with Python 3, `python-evdev` and access to `/dev/uinput`. macOS won't work, because the virtual pad depends on `uinput`. A [Windows version](#windows-version) is in progress. The desktop app also needs GTK 4 and PyGObject. Sound on the phone needs `pactl` and `parec`, which come with PipeWire's PulseAudio support on most desktops.
+- A Linux PC with Python 3, `python-evdev` and access to `/dev/uinput`, or a Windows 10/11 PC using the [Windows beta](#windows-beta). macOS won't work. On Linux, the desktop app also needs GTK 4 and PyGObject, and sound on the phone needs `pactl` and `parec`, which come with PipeWire's PulseAudio support on most desktops.
 - An Android phone with the app open while you play. The app declares Android 5.0 or newer, but it has only run on those four phones.
 - A Bluetooth gamepad that Android recognizes as a gamepad.
 - The phone and the PC on the same network, or a USB cable between them.
 
+| Feature | Linux | Windows (beta) |
+| --- | --- | --- |
+| Controllers + vibration (up to 4) | Yes | Yes, tested with 1 so far (needs ViGEmBus) |
+| PC sound on phone | Yes | Yes (default output, 48000 Hz) |
+| Phone mic to PC | Yes | Planned |
+| USB cable | Experimental | Planned |
+| Start with my PC | Yes | Planned |
+
 ## Setup
 
-### 1. Prepare the PC
+Set up your PC first (Linux or Windows), then the phone.
+
+### Linux
 
 On Arch-based systems:
 
@@ -53,9 +73,7 @@ test -r /dev/uinput && test -w /dev/uinput && echo 'uinput access OK' || echo 'C
 
 If that prints `Check uinput access`, see [uinput permissions](#uinput-permissions).
 
-### 2. Start the desktop app
-
-This adds Musubi to your app launcher, so you only need the terminal once:
+Add Musubi to your app launcher so you only need the terminal once:
 
 ```sh
 ./install.sh
@@ -63,38 +81,38 @@ This adds Musubi to your app launcher, so you only need the terminal once:
 
 Open **Musubi** from your launcher. It shows the address to type on your phone. If your `ufw` firewall blocks the phone, the app offers to open UDP port 9999 for your local network. If you use another firewall, allow that port yourself.
 
-### 3. Set up the phone
+### Windows (beta)
 
-1. Download `musubi.apk` from [Releases](https://github.com/Multex/musubi/releases/latest) on the phone and install it. Android will ask you to allow installs from that source, and you can turn that off again afterwards.
-2. Disconnect the pad from the PC if it is plugged in, because some pads stay in USB mode.
-3. Put the pad in pairing mode and pair it in the phone's Bluetooth settings. The button combination depends on the pad, so check its manual.
-4. Open Musubi, type your PC's IP in **PC IP address** and tap **Save PC**.
-5. On the PC, click **Allow** when the desktop app asks about the phone. The phone's Home screen then shows the PC with its ping in milliseconds. You can save more than one PC and switch between them from the Home screen.
-6. Tap **Controllers** and press a button. It lights up on both drawings, and the virtual pad reacts on the PC.
+Built from the [`windows`](https://github.com/Multex/musubi/tree/windows) branch and tested on Windows 10 and Windows 11.
 
-Keep the app open and in front while you play. **Game mode** dims the screen and stops drawing the controller, and it turns on by itself after 1 minute without touching the screen. You can turn that off in **Settings**.
+1. Install the [ViGEmBus driver (v1.22.0)](https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0) so Windows can create virtual Xbox 360 pads. PC sound works without it, and Musubi will tell you if the driver is missing.
+2. Download the Windows beta zip from [Releases](https://github.com/Multex/musubi/releases) and extract the whole folder. Don't run `Musubi.exe` from inside the zip.
+3. Open `Musubi.exe`. Because the build isn't signed, Windows SmartScreen will show a warning; click **More info** and then **Run anyway**.
+4. On the first run, accept the Windows prompt to add a firewall rule for UDP port 9999. If you use a third-party firewall, allow UDP port 9999 yourself.
 
-Update the PC and the phone together. Over Wi-Fi the desktop app still works with older phone apps, but over the USB cable both sides must be on 0.6.0 or newer.
+**Sound on Windows:** Musubi captures whatever plays on your PC's default sound output (there is no separate **Musubi** output to pick). Your default output needs to be stereo at **48000 Hz** (48 kHz); if it isn't, Musubi shows **Can't play** with steps to change it.
 
-### Over a USB cable
+**Tray & logs:** closing the window keeps Musubi running in the tray unless you turn that off in **Settings**. If something fails, open **Settings** and click **Open logs** to grab the log files for an issue report.
+
+### Phone
+
+1. Download `musubi.apk` from [Releases](https://github.com/Multex/musubi/releases/latest) on the phone and install it. Android will ask you to allow installs from that source; you can turn that back off afterwards.
+2. Open Musubi, type the address shown on the PC into **PC IP address**, and tap **Save PC**.
+3. On the PC, click **Allow** when Musubi asks about the phone. The phone's Home screen then shows the PC with its ping in milliseconds. You can save more than one PC and switch between them from the Home screen.
+4. Pair your Bluetooth controller (or up to four) in the phone's Bluetooth settings. If a pad was plugged into the PC, unplug it first so it doesn't stay in USB mode.
+5. Tap **Controllers** and press a button. It lights up on both drawings, and the virtual pad reacts on the PC.
+
+Keep the app open and in front while using a controller. **Game mode** dims the screen and stops drawing the pad, and turns on by itself after 1 minute without touching the screen while a controller is connected (you can turn that off in **Settings**).
+
+Keep the PC and phone apps updated together.
+
+### Over a USB cable (Linux)
 
 The cable is still being tested, and so far it has worked on one phone. Wi-Fi stays the main way to connect.
 
 Plug the phone into the PC while the desktop app is running, and set its USB mode to **File transfer** from the USB notification. Musubi then switches the phone into accessory mode, and Android asks whether to open Musubi when this accessory connects. Tick **Always** and tap **OK**. From then on, plugging in opens the app and the pad works over the cable, with no IP to type and no firewall to open. The phone charges while you play.
 
 This needs `python-pyusb` and the USB rule that `./install.sh` adds. The cable only works with the desktop app, not with `musubi.py` in a terminal.
-
-### Without the desktop app
-
-You can still run the receiver in a terminal, with your phone's IP. You need to open the firewall yourself:
-
-```sh
-sudo ufw allow from 192.168.1.10 to any port 9999 proto udp
-```
-
-```sh
-python3 desktop/linux/musubi.py 192.168.1.10
-```
 
 ## Desktop app
 
@@ -128,7 +146,7 @@ Each controller keeps its own vibration toggle, strength and stick deadzone. Tap
 Musubi can play your PC's sound on the earbuds paired with your phone. It's off by default.
 
 1. On the phone, open **Headphones** from the Home screen and turn on **Play PC sound**.
-2. On the PC, pick **Musubi** as the output in your sound settings. It only appears while a phone with sound turned on is connected.
+2. On Linux, pick **Musubi** as the output in your sound settings (it only appears while a phone with sound turned on is connected). On Windows, skip this step: Musubi captures your default sound output directly (set to 48000 Hz stereo).
 3. Choose where it plays: **Headphones** (your earbuds, or wired headphones) or **Phone speaker**. With Headphones picked and no earbuds connected, nothing plays.
 
 It works over Wi-Fi and the USB cable, and keeps playing when you switch between them. If you leave the app or lock the screen, the sound keeps going, with a notification that has a **Stop** button.
@@ -137,7 +155,7 @@ It works over Wi-Fi and the USB cable, and keeps playing when you switch between
 
 ## Mic
 
-Musubi can send your voice to the PC through the phone's own mic. It shows up on the PC as an input called **Musubi mic**. Your earbuds keep their full sound, because Musubi never uses their mic. It's off by default.
+Linux only for now. Musubi can send your voice to the PC through the phone's own mic. It shows up on the PC as an input called **Musubi mic**. Your earbuds keep their full sound, because Musubi never uses their mic. It's off by default.
 
 1. On the phone, open **Mic** from the Home screen and turn on **Send my voice**, or use the switch on the PC's Mic page.
 2. In Discord or your game, pick **Musubi mic** as the input.
@@ -151,8 +169,7 @@ Musubi can send your voice to the PC through the phone's own mic. It shows up on
 - **Up to four pads per phone.** Each paired controller gets a stable player slot from 1 to 4. Bluetooth earbuds that pretend to be a controller for their media buttons are ignored so they don't take a controller slot.
 - **The guide button can't be remapped,** and it may not arrive at all, because Android can keep it for itself.
 - **One phone at a time.** If two allowed phones are on, the first one keeps the pads until it has been silent for 5 seconds.
-- **Use it only on a network you trust.** Packets are not encrypted or authenticated, and approval only checks the IP. Someone on your network who fakes an allowed phone's address could press buttons in your game.
-- **Your voice crosses the network unencrypted,** like the pad.
+- **Use it only on a network you trust.** Controller, sound, and mic packets are not encrypted or authenticated, and approval only checks the IP. Someone on your network who fakes an allowed phone's address could press buttons in your game.
 
 ## Latency
 
@@ -196,10 +213,6 @@ sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
 
 Any program you run can then create virtual input devices, so remove the rule if you stop using Musubi.
 
-## Windows version
-
-Work in progress on the [`windows`](https://github.com/Multex/musubi/tree/windows) branch. I can't really work actively on it because I don't have a Windows installation, so it's been difficult to test things. I won't just tell Claude to make a Windows port either, because without testing it myself I'd be breaking my own [AI disclosure](#ai-disclosure). So it will take time until I can test it actively.
-
 ## How it works
 
 Each controller state is 20 bytes: 11 button bits, then 8 axes (`!I8h` in `desktop/core.py`). Player 1 sends those 20 bytes directly for compatibility with older receivers, and players 2 to 4 prefix them with `PBIN` and the slot index (`!4sBI8h`). The app sends a packet on every change and at least every 50 ms, so a lost packet is repaired by the next one and a release can't get stuck. After 0.5 seconds of silence, the receiver releases that slot.
@@ -230,6 +243,18 @@ The result is `android/build/musubi.apk`. The first build creates `android/debug
 
 ```sh
 python3 -m unittest discover -s desktop/tests
+```
+
+### Without the desktop app (Linux)
+
+You can still run the Linux receiver in a terminal with your phone's IP. You need to open the firewall yourself:
+
+```sh
+sudo ufw allow from 192.168.1.10 to any port 9999 proto udp
+```
+
+```sh
+python3 desktop/linux/musubi.py 192.168.1.10
 ```
 
 ## AI disclosure
