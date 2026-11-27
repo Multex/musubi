@@ -388,13 +388,6 @@ public class MainActivity extends Activity {
             }
         }
     };
-    private final BroadcastReceiver stopReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            stopAll();
-            finish();
-        }
-    };
     private final BroadcastReceiver noisyReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -527,7 +520,10 @@ public class MainActivity extends Activity {
 
     private void enterBackground() {
         backgrounded = true;
-        registerReceiver(stopReceiver, new IntentFilter(KeepAliveService.ACTION_STOP));
+        KeepAliveService.onStop = () -> {
+            stopAll();
+            finish();
+        };
         handler.postDelayed(watchPc, TICK_MS);
         showKeepAlive();
         synchronized (audioLock) {
@@ -541,7 +537,7 @@ public class MainActivity extends Activity {
         synchronized (audioLock) {
             audio.setBackground(false);
         }
-        unregisterReceiver(stopReceiver);
+        KeepAliveService.onStop = null;
         handler.removeCallbacks(watchPc);
         stopService(new Intent(this, KeepAliveService.class));
     }

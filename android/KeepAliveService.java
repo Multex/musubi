@@ -12,10 +12,11 @@ import android.os.PowerManager;
 
 /** Keeps the process and CPU awake while MainActivity is in the background; the work itself stays there. */
 public class KeepAliveService extends Service {
-    static final String ACTION_STOP = "io.github.multex.musubi.STOP";
+    private static final String ACTION_STOP = "io.github.multex.musubi.STOP";
     static final String EXTRA_PC = "pc";
     static final String EXTRA_SOUND = "sound";
     static final String EXTRA_MIC = "mic";
+    static Runnable onStop;
     private static final String CHANNEL = "background";
 
     private PowerManager.WakeLock wakeLock;
@@ -31,6 +32,10 @@ public class KeepAliveService extends Service {
     @Override
     @SuppressWarnings("deprecation")
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent == null || ACTION_STOP.equals(intent.getAction())) {
+            stopSession();
+            return START_NOT_STICKY;
+        }
         Notification.Builder builder;
         if (Build.VERSION.SDK_INT >= 26) {
             ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(
@@ -39,9 +44,11 @@ public class KeepAliveService extends Service {
         } else {
             builder = new Notification.Builder(this);
         }
+        int pendingFlags = Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0;
         PendingIntent open = PendingIntent.getActivity(this, 0,
-            getPackageManager().getLaunchIntentForPackage(getPackageName()), 0);
-        PendingIntent stop = PendingIntent.getBroadcast(this, 0, stopIntent(), 0);
+            getPackageManager().getLaunchIntentForPackage(getPackageName()), pendingFlags);
+        PendingIntent stop = PendingIntent.getService(this, 0,
+            new Intent(this, KeepAliveService.class).setAction(ACTION_STOP), pendingFlags);
         // The build makes no R class, so the icon is looked up by name.
         builder.setSmallIcon(getResources().getIdentifier("ic_stat_musubi", "drawable", getPackageName()))
             .setContentTitle("Connected to " + intent.getStringExtra(EXTRA_PC))
@@ -59,15 +66,17 @@ public class KeepAliveService extends Service {
             : "PC sound is off. Open Musubi to use the controller.";
     }
 
-    private Intent stopIntent() {
-        return new Intent(ACTION_STOP).setPackage(getPackageName());
+    private void stopSession() {
+        Runnable action = onStop;
+        onStop = null;
+        if (action != null) action.run();
+        stopSelf();
     }
 
     /** Swiping Musubi away from recents ends the background session too. */
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        sendBroadcast(stopIntent());
-        stopSelf();
+        stopSession();
     }
 
     @Override
