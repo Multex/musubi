@@ -86,7 +86,7 @@ Open **Musubi** from your launcher. It shows the address to type on your phone. 
 Built from the [`windows`](https://github.com/Multex/musubi/tree/windows) branch and tested on Windows 10 and Windows 11.
 
 1. Install the [ViGEmBus driver (v1.22.0)](https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0) so Windows can create virtual Xbox 360 pads. PC sound works without it, and Musubi will tell you if the driver is missing.
-2. Download the Windows beta zip from [Releases](https://github.com/Multex/musubi/releases) and extract the whole folder. Don't run `Musubi.exe` from inside the zip.
+2. Download `Musubi-windows-beta.zip` from the [Windows beta release](https://github.com/Multex/musubi/releases/tag/v0.10.1-win-beta.1) and extract the whole folder. Don't run `Musubi.exe` from inside the zip.
 3. Open `Musubi.exe`. Because the build isn't signed, Windows SmartScreen will show a warning; click **More info** and then **Run anyway**.
 4. On the first run, accept the Windows prompt to add a firewall rule for UDP port 9999. If you use a third-party firewall, allow UDP port 9999 yourself.
 
