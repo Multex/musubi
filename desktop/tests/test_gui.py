@@ -81,6 +81,50 @@ class HubMicTest(unittest.TestCase):
         self.hub.receiver.stdin.write.assert_called_once_with(b'{"mic": 2}\n')
 
 
+class HubPipeTest(unittest.TestCase):
+    def setUp(self):
+        config = {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False}
+        patcher = mock.patch('gui.system.load_config', side_effect=lambda: dict(config))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.hub = Hub(hidden=False)
+
+    def test_send_state_keeps_emoji_status_under_pipe_buf(self):
+        self.hub.window = object()
+        self.hub.status['pending'] = [{'ip': f'192.168.1.{10 + i}', 'name': '🎮' * 64} for i in range(8)]
+        sent = []
+        with mock.patch.object(self.hub, 'send_window', side_effect=sent.append):
+            self.hub.send_state()
+        self.assertEqual(len(sent), 2)
+        self.assertLessEqual(len(sent[1]), 4096)
+        self.assertNotIn(b'\\ud83c', sent[1])
+        self.assertEqual(json.loads(sent[1]), self.hub.status)
+
+    def test_corrupt_pipe_lines_are_skipped(self):
+        self.hub.on_receiver_line(b'{corrupt')
+        self.hub.on_receiver_line(b'\xff\xfe')
+        self.hub.on_window_line(b'{corrupt')
+        self.hub.on_window_line(b'\xff\xfe')
+        self.hub.on_window_line(b'{"page": "sound"}')
+        self.assertEqual(self.hub.page, 'sound')
+
+
+class HubLogTest(unittest.TestCase):
+    def test_receiver_errors_and_exits_are_logged(self):
+        config = {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False}
+        with mock.patch('gui.system.load_config', return_value=config):
+            hub = Hub(hidden=False)
+        with self.assertLogs('musubi', 'INFO') as logs, mock.patch('gui.close'):
+            hub.on_receiver_line(b'{"event": "error", "message": "port busy"}')
+            for error in ('port busy', None):
+                hub.error = error
+                hub.receiver = mock.Mock(returncode=1)
+                hub.on_receiver_end(hub.receiver)
+        self.assertEqual(logs.output, ['ERROR:musubi:receiver error: port busy',
+                                       'INFO:musubi:receiver exited (code 1)',
+                                       'WARNING:musubi:receiver exited unexpectedly (code 1)'])
+
+
 class HubImportTest(unittest.TestCase):
     def test_hub_does_not_load_gtk(self):
         # GTK is most of the window's memory, and the hub stays running while the window is closed.

@@ -2,7 +2,9 @@
 """Musubi's desktop app. This hub keeps the tray and the receiver; the GTK window runs as its own process only while
 it's open, because GTK alone costs about 45 MB."""
 import json
+import logging
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,7 @@ import system
 from core import pending_phones, tray_text  # noqa: E402
 from tray import Tray, tray_available
 
+log = logging.getLogger('musubi')
 HERE = Path(__file__).resolve().parent
 RECEIVER = HERE / 'musubi.py'
 # Window commands the hub handles itself. The rest go on to the receiver.
@@ -84,26 +87,34 @@ class Hub(Gio.Application):
             self.show_window()
             return
         self.started = True
+        # Only on the first activation, so a second launch never touches the running hub's log.
+        system.setup_log('musubi-hub.log')
+        log.info('musubi %s hub started, %s, python %s, session %s, hidden %s', system.VERSION, platform.platform(),
+                 platform.python_version(), os.environ.get('XDG_SESSION_TYPE') or 'unknown', self.start_hidden)
         self.hold()  # The hub has no windows, so without this it would exit right after starting.
         try:
             # The icon registers itself whenever a tray host appears, even one that starts after us at login.
             self.tray = Tray(self.show_window, self.quit_app)
-        except GLib.Error:
+        except GLib.Error as ex:
+            log.warning('tray unavailable: %s', ex)
             self.tray = None
         self.start_receiver()
         self.refresh()
         if not self.start_hidden or self.tray is None:
             self.show_window()
         elif not tray_available():
+            log.info('tray host not ready, waiting %d s', TRAY_WAIT)
             GLib.timeout_add_seconds(TRAY_WAIT, self.show_without_tray)
 
     def show_without_tray(self):
         """A hidden start with no tray host by now would leave Musubi running with no way back to it."""
         if not tray_available():
+            log.warning('no tray host after %d s, showing window', TRAY_WAIT)
             self.show_window()
         return False
 
     def quit_app(self):
+        log.info('hub stopping')
         self.stop_receiver()
         window, self.window = self.window, None
         if window:
@@ -126,8 +137,10 @@ class Hub(Gio.Application):
         try:
             self.receiver = spawn([str(RECEIVER), '--service'], self.on_receiver_line, self.on_receiver_end)
         except OSError as ex:
+            log.error('could not start receiver: %s', ex)
             self.error = str(ex)
             return
+        log.info('receiver started (pid %s)', self.receiver.pid)
         self.send_receiver({'allow': list(self.config['phones'])})
         self.send_receiver({'sound': self.config['sound_enabled']})
         self.send_receiver({'mic_keep': self.config['mic']})
@@ -138,19 +151,24 @@ class Hub(Gio.Application):
         process, self.receiver = self.receiver, None
         if process:
             close(process)
+            log.info('receiver stopped')
         self.status = idle_status(self.config['sound_enabled'])
 
     def send_receiver(self, command):
         if self.receiver is None:
             return
         try:
-            self.receiver.stdin.write((json.dumps(command) + '\n').encode())
+            self.receiver.stdin.write((json.dumps(command, ensure_ascii=False) + '\n').encode())
         except OSError:
             pass
 
     def on_receiver_line(self, line):
-        event = json.loads(line)
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return
         if event['event'] == 'error':
+            log.error('receiver error: %s', event['message'])
             self.error = event['message']
             self.send_state()
             self.refresh()
@@ -169,7 +187,8 @@ class Hub(Gio.Application):
         config = {**system.load_config(), 'mic': phone['mic'] != 0}
         try:
             system.save_config(config)
-        except OSError:
+        except OSError as ex:
+            log.warning('could not save mic preference: %s', ex)
             return  # The next status tries again.
         self.config = config
 
@@ -177,9 +196,13 @@ class Hub(Gio.Application):
         if process is not self.receiver:
             return
         self.receiver = None
+        unexpected = self.error is None
         close(process)
-        if self.error is None:
+        if unexpected:
+            log.warning('receiver exited unexpectedly (code %s)', process.returncode)
             self.error = 'The receiver stopped unexpectedly.'
+        else:
+            log.info('receiver exited (code %s)', process.returncode)
         self.status = idle_status(self.config['sound_enabled'])
         self.send_state()
         self.refresh()
@@ -191,7 +214,9 @@ class Hub(Gio.Application):
         try:
             self.window = spawn([str(HERE / 'gui.py'), '--window'], self.on_window_line, self.on_window_end)
         except OSError:
+            log.exception('could not start window')
             return
+        log.info('window started (pid %s)', self.window.pid)
         # A stuck window drops lines instead of stalling the tray and the receiver. Status repeats every second.
         os.set_blocking(self.window.stdin.fileno(), False)
         self.send_state()
@@ -207,11 +232,15 @@ class Hub(Gio.Application):
     def send_state(self):
         """Hub-owned state, plus the latest status so the window can draw at once."""
         self.send_window(json.dumps({'event': 'state', 'error': self.error, 'stopped': self.stopped,
-                                     'ignored': sorted(self.ignored), 'page': self.page}).encode())
-        self.send_window(json.dumps(self.status).encode())
+                                     'ignored': sorted(self.ignored), 'page': self.page},
+                                    ensure_ascii=False).encode())
+        self.send_window(json.dumps(self.status, ensure_ascii=False).encode())
 
     def on_window_line(self, line):
-        command = json.loads(line)
+        try:
+            command = json.loads(line)
+        except ValueError:
+            return
         if 'stop' in command:
             self.stop_receiver()
             self.stopped = True
@@ -239,6 +268,7 @@ class Hub(Gio.Application):
             return
         self.window = None
         close(process)
+        log.info('window closed (code %s)', process.returncode)
         self.watch = False
         self.send_receiver({'watch': False})
         self.config = system.load_config()
@@ -248,9 +278,19 @@ class Hub(Gio.Application):
 
 def main():
     if '--window' in sys.argv:
-        import window  # Only the window process loads GTK.
+        # Before the import, so a window that fails to load says why.
+        system.setup_log('musubi-window.log', rotate=False, capture_stderr=True)
+        try:
+            import window  # Only the window process loads GTK.
+        except Exception:
+            log.exception('could not load the window')
+            raise
         return window.main()
-    return Hub('--hidden' in sys.argv).run([sys.argv[0]])
+    try:
+        return Hub('--hidden' in sys.argv).run([sys.argv[0]])
+    except Exception:
+        log.exception('hub crashed')
+        raise
 
 
 if __name__ == '__main__':

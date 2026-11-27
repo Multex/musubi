@@ -8,6 +8,7 @@ import time
 from array import array
 from pathlib import Path
 
+VERSION = '0.10.1'
 PORT = 9999
 # The app resends the state 20 times per second, so this means the link is gone.
 TIMEOUT = 0.5
@@ -516,7 +517,7 @@ class Bridge:
 def write_event(fd, event):
     """A slow window must never delay the pad, so a full pipe drops this event instead of blocking."""
     try:
-        os.write(fd, (json.dumps(event) + '\n').encode())
+        os.write(fd, (json.dumps(event, ensure_ascii=False) + '\n').encode())
     except BlockingIOError:
         pass
 
@@ -555,11 +556,14 @@ def load_config(path=CONFIG_FILE):
         config['tray'] = bool(stored.get('tray', True))
         config['sound_enabled'] = bool(stored.get('sound_enabled', True))
         config['mic'] = bool(stored.get('mic', False))
-    except FileNotFoundError:
+    except OSError:
         pass
-    except (OSError, ValueError, AttributeError):
-        # Saving over a file we couldn't read would lose it for good.
-        path.replace(path.with_suffix('.broken'))
+    except (ValueError, AttributeError, TypeError):
+        # Saving over a broken file would lose it for good.
+        try:
+            path.replace(path.with_suffix('.broken'))
+        except OSError:
+            pass
     return config
 
 

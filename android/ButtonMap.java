@@ -2,6 +2,7 @@ package io.github.multex.musubi;
 
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 /** Which physical input drives which control. Keycodes are positive; axes acting as buttons are negative. */
@@ -27,6 +28,16 @@ final class ButtonMap {
             if (old.next() == control) old.remove();
         }
         for (int input : inputs) controls.put(input, control);
+    }
+
+    /** Keeps a trigger's analog axis paired when a slow pull only delivered its keycode in time. */
+    static void pairTriggerAxis(List<Integer> inputs, int keyCode, int axis, boolean axisClaimed) {
+        if (inputs.contains(keyCode)
+                && !inputs.contains(LEFT_TRIGGER)
+                && !inputs.contains(RIGHT_TRIGGER)
+                && !axisClaimed) {
+            inputs.add(axis);
+        }
     }
 
     ButtonMap copy() {

@@ -1,5 +1,6 @@
 """PC sound for the phone: a virtual output device whose sound is captured and cut into small packets."""
 import fcntl
+import logging
 import os
 import subprocess
 import sys
@@ -10,6 +11,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is shared with Windows, one folder up
 
 from core import CHANNELS, CHUNK, HANGOVER, Levels, RATE, SILENCE, STABLE_CHUNK, number_chunks, split_chunks  # noqa: E402,F401
+
+log = logging.getLogger('musubi')
+if not log.handlers:
+    log.addHandler(logging.NullHandler())
 
 SINK = 'musubi'
 LOAD = ['pactl', 'load-module', 'module-null-sink', f'sink_name={SINK}',
@@ -52,6 +57,7 @@ class PhoneAudio:
                 fields = line.split('\t')
                 if len(fields) > 2 and fields[1] == 'module-null-sink' and f'sink_name={SINK}' in fields[2].split():
                     self._pactl('unload-module', fields[0])
+                    log.info('removed stale audio sink module %s', fields[0])
         except (OSError, subprocess.SubprocessError) as ex:
             self._fail(ex)
 
@@ -63,9 +69,13 @@ class PhoneAudio:
             self.capture = self.popen(CAPTURE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError) as ex:
             self._fail(ex)
-            self.stop()
+            self._close()
+        else:
+            log.info('phone audio started (module %s)', self.module)
 
-    def stop(self):
+    def _close(self):
+        if self.capture is not None or self.module:
+            log.info('phone audio stopped')
         if self.capture is not None:
             self.capture.terminate()
             self.capture.wait()
@@ -80,9 +90,14 @@ class PhoneAudio:
         self.buffered = b''
         self.quiet = HANGOVER
 
+    def stop(self):
+        self._close()
+        self.failed = False
+
     def _fail(self, ex):
-        """Sound is extra, so it gives up for this run and the pad carries on."""
+        """Sound is extra, so it gives up until stopped and the pad carries on."""
         if not self.failed:
+            log.warning('no phone audio: %s', ex)
             print(f'musubi: no phone audio: {ex}', file=sys.stderr)
         self.failed = True
 
@@ -94,7 +109,7 @@ class PhoneAudio:
         data = os.read(self.capture.stdout.fileno(), 65536)
         if not data:
             self._fail(RuntimeError('parec stopped'))
-            self.stop()
+            self._close()
             return []
         chunks, self.buffered = split_chunks(self.buffered + data, self.chunk)
         numbered, self.seq, self.quiet = number_chunks(chunks, self.seq, self.quiet, self.silence, self.hangover)
@@ -134,6 +149,7 @@ class PhoneMic:
                 fields = line.split('\t')
                 if len(fields) > 2 and fields[1] == 'module-pipe-source' and f'source_name={MIC_SOURCE}' in fields[2].split():
                     self._pactl('unload-module', fields[0])
+                    log.info('removed stale mic source module %s', fields[0])
         except (OSError, subprocess.SubprocessError) as ex:
             self._fail(ex)
 
@@ -145,6 +161,8 @@ class PhoneMic:
                                       'format=s16le', f'rate={RATE}', 'channels=1', MIC_DESCRIPTION).strip()
         except (OSError, subprocess.SubprocessError) as ex:
             self._fail(ex)
+        else:
+            log.info('phone mic loaded (module %s, fifo %s)', self.module, self.path)
 
     def _open(self):
         # PipeWire holds the read end once the module is loaded; until then this fails and the next packet retries.
@@ -157,6 +175,7 @@ class PhoneMic:
         except OSError:
             pass
         self.fd = fd
+        log.info('phone mic pipe opened')
 
     def feed(self, seq, pcm):
         """Never blocks: the receiver loop also drives the pad, so a full pipe loses this chunk."""
@@ -181,6 +200,8 @@ class PhoneMic:
             self.stop()
 
     def stop(self):
+        if self.fd is not None or self.module:
+            log.info('phone mic stopped')
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
@@ -193,5 +214,6 @@ class PhoneMic:
 
     def _fail(self, ex):
         if not self.failed:
+            log.warning('no phone mic: %s', ex)
             print(f'musubi: no phone mic: {ex}', file=sys.stderr)
         self.failed = True

@@ -29,10 +29,14 @@ public class ControllerReceiver extends BroadcastReceiver {
     @Override
     @SuppressWarnings("deprecation")
     public void onReceive(Context context, Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        boolean disconnected = BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(action);
+        if (!disconnected && !BluetoothDevice.ACTION_ACL_CONNECTED.equals(action)) return;
         BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
         if (device == null || !isController(device.getBluetoothClass())) return;
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-        if (BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(intent.getAction())) {
+        if (disconnected) {
             connected.remove(device.getAddress());
             if (connected.isEmpty()) manager.cancel(ID);
             return;

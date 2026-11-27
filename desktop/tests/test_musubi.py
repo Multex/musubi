@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import fcntl
 import io
+import json
 import os
+import socket
 import struct
 import subprocess
 import tempfile
@@ -507,6 +509,13 @@ class BridgeTest(unittest.TestCase):
         bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status, make_pad=denied, clock=lambda: self.now)
         bridge.on_datagram(hello(), self.PHONE)
         self.assertIn('uinput', bridge.status()['pad_error'])
+
+    def test_uinput_error_from_make_pad_is_reported_instead_of_crashing(self):
+        with mock.patch.object(musubi, 'Pad', side_effect=musubi.UInputError('"/dev/uinput" cannot be opened for writing')):
+            bridge = Bridge(self.sock, [self.PHONE[0]], self.on_status, clock=lambda: self.now)
+            bridge.on_datagram(hello(), self.PHONE)
+        self.assertIn('/dev/uinput', bridge.status()['pad_error'])
+        self.assertIsNone(bridge.pad)
 
     def test_multi_pad_creates_slots_in_order_and_routes_input_independently(self):
         inputs = []
@@ -1064,6 +1073,141 @@ class PhoneAudioTest(unittest.TestCase):
             self.assertEqual(self.sound.read(), [])
         self.assertEqual(self.pactl.calls[-1], ['pactl', 'unload-module', '42'])
         self.assertIsNone(self.sound.capture)
+
+    def test_stop_clears_failure_so_a_later_start_retries(self):
+        self.pactl.fail = True
+        with mock.patch('sys.stderr'):
+            self.sound.remove_stale()
+            self.sound.start()
+        self.assertTrue(self.sound.failed)
+        self.assertEqual(self.pactl.calls, [['pactl', 'list', 'short', 'modules']])
+        self.sound.stop()
+        self.assertFalse(self.sound.failed)
+        self.pactl.fail = False
+        self.sound.start()
+        self.assertEqual(self.pactl.calls[-1], audio.LOAD)
+        self.assertIs(self.sound.capture, self.capture)
+
+    def test_capture_that_dies_retries_only_after_stop(self):
+        self.sound.start()
+        with mock.patch('sys.stderr'), mock.patch.object(audio.os, 'read', return_value=b''):
+            self.assertEqual(self.sound.read(), [])
+        self.assertTrue(self.sound.failed)
+        calls = len(self.pactl.calls)
+        self.sound.start()
+        self.assertEqual(len(self.pactl.calls), calls)
+        self.sound.stop()
+        self.assertFalse(self.sound.failed)
+        self.sound.start()
+        self.assertEqual(self.pactl.calls[-1], audio.LOAD)
+        self.assertIs(self.sound.capture, self.capture)
+
+    def test_failed_popen_unloads_sink_and_does_not_retry_until_stop(self):
+        popen = mock.Mock(side_effect=OSError('parec missing'))
+        sound = audio.PhoneAudio(run=self.pactl, popen=popen)
+        with mock.patch('sys.stderr'):
+            sound.start()
+        self.assertEqual(self.pactl.calls, [audio.LOAD, ['pactl', 'unload-module', '42']])
+        self.assertTrue(sound.failed)
+        sound.start()
+        self.assertEqual(popen.call_count, 1)
+        sound.stop()
+        self.assertFalse(sound.failed)
+        sound.popen = mock.Mock(return_value=self.capture)
+        sound.start()
+        self.assertIs(sound.capture, self.capture)
+
+    def test_stop_clears_failure_even_when_unload_fails(self):
+        self.sound.start()
+        self.pactl.fail = True
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            self.sound.stop()
+        self.assertEqual(stderr.getvalue().count('\n'), 1)
+        self.assertFalse(self.sound.failed)
+        self.pactl.fail = False
+        self.sound.start()
+        self.assertIs(self.sound.capture, self.capture)
+
+
+class LogTest(unittest.TestCase):
+    def payload(self, rtt=9, delay=40, mic=1):
+        return {'event': 'status', 'phone': {'ip': '192.168.1.20', 'rtt': rtt, 'delay': delay, 'mic': mic}}
+
+    def test_status_key_ignores_numbers_that_keep_moving(self):
+        payload = self.payload()
+        self.assertEqual(musubi.status_key(payload), musubi.status_key(self.payload(rtt=30, delay=55)))
+        self.assertEqual(payload, self.payload())
+
+    def test_status_key_keeps_real_changes(self):
+        key = musubi.status_key(self.payload())
+        self.assertNotEqual(key, musubi.status_key(self.payload(delay=None)))
+        self.assertNotEqual(key, musubi.status_key(self.payload(mic=2)))
+        self.assertNotEqual(key, musubi.status_key({'event': 'status', 'phone': None}))
+
+    def test_audio_and_mic_failures_are_warnings_in_the_log(self):
+        for device, message in ((audio.PhoneAudio(), 'no phone audio'), (audio.PhoneMic(), 'no phone mic')):
+            with self.assertLogs('musubi', 'WARNING') as logs, mock.patch('sys.stderr', new_callable=io.StringIO):
+                device._fail(OSError('boom'))
+                device._fail(OSError('again'))
+            self.assertEqual(logs.output, [f'WARNING:musubi:{message}: boom'])
+
+
+class ServiceTest(unittest.TestCase):
+    def test_stdin_allow_is_handled_before_waiting_udp_packets(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(('127.0.0.1', 0))
+        self.addCleanup(sock.close)
+        phone = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(phone.close)
+        phone.sendto(hello(connected=False), sock.getsockname())
+
+        in_r, in_w = os.pipe()
+        out_r, out_w = os.pipe()
+        stdin = os.fdopen(in_r, 'rb')
+        stdout = os.fdopen(out_w, 'wb')
+        out_reader = os.fdopen(out_r, 'rb')
+        self.addCleanup(stdin.close)
+        self.addCleanup(out_reader.close)
+
+        os.write(in_w, b'{"allow": ["127.0.0.1"]}\n')
+        os.close(in_w)
+
+        real_audio, real_mic = audio.PhoneAudio, audio.PhoneMic
+        with mock.patch.object(musubi, 'bind_socket', return_value=sock), \
+                mock.patch.object(musubi, 'cable', None), \
+                mock.patch.object(musubi.signal, 'signal'), \
+                mock.patch.object(audio, 'PhoneAudio', side_effect=lambda: real_audio(run=mock.Mock(return_value=mock.Mock(stdout='')), popen=mock.Mock())), \
+                mock.patch.object(audio, 'PhoneMic', side_effect=lambda: real_mic(run=mock.Mock(return_value=mock.Mock(stdout='')))), \
+                mock.patch.object(musubi.sys, 'stdin', stdin), \
+                mock.patch.object(musubi.sys, 'stdout', stdout):
+            try:
+                musubi.run_service()
+            finally:
+                stdout.close()
+
+        events = [json.loads(line) for line in out_reader.read().splitlines() if line]
+        statuses = [event for event in events if event['event'] == 'status']
+        self.assertTrue(statuses)
+        for status in statuses:
+            self.assertEqual(status['pending'], [])
+        self.assertTrue(any(status['phone'] and status['phone']['ip'] == '127.0.0.1' for status in statuses))
+
+    def test_write_event_keeps_emoji_status_under_pipe_buf(self):
+        emoji = '🎮' * core.MAX_NAME
+        event = {
+            'event': 'status',
+            'phone': {'ip': '192.168.1.20', 'name': emoji, 'controller': emoji},
+            'pending': [{'ip': f'192.168.1.{30 + i}', 'name': emoji} for i in range(core.MAX_PENDING)],
+        }
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        core.write_event(w, event)
+        raw = os.read(r, 8192)
+        self.assertLessEqual(len(raw), 4096)
+        self.assertNotIn(b'\\ud83c', raw)
+        self.assertIn('🎮'.encode(), raw)
+        self.assertEqual(json.loads(raw), event)
 
 
 if __name__ == '__main__':

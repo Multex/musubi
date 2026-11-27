@@ -91,6 +91,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -387,13 +388,6 @@ public class MainActivity extends Activity {
             }
         }
     };
-    private final BroadcastReceiver stopReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            stopAll();
-            finish();
-        }
-    };
     private final BroadcastReceiver noisyReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -517,6 +511,7 @@ public class MainActivity extends Activity {
     private void stopPlayer() {
         synchronized (audioLock) {
             player = null;
+            audioBroken = false;
             audio.reset();
             audioLock.notifyAll();
         }
@@ -525,7 +520,10 @@ public class MainActivity extends Activity {
 
     private void enterBackground() {
         backgrounded = true;
-        registerReceiver(stopReceiver, new IntentFilter(KeepAliveService.ACTION_STOP));
+        KeepAliveService.onStop = () -> {
+            stopAll();
+            finish();
+        };
         handler.postDelayed(watchPc, TICK_MS);
         showKeepAlive();
         synchronized (audioLock) {
@@ -539,7 +537,7 @@ public class MainActivity extends Activity {
         synchronized (audioLock) {
             audio.setBackground(false);
         }
-        unregisterReceiver(stopReceiver);
+        KeepAliveService.onStop = null;
         handler.removeCallbacks(watchPc);
         stopService(new Intent(this, KeepAliveService.class));
     }
@@ -580,6 +578,7 @@ public class MainActivity extends Activity {
 
     private void transportChanged() {
         nextPing = 0;
+        flush();
         lastPongAt = 0;
         targetSince = SystemClock.uptimeMillis();
         if (backgrounded) {
@@ -663,6 +662,10 @@ public class MainActivity extends Activity {
                 InetAddress address;
                 synchronized (lock) {
                     while (running && sender == Thread.currentThread()) {
+                        if (target == null && usbOut == null) {
+                            lock.wait();
+                            continue;
+                        }
                         long now = SystemClock.uptimeMillis();
                         boolean anyDirty = dirty;
                         for (int i = 0; !anyDirty && i < MAX_PLAYERS; i++) {
@@ -825,42 +828,41 @@ public class MainActivity extends Activity {
 
     /** One message from the PC, over Wi-Fi or the cable. Anything unknown is from a newer PC and skipped. */
     private void onPcMessage(byte[] data, int offset, int length) {
+        if (length < 4) return;
         ByteBuffer in = ByteBuffer.wrap(data, offset, length);
-        if (length == PING_SIZE) {
-            rttMs = (System.nanoTime() - in.getLong()) / 1000000;
-            lastPongAt = SystemClock.uptimeMillis();
-        } else if (length >= 4) {
-            int magic = in.getInt();
-            if (length >= AUDIO_HEADER && magic == ByteBuffer.wrap(AUDIO_MAGIC).getInt()) {
-                onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
-            } else if (length >= RUMBLE_SIZE && magic == ByteBuffer.wrap(RUMBLE_MAGIC).getInt()) {
-                // The pad's input doesn't reach the PC from the background, so neither does its rumble.
-                if (running && !backgrounded) {
-                    int rawStrong = in.getShort() & 0xffff, rawWeak = in.getShort() & 0xffff, ms = in.getShort() & 0xffff;
-                    int index = in.hasRemaining() ? (in.get() & 0xff) : 0;
-                    if (index < MAX_PLAYERS) {
-                        PadSlot slot = slots[index];
-                        if (slot.vibration) {
-                            int scale = slot.vibrationStrength;
-                            int strong = rawStrong * scale / 100, weak = rawWeak * scale / 100;
-                            rumble(slot.deviceId, strong, weak, ms);
-                            handler.post(() -> showRumble(slot, strong, weak, ms));
-                        }
+        int magic = in.getInt();
+        if (length >= AUDIO_HEADER && magic == ByteBuffer.wrap(AUDIO_MAGIC).getInt()) {
+            onAudio(in.getShort() & 0xffff, data, in.position(), in.remaining());
+        } else if (length >= RUMBLE_SIZE && magic == ByteBuffer.wrap(RUMBLE_MAGIC).getInt()) {
+            // The pad's input doesn't reach the PC from the background, so neither does its rumble.
+            if (running && !backgrounded) {
+                int rawStrong = in.getShort() & 0xffff, rawWeak = in.getShort() & 0xffff, ms = in.getShort() & 0xffff;
+                int index = in.hasRemaining() ? (in.get() & 0xff) : 0;
+                if (index < MAX_PLAYERS) {
+                    PadSlot slot = slots[index];
+                    if (slot.vibration) {
+                        int scale = slot.vibrationStrength;
+                        int strong = rawStrong * scale / 100, weak = rawWeak * scale / 100;
+                        rumble(slot.deviceId, strong, weak, ms);
+                        handler.post(() -> showRumble(slot, strong, weak, ms));
                     }
                 }
-            } else if (length >= 5 && magic == ByteBuffer.wrap(MIC_CMD_MAGIC).getInt()) {
-                int command = in.get();
-                if (command >= 0 && command <= 2) handler.post(() -> onMicCommand(command));
-            } else if (magic == ByteBuffer.wrap(NAME_MAGIC).getInt()) {
-                String name = shorten(new String(data, in.position(), in.remaining(), StandardCharsets.UTF_8)
-                    .replaceAll("\\p{Cntrl}", "").trim());
-                if (!name.isEmpty()) handler.post(() -> {
-                    if (name.equals(usbPc.name)) return;
-                    usbPc.name = name;
-                    if (backgrounded && currentPc() == usbPc) showKeepAlive();
-                    render();
-                });
             }
+        } else if (length >= 5 && magic == ByteBuffer.wrap(MIC_CMD_MAGIC).getInt()) {
+            int command = in.get();
+            if (command >= 0 && command <= 2) handler.post(() -> onMicCommand(command));
+        } else if (magic == ByteBuffer.wrap(NAME_MAGIC).getInt()) {
+            String name = shorten(new String(data, in.position(), in.remaining(), StandardCharsets.UTF_8)
+                .replaceAll("\\p{Cntrl}", "").trim());
+            if (!name.isEmpty()) handler.post(() -> {
+                if (name.equals(usbPc.name)) return;
+                usbPc.name = name;
+                if (backgrounded && currentPc() == usbPc) showKeepAlive();
+                render();
+            });
+        } else if (length == PING_SIZE) {
+            rttMs = (System.nanoTime() - in.getLong(offset)) / 1000000;
+            lastPongAt = SystemClock.uptimeMillis();
         }
     }
 
@@ -976,8 +978,10 @@ public class MainActivity extends Activity {
         AudioTrack track = newTrack();
         if (track == null) {
             synchronized (audioLock) {
-                audioBroken = true;
-                if (player == self) player = null;
+                if (player == self) {
+                    audioBroken = true;
+                    player = null;
+                }
             }
             return;
         }
@@ -1045,6 +1049,9 @@ public class MainActivity extends Activity {
         } catch (InterruptedException | IllegalStateException stopped) {
         } finally {
             track.release();
+            synchronized (audioLock) {
+                if (player == self) player = null;
+            }
         }
     }
 
@@ -1645,8 +1652,10 @@ public class MainActivity extends Activity {
             } catch (IOException ignored) {
             }
         }
+        nextPing = 0;
         synchronized (lock) {
             target = address;
+            lock.notify();
         }
         targetSince = SystemClock.uptimeMillis();
         lastPongAt = 0;
@@ -2868,8 +2877,15 @@ public class MainActivity extends Activity {
 
     private void finishCapture() {
         if (capture.isEmpty() || screen != REMAP) return;
+        int control = STEP_CONTROLS[step];
+        if (control == L2_BIT || control == R2_BIT) {
+            ButtonMap.pairTriggerAxis(capture, KeyEvent.KEYCODE_BUTTON_L2, ButtonMap.LEFT_TRIGGER,
+                claimed.containsKey(ButtonMap.LEFT_TRIGGER));
+            ButtonMap.pairTriggerAxis(capture, KeyEvent.KEYCODE_BUTTON_R2, ButtonMap.RIGHT_TRIGGER,
+                claimed.containsKey(ButtonMap.RIGHT_TRIGGER));
+        }
         history.add(pending.copy());
-        pending.assign(STEP_CONTROLS[step], capture);
+        pending.assign(control, capture);
         for (int input : capture) claimed.put(input, step);
         stepMapped[step] = true;
         capture.clear();
@@ -2880,6 +2896,7 @@ public class MainActivity extends Activity {
         handler.removeCallbacks(finishCapture);
         capture.clear();
         history.add(pending.copy());
+        pending.assign(STEP_CONTROLS[step], Collections.emptyList());
         stepMapped[step] = false;
         nextStep();
     }

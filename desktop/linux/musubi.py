@@ -3,7 +3,9 @@
 import argparse
 import ctypes
 import json
+import logging
 import os
+import platform
 import select
 import signal
 import socket
@@ -17,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # core.py is sh
 
 import audio
 import core  # noqa: E402
+import system  # noqa: E402
 from core import *  # noqa: F401,F403 (gui.py and the tests read the shared names from here)
 
 try:
@@ -24,7 +27,11 @@ try:
 except ImportError:
     cable = None
 
+log = logging.getLogger('musubi')
 MAX_EFFECTS = 16
+# A phone with an idle controller only talks once a second.
+GAP_LOG_AFTER = 1.5
+SLOW_STEP_AFTER = 0.05
 
 # Bit order matches BUTTON_KEYS in MainActivity.java.
 BUTTONS = [
@@ -68,8 +75,14 @@ class Pad(UInput):
 
 def make_pad(slot=0, name=None):
     name = name or ('Musubi' if slot == 0 else f'Musubi {slot + 1}')
-    return Pad({e.EV_KEY: BUTTONS, e.EV_ABS: AXES, e.EV_FF: [e.FF_RUMBLE]}, name=name, vendor=0x045e,
-               product=0x028e, version=0x110, bustype=e.BUS_USB, max_effects=MAX_EFFECTS)
+    try:
+        pad = Pad({e.EV_KEY: BUTTONS, e.EV_ABS: AXES, e.EV_FF: [e.FF_RUMBLE]}, name=name, vendor=0x045e,
+                  product=0x028e, version=0x110, bustype=e.BUS_USB, max_effects=MAX_EFFECTS)
+    except UInputError as ex:
+        log.error('virtual pad slot %s failed: %s', slot, ex)
+        raise OSError(str(ex)) from ex
+    log.info('virtual pad created: slot %s (%s)', slot, name)
+    return pad
 
 
 class _FfState:
@@ -182,6 +195,25 @@ def run_console(phone_ip):
         bridge.close()
 
 
+def local_ip():
+    """This PC's address on the network, or None. Connecting a UDP socket sends nothing."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(('192.0.2.1', 9))
+            return probe.getsockname()[0]
+    except OSError:
+        return None
+
+
+def status_key(payload):
+    """The status without the numbers that keep moving, so only real changes get logged."""
+    phone = payload['phone']
+    if phone:
+        phone = {key: value for key, value in phone.items() if key != 'rtt'}
+        phone['delay'] = phone.get('delay') is not None
+    return {**payload, 'phone': phone}
+
+
 def sync_mic(mic, hello, wanted):
     """Musubi mic exists while the phone's hello says its mic is on. With no hello, `wanted` (the last choice) keeps it
     for apps like Discord. Returns the new choice."""
@@ -203,23 +235,39 @@ def run_service():
     out = sys.stdout.fileno()
     stdin = sys.stdin.fileno()
     os.set_blocking(out, False)
+    log.info('musubi %s receiver started, %s, python %s', core.VERSION, platform.platform(), platform.python_version())
     try:
         sock = bind_socket()
     except OSError as ex:
+        log.error('UDP bind on port %s failed: %s', PORT, ex)
         write_event(out, {'event': 'error', 'message': str(ex)})
         return
+    log.info('listening on UDP %s, local address %s', PORT, local_ip())
 
+    if cable is None:
+        log.warning('pyusb not installed, USB cable support disabled')
     link = cable.Cable() if cable else None
     sources = [sock, stdin] + ([link.reader] if link else [])
     watching = [False]
     last_input = [[0.0, None] for _ in range(MAX_PLAYERS)]
     sound_enabled = [True]
     mic_wanted = [False]
+    shown = [None]
+    seen = set()
+
+    def log_once(kind, message, *args):
+        if kind not in seen:
+            seen.add(kind)
+            log.info(message, *args)
 
     def send_status():
         cable_error = link.error if link else 'Install python-pyusb to connect phones with a cable.'
-        write_event(out, {'event': 'status', **bridge.status(), 'cable_error': cable_error,
-                           'sound_enabled': sound_enabled[0]})
+        payload = {'event': 'status', **bridge.status(), 'cable_error': cable_error, 'sound_enabled': sound_enabled[0]}
+        key = status_key(payload)
+        if key != shown[0]:
+            shown[0] = key
+            log.info('status %s', payload)
+        write_event(out, payload)
 
     def on_input(slot, state):
         last_input[slot][1] = state
@@ -234,9 +282,11 @@ def run_service():
         last_input[slot][1] = None
 
     def on_rumble(slot, strong, weak):
+        log_once('rumble', 'first rumble: slot %s strong %.2f weak %.2f', slot, strong, weak)
         write_event(out, {'event': 'rumble', 'slot': slot, 'strong': strong, 'weak': weak})
 
     def on_mic(seq, pcm):
+        log_once('mic', 'first mic packet received')
         mic.feed(seq, pcm)
         if watching[0] and pcm and not len(pcm) % 2:
             mic_level.add(pcm)
@@ -252,10 +302,24 @@ def run_service():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     buffered = b''
     next_status = 0
+    last_packet = None
+    longest_step = 0.0
+    recv_errors = 0
+
+    def note_packet(source, now):
+        nonlocal last_packet, longest_step
+        log_once('packet', 'first packet from %s', source)
+        if last_packet is not None and bridge.active is not None and now - last_packet > GAP_LOG_AFTER:
+            log.warning('no packets for %d ms, longest loop step %d ms, %d receive errors',
+                        (now - last_packet) * 1000, longest_step * 1000, recv_errors)
+            longest_step = 0.0
+        last_packet = now
+
     try:
         while True:
             pads = bridge.open_pads()
             readable = select.select(sources + sound.sources() + [pad for _, pad in pads], [], [], TICK)[0]
+            step_start = time.perf_counter()
             # Before the datagrams, which can close this pad.
             for slot, pad in pads:
                 if pad in readable:
@@ -264,12 +328,10 @@ def run_service():
                 for seq, pcm in sound.read():
                     if bridge.wants_audio():
                         bridge.send_to_phone(audio_message(seq, pcm))
+                        log_once('sound', 'first sound packet sent')
                         if watching[0]:
                             levels.add(pcm)
-            if sock in readable:
-                bridge.on_datagram(*sock.recvfrom(MAX_DATAGRAM))
-            if link and link.reader in readable:
-                bridge.on_datagram(link.reader.recv(MAX_DATAGRAM), (USB, 0))
+            # Before datagrams, so an initial allow list from gui.py is applied before any waiting packet.
             if stdin in readable:
                 chunk = os.read(stdin, 4096)
                 if not chunk:
@@ -277,7 +339,10 @@ def run_service():
                 buffered += chunk
                 while b'\n' in buffered:
                     line, buffered = buffered.split(b'\n', 1)
-                    command = json.loads(line)
+                    try:
+                        command = json.loads(line)
+                    except ValueError:
+                        continue
                     if 'allow' in command:
                         bridge.set_allowed(command['allow'])
                     if 'watch' in command:
@@ -289,6 +354,20 @@ def run_service():
                         mic_wanted[0] = bool(command['mic_keep'])
                     if command.get('mic') in (0, 1, 2):
                         bridge.set_mic(command['mic'])
+            if sock in readable:
+                try:
+                    data, addr = sock.recvfrom(MAX_DATAGRAM)
+                except OSError as ex:
+                    recv_errors += 1
+                    if recv_errors % 100 == 1:
+                        log.warning('UDP receive error: %s (%d so far)', ex, recv_errors)
+                else:
+                    note_packet(addr[0], step_start)
+                    bridge.on_datagram(data, addr)
+            if link and link.reader in readable:
+                data = link.reader.recv(MAX_DATAGRAM)
+                note_packet(USB, step_start)
+                bridge.on_datagram(data, (USB, 0))
             bridge.on_tick()
             mic_wanted[0] = sync_mic(mic, bridge.hello, mic_wanted[0])
             sync_sound(sound, sound_enabled[0] and bridge.wants_audio())
@@ -310,10 +389,15 @@ def run_service():
             if now >= next_status:
                 next_status = now + 1
                 send_status()
+            busy = time.perf_counter() - step_start
+            longest_step = max(longest_step, busy)
+            if busy > SLOW_STEP_AFTER:
+                log.warning('slow loop step %d ms', busy * 1000)
     finally:
         mic.stop()
         sound.stop()
         bridge.close()
+        log.info('receiver stopped')
 
 
 def main():
@@ -322,7 +406,12 @@ def main():
     parser.add_argument('--service', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.service:
-        run_service()
+        system.setup_log('musubi.log')
+        try:
+            run_service()
+        except Exception:
+            log.exception('receiver crashed')
+            raise
     elif args.phone_ip:
         run_console(args.phone_ip)
     else:

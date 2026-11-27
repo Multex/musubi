@@ -2,6 +2,7 @@
 import collections
 import errno
 import glob
+import logging
 import socket
 import struct
 import threading
@@ -9,6 +10,10 @@ import time
 
 import usb.core
 import usb.util
+
+log = logging.getLogger('musubi')
+if not log.handlers:
+    log.addHandler(logging.NullHandler())
 
 # These must match res/xml/accessory_filter.xml, or Android won't open the app.
 STRINGS = ['Musubi', 'Musubi', 'your PC', '1',
@@ -119,6 +124,7 @@ class Cable:
                     if self._scan():
                         seen = None  # A phone can stay plugged in after its session ends, so look again.
                 except usb.core.NoBackendError:
+                    log.warning('USB backend unavailable (libusb missing)')
                     self.error = 'Install libusb to connect phones with a cable.'
                     return
             time.sleep(SCAN_INTERVAL)
@@ -133,11 +139,16 @@ class Cable:
                     self._serve(dev)
                     return True
                 if looks_like_phone(dev) and switch(dev):
+                    log.info('switched USB phone %04x:%04x to accessory mode', dev.idVendor, dev.idProduct)
                     continue  # It reconnects as an accessory, and the next scan finds it.
             except usb.core.USBError as ex:
                 if ex.errno == errno.EACCES:
+                    if self.error != NO_ACCESS:
+                        log.warning('USB permission denied for %04x:%04x (udev rule missing)', dev.idVendor,
+                                    dev.idProduct)
                     self.error = NO_ACCESS
                     continue  # Asked again once the user fixes it and plugs in again.
+                log.warning('USB probe/switch failed for %04x:%04x: %s', dev.idVendor, dev.idProduct, ex)
             self.skipped.add(key)
 
     def _serve(self, dev):
@@ -153,8 +164,12 @@ class Cable:
                 intf, custom_match=lambda ep: usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT)
             usb.util.claim_interface(dev, intf)
         except usb.core.USBError as ex:
-            self.error = NO_ACCESS if ex.errno == errno.EACCES else str(ex)
+            error = NO_ACCESS if ex.errno == errno.EACCES else str(ex)
+            if error != self.error:  # Retried every second, so the same failure is logged once.
+                log.warning('USB accessory setup failed: %s', ex)
+            self.error = error
             return
+        log.info('USB accessory connected (%04x:%04x)', dev.idVendor, dev.idProduct)
         self.error = None
         with self.wake:
             self.outbox.clear()
@@ -174,8 +189,8 @@ class Cable:
                         self.send(message)
                     else:
                         self.writer.send(message)
-        except usb.core.USBError:
-            pass  # Unplugged.
+        except usb.core.USBError as ex:
+            log.info('USB accessory disconnected: %s', ex)  # Unplugged.
         finally:
             with self.wake:
                 done.set()
