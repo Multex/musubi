@@ -277,7 +277,10 @@ def run_service():
                 buffered += chunk
                 while b'\n' in buffered:
                     line, buffered = buffered.split(b'\n', 1)
-                    command = json.loads(line)
+                    try:
+                        command = json.loads(line)
+                    except ValueError:
+                        continue
                     if 'allow' in command:
                         bridge.set_allowed(command['allow'])
                     if 'watch' in command:

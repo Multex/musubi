@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
+import os
+import types
 import unittest
+from unittest import mock
 
 import paths  # noqa: F401
 
@@ -71,6 +74,20 @@ class MultiPlayerWindowTest(unittest.TestCase):
             window.overview_controllers_text(((True, 'Xbox'), (True, 'EasySMX'), (True, 'Pad 3'), (False, None))),
             (3, 'Xbox · EasySMX · Pad 3', 'Games see Xbox 360 controllers 1, 2 and 3'),
         )
+
+
+@unittest.skipIf(window is None, 'needs GTK 4')
+class HubPipeTest(unittest.TestCase):
+    def test_corrupt_line_is_skipped_without_unhooking_the_watch(self):
+        received = []
+        stub = types.SimpleNamespace(partial=b'', on_event=received.append, quit=mock.Mock())
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        os.write(w, b'{cut{"event":"present"}\n{"event":"present"}\n')
+        os.close(w)
+        self.assertTrue(window.App.on_hub_output(stub, r, window.GLib.IOCondition.IN))
+        stub.quit.assert_not_called()
+        self.assertEqual(received, [{'event': 'present'}])
 
 
 if __name__ == '__main__':

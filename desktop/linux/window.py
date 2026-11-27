@@ -1216,14 +1216,18 @@ class App(Gtk.Application):
                 self.partial += data
                 while b'\n' in self.partial:
                     line, self.partial = self.partial.split(b'\n', 1)
-                    self.on_event(json.loads(line))
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    self.on_event(event)
                 return True
         self.quit()  # The hub quit or died.
         return False
 
     def send(self, command):
         try:
-            os.write(sys.stdout.fileno(), (json.dumps(command) + '\n').encode())
+            os.write(sys.stdout.fileno(), (json.dumps(command, ensure_ascii=False) + '\n').encode())
         except OSError:
             pass
 

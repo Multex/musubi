@@ -448,7 +448,7 @@ class Bridge:
 def write_event(fd, event):
     """A slow window must never delay the pad, so a full pipe drops this event instead of blocking."""
     try:
-        os.write(fd, (json.dumps(event) + '\n').encode())
+        os.write(fd, (json.dumps(event, ensure_ascii=False) + '\n').encode())
     except BlockingIOError:
         pass
 

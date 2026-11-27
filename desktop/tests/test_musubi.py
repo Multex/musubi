@@ -1169,6 +1169,23 @@ class ServiceTest(unittest.TestCase):
             self.assertEqual(status['pending'], [])
         self.assertTrue(any(status['phone'] and status['phone']['ip'] == '127.0.0.1' for status in statuses))
 
+    def test_write_event_keeps_emoji_status_under_pipe_buf(self):
+        emoji = '🎮' * core.MAX_NAME
+        event = {
+            'event': 'status',
+            'phone': {'ip': '192.168.1.20', 'name': emoji, 'controller': emoji},
+            'pending': [{'ip': f'192.168.1.{30 + i}', 'name': emoji} for i in range(core.MAX_PENDING)],
+        }
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        core.write_event(w, event)
+        raw = os.read(r, 8192)
+        self.assertLessEqual(len(raw), 4096)
+        self.assertNotIn(b'\\ud83c', raw)
+        self.assertIn('🎮'.encode(), raw)
+        self.assertEqual(json.loads(raw), event)
+
 
 if __name__ == '__main__':
     unittest.main()

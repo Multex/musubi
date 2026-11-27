@@ -160,12 +160,15 @@ class Hub(Gio.Application):
         if self.receiver is None:
             return
         try:
-            self.receiver.stdin.write((json.dumps(command) + '\n').encode())
+            self.receiver.stdin.write((json.dumps(command, ensure_ascii=False) + '\n').encode())
         except OSError:
             pass
 
     def on_receiver_line(self, line):
-        event = json.loads(line)
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return
         if event['event'] == 'error':
             self.error = event['message']
             self.send_state()
@@ -223,11 +226,15 @@ class Hub(Gio.Application):
     def send_state(self):
         """Hub-owned state, plus the latest status so the window can draw at once."""
         self.send_window(json.dumps({'event': 'state', 'error': self.error, 'stopped': self.stopped,
-                                     'ignored': sorted(self.ignored), 'page': self.page}).encode())
-        self.send_window(json.dumps(self.status).encode())
+                                     'ignored': sorted(self.ignored), 'page': self.page},
+                                    ensure_ascii=False).encode())
+        self.send_window(json.dumps(self.status, ensure_ascii=False).encode())
 
     def on_window_line(self, line):
-        command = json.loads(line)
+        try:
+            command = json.loads(line)
+        except ValueError:
+            return
         if 'stop' in command:
             self.stop_receiver()
             self.stopped = True
