@@ -65,8 +65,8 @@ jobs:
         shell: pwsh
         run: |
           Invoke-WebRequest 'https://github.com/wingtk/gvsbuild/releases/download/2026.10.0/GTK4_Gvsbuild_2026.10.0_x64.zip' -OutFile gtk.zip
-          # shortcut: the download is pinned by release only, add a SHA256 check like the ViGEmClient one before this ships to users
-          (Get-FileHash gtk.zip -Algorithm SHA256).Hash
+          $hash = (Get-FileHash gtk.zip -Algorithm SHA256).Hash
+          if ($hash -ne '8005B860447E73B10C7F508B1F348E2B6390E01DD61FD5C617B8190A046022FE') { throw "gtk.zip changed: $hash" }
           7z x gtk.zip -oC:\gtk | Out-Null
           $wheel = (Get-ChildItem C:\gtk -Recurse -Filter 'pygobject*.whl' | Select-Object -First 1).Name
           # The wheels only fit the Python they were built with.
@@ -164,7 +164,17 @@ jobs:
         with:
           name: Musubi-app-screen
           path: screens
+      - name: Package the zip
+        shell: pwsh
+        run: |
+          Push-Location dist
+          7z a -tzip Musubi-windows-beta.zip Musubi | Out-Null
+          if ($LASTEXITCODE) { throw '7z failed to package the zip.' }
+          Pop-Location
+          "{0:N1} MB zipped" -f ((Get-Item dist/Musubi-windows-beta.zip).Length / 1MB)
+          (Get-FileHash dist/Musubi-windows-beta.zip -Algorithm SHA256).Hash.ToLower()
       - uses: actions/upload-artifact@v4
         with:
-          name: Musubi-app
-          path: dist/Musubi
+          name: Musubi-windows-beta
+          path: dist/Musubi-windows-beta.zip
+          compression-level: 0
