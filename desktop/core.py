@@ -470,11 +470,14 @@ def load_config(path=CONFIG_FILE):
         config['tray'] = bool(stored.get('tray', True))
         config['sound_enabled'] = bool(stored.get('sound_enabled', True))
         config['mic'] = bool(stored.get('mic', False))
-    except FileNotFoundError:
+    except OSError:
         pass
-    except (OSError, ValueError, AttributeError):
-        # Saving over a file we couldn't read would lose it for good.
-        path.replace(path.with_suffix('.broken'))
+    except (ValueError, AttributeError, TypeError):
+        # Saving over a broken file would lose it for good.
+        try:
+            path.replace(path.with_suffix('.broken'))
+        except OSError:
+            pass
     return config
 
 

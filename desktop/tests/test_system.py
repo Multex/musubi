@@ -91,6 +91,29 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False})
         self.assertEqual(self.path.with_suffix('.broken').read_text(), '{ not json')
 
+    def test_an_unreadable_file_is_left_in_place(self):
+        config = {'phones': {'192.168.1.10': 'LG K40S'}, 'tray': False, 'sound_enabled': False, 'mic': True}
+        save_config(config, self.path)
+        with mock.patch.object(Path, 'read_text', side_effect=PermissionError('locked')):
+            self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False})
+        self.assertTrue(self.path.exists())
+        self.assertFalse(self.path.with_suffix('.broken').exists())
+        self.assertEqual(load_config(self.path), config)
+
+    def test_wrong_json_shape_is_kept_aside(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('{"phones": null}')
+        self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False})
+        self.assertEqual(self.path.with_suffix('.broken').read_text(), '{"phones": null}')
+
+    def test_a_broken_file_whose_rename_fails_still_returns_defaults(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('{ not json')
+        with mock.patch.object(Path, 'replace', side_effect=PermissionError('locked')):
+            self.assertEqual(load_config(self.path), {'phones': {}, 'tray': True, 'sound_enabled': True, 'mic': False})
+        self.assertEqual(self.path.read_text(), '{ not json')
+        self.assertFalse(self.path.with_suffix('.broken').exists())
+
 
 class AutostartTest(unittest.TestCase):
     def test_paths_with_spaces_stay_one_argument(self):
