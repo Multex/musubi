@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import fcntl
 import io
+import json
 import os
+import socket
 import struct
 import subprocess
 import tempfile
@@ -1125,6 +1127,47 @@ class PhoneAudioTest(unittest.TestCase):
         self.pactl.fail = False
         self.sound.start()
         self.assertIs(self.sound.capture, self.capture)
+
+
+class ServiceTest(unittest.TestCase):
+    def test_stdin_allow_is_handled_before_waiting_udp_packets(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(('127.0.0.1', 0))
+        self.addCleanup(sock.close)
+        phone = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(phone.close)
+        phone.sendto(hello(connected=False), sock.getsockname())
+
+        in_r, in_w = os.pipe()
+        out_r, out_w = os.pipe()
+        stdin = os.fdopen(in_r, 'rb')
+        stdout = os.fdopen(out_w, 'wb')
+        out_reader = os.fdopen(out_r, 'rb')
+        self.addCleanup(stdin.close)
+        self.addCleanup(out_reader.close)
+
+        os.write(in_w, b'{"allow": ["127.0.0.1"]}\n')
+        os.close(in_w)
+
+        real_audio, real_mic = audio.PhoneAudio, audio.PhoneMic
+        with mock.patch.object(musubi, 'bind_socket', return_value=sock), \
+                mock.patch.object(musubi, 'cable', None), \
+                mock.patch.object(musubi.signal, 'signal'), \
+                mock.patch.object(audio, 'PhoneAudio', side_effect=lambda: real_audio(run=mock.Mock(return_value=mock.Mock(stdout='')), popen=mock.Mock())), \
+                mock.patch.object(audio, 'PhoneMic', side_effect=lambda: real_mic(run=mock.Mock(return_value=mock.Mock(stdout='')))), \
+                mock.patch.object(musubi.sys, 'stdin', stdin), \
+                mock.patch.object(musubi.sys, 'stdout', stdout):
+            try:
+                musubi.run_service()
+            finally:
+                stdout.close()
+
+        events = [json.loads(line) for line in out_reader.read().splitlines() if line]
+        statuses = [event for event in events if event['event'] == 'status']
+        self.assertTrue(statuses)
+        for status in statuses:
+            self.assertEqual(status['pending'], [])
+        self.assertTrue(any(status['phone'] and status['phone']['ip'] == '127.0.0.1' for status in statuses))
 
 
 if __name__ == '__main__':

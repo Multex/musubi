@@ -269,10 +269,7 @@ def run_service():
                         bridge.send_to_phone(audio_message(seq, pcm))
                         if watching[0]:
                             levels.add(pcm)
-            if sock in readable:
-                bridge.on_datagram(*sock.recvfrom(MAX_DATAGRAM))
-            if link and link.reader in readable:
-                bridge.on_datagram(link.reader.recv(MAX_DATAGRAM), (USB, 0))
+            # Before datagrams, so an initial allow list from gui.py is applied before any waiting packet.
             if stdin in readable:
                 chunk = os.read(stdin, 4096)
                 if not chunk:
@@ -292,6 +289,10 @@ def run_service():
                         mic_wanted[0] = bool(command['mic_keep'])
                     if command.get('mic') in (0, 1, 2):
                         bridge.set_mic(command['mic'])
+            if sock in readable:
+                bridge.on_datagram(*sock.recvfrom(MAX_DATAGRAM))
+            if link and link.reader in readable:
+                bridge.on_datagram(link.reader.recv(MAX_DATAGRAM), (USB, 0))
             bridge.on_tick()
             mic_wanted[0] = sync_mic(mic, bridge.hello, mic_wanted[0])
             sync_sound(sound, sound_enabled[0] and bridge.wants_audio())
