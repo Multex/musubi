@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Musubi: your phone as your PC's Bluetooth hub</title>
+  <meta name="description" content="Pair up to four Bluetooth gamepads with an Android phone and your PC gets a virtual Xbox 360 controller for each one. PC sound can play on the phone's earbuds too. Linux, with a Windows beta.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Musubi">
+  <meta property="og:title" content="Musubi: your phone as your PC's Bluetooth hub">
+  <meta property="og:description" content="Pair up to four Bluetooth gamepads with an Android phone and your PC gets a virtual Xbox 360 controller for each one. Linux, with a Windows beta.">
+  <meta property="og:url" content="https://musubi.ruginit.com/">
+  <meta property="og:image" content="https://musubi.ruginit.com/assets/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Musubi: your phone as the Bluetooth hub your PC doesn't have, with an amber cord linking PC to 4 Xbox pads, PC sound, and phone mic alongside the Android Controllers screen.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Musubi: your phone as your PC's Bluetooth hub">
+  <meta name="twitter:description" content="Pair up to four Bluetooth gamepads with an Android phone and your PC gets a virtual Xbox 360 controller for each one. PC sound can play on the phone's earbuds too. Linux, with a Windows beta.">
+  <meta name="twitter:image" content="https://musubi.ruginit.com/assets/og.png">
+  <meta name="theme-color" content="#0D0C0A">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@700&text=%E7%B5%90%E3%81%B3&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="wrap top">
+    <a class="brand" href="#top">
+      <img src="assets/musubi-transparent.svg" width="44" height="28" alt="">
+      Musubi
+    </a>
+    <nav class="nav" aria-label="Page">
+      <a href="#cord">What it does</a>
+      <a href="#in-use">In use</a>
+      <a href="#download">Download</a>
+      <a href="https://github.com/Multex/musubi">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <div class="wrap hero">
+      <div class="hero-text">
+        <h1>Use your phone as the Bluetooth hub your PC doesn't have.</h1>
+        <p>Pair up to four Bluetooth gamepads with an Android phone. Your PC gets a virtual Xbox 360 controller for each one, and games treat it like a normal pad. I built it because my PC has no Bluetooth and I had an old phone lying around.</p>
+        <div class="btns">
+          <a class="btn pri" href="#download">Download Musubi<small>Linux · Windows beta · Android</small></a>
+          <a class="btn" href="https://github.com/Multex/musubi">Source on GitHub<small>README + releases</small></a>
+        </div>
+        <span class="cap mono">v0.10.1 · 27 Nov 2026 · MIT · free and open source</span>
+      </div>
+      <div class="phone">
+        <img src="assets/home.png" width="460" height="954" fetchpriority="high" alt="Musubi Home screen on Android: a cord from the PC at the top to Controllers with 2 of 4 players, Headphones on the phone speaker with a 170 ms delay, and the mic off.">
+      </div>
+    </div>
+
+    <section id="cord">
+      <div class="wrap">
+        <h2>The cord runs both ways</h2>
+        <p class="muted lead">Your controller's input travels up to the PC. The PC's sound travels back down to your earbuds. The phone sits in the middle, on Wi-Fi or a USB cable.</p>
+
+        <div class="cord">
+          <div class="pc">
+            <span class="pcsq"><i></i></span>
+            <span class="pc-name"><span class="cap">PC</span><b>Your PC</b></span>
+          </div>
+
+          <div class="row">
+            <div class="rail" aria-hidden="true"><div class="line top"></div><div class="node live"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 10V2M2.5 5.5L6 2l3.5 3.5" fill="none" stroke="currentColor" stroke-width="2"/></svg></div><div class="line grow"></div></div>
+            <div class="feature">
+              <div class="feature-text">
+                <span class="cap">Controllers · to PC</span>
+                <h3>Up to four pads, each one a real Xbox 360 controller to your games</h3>
+                <p class="muted">Every pad gets its own player slot. When a game rumbles, the phone vibrates the real pad, with the strong and weak motors kept apart, on controllers Android can vibrate over Bluetooth.</p>
+              </div>
+              <img src="assets/controller.png" width="460" height="954" loading="lazy" alt="Musubi Controllers page on Android: players 1 and 2 connected, player 2's Xbox pad with the left stick, L1 and A lit in amber.">
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="rail" aria-hidden="true"><div class="line top"></div><div class="node live"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 2v8M2.5 6.5L6 10l3.5-3.5" fill="none" stroke="currentColor" stroke-width="2"/></svg></div><div class="line grow"></div></div>
+            <div class="feature">
+              <div class="feature-text">
+                <span class="cap">Sound · from PC</span>
+                <h3>PC sound on the earbuds paired with your phone</h3>
+                <p class="muted">Musubi's own part of the delay is about 70 ms. Bluetooth earbuds add their own on top, so a game or low-latency mode on them helps a lot.</p>
+              </div>
+              <img src="assets/headphones.png" width="460" height="954" loading="lazy" alt="Musubi Headphones screen on Android with amber level meters and a wave showing sound arriving over Wi-Fi.">
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="rail" aria-hidden="true"><div class="line top"></div><div class="node live"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 10V2M2.5 5.5L6 2l3.5 3.5" fill="none" stroke="currentColor" stroke-width="2"/></svg></div></div>
+            <div class="feature last">
+              <div class="feature-text">
+                <span class="cap">Mic · to PC <span class="tag">Linux only</span></span>
+                <h3>Talk through the phone's mic</h3>
+                <p class="muted">It shows up on the PC as "Musubi mic". Your earbuds keep their full sound, because Musubi never uses their mic.</p>
+              </div>
+              <img src="assets/mic.png" width="460" height="954" loading="lazy" alt="Musubi Mic screen on Android: Send my voice is on, the mic drawing fills amber with sound waves and Hearing you below it, and a Mute button.">
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="in-use">
+      <div class="wrap">
+        <h2>Once you're playing</h2>
+        <p class="muted lead">Remap any pad with weird buttons, let the screen go dark while you play, and keep all traffic on your local network.</p>
+
+        <div class="remap">
+          <img src="assets/remap.png" width="1416" height="666" loading="lazy" alt="Musubi remap screen on step 1 of 16: the A button highlighted in warm cream on the controller drawing, with Back, Skip and Cancel remap controls beside it.">
+          <div class="remap-text">
+            <span class="cap">Remap · per controller</span>
+            <h3>Fix scrambled buttons in 16 steps</h3>
+            <p class="muted">Third-party Bluetooth pads don't always map cleanly on Android. Press each button as the app asks, skip the ones your pad doesn't have, and test the layout live before saving. Each controller keeps its own map, stick deadzone and vibration strength.</p>
+          </div>
+        </div>
+
+        <ul class="notes">
+          <li><b>Game mode dims the screen</b>Android only sends controller input to the app in front. Game mode dims the screen and stops drawing the pad, and it turns on by itself after a minute without touching the screen. Sound keeps playing even when you lock the phone.</li>
+          <li><b>Local network, or a USB cable</b>No account and no server in the middle. Approve a phone once on your PC, and save more than one PC to switch from Home. On Linux you can also try a USB cable, which charges the phone while you play. It's still experimental and has worked on one phone so far. Packets aren't encrypted, so stick to a network you trust.</li>
+          <li><b>No ghost controllers</b>Virtual Xbox pads only exist while a controller is actually connected to the phone, and Bluetooth earbuds that expose media buttons as a gamepad are ignored so they never steal a player slot.</li>
+          <li><b>Still early, easy to report</b>Tested on Linux, Windows 10/11 and a handful of Android phones so far. If your pad or phone acts up, <a href="https://github.com/Multex/musubi/issues">open an issue on GitHub</a>. Settings then Open logs gets you the log files to attach.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="download">
+      <div class="wrap two">
+        <div>
+          <h2>Download Musubi</h2>
+          <p class="muted lead">Set up your PC first, then install the Android app on your phone. Free and open source under the MIT license.</p>
+
+          <h3 class="dl-head">1. On your PC</h3>
+          <ul class="get">
+            <li><span class="k"><b>Linux</b><span class="cap">Main version · run <span class="mono">./install.sh</span></span></span><a class="btn" href="https://github.com/Multex/musubi#linux">Linux setup</a></li>
+            <li><span class="k"><b>Windows: ViGEmBus driver</b><span class="cap">Required for virtual Xbox pads</span></span><a class="btn" href="https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0">ViGEmBus 1.22.0</a></li>
+            <!-- Pre-release: update this link with each beta until Windows gets a normal release -->
+            <li><span class="k"><b>Windows: Musubi beta</b><span class="cap mono">v0.10.1-win-beta.1</span></span><a class="btn" href="https://github.com/Multex/musubi/releases/download/v0.10.1-win-beta.1/Musubi-windows-beta.zip">Windows beta (.zip)</a></li>
+          </ul>
+          <p class="readme"><a href="https://github.com/Multex/musubi#windows-beta">Step-by-step Windows setup in the README</a></p>
+
+          <h3 class="dl-head">2. On your phone</h3>
+          <ul class="get">
+            <li><span class="k"><b>Musubi for Android</b><span class="cap mono">v0.10.1 · Android 5.0+</span></span><a class="btn pri" href="https://github.com/Multex/musubi/releases/latest/download/musubi.apk">Download musubi.apk</a></li>
+          </ul>
+          <p class="readme"><a href="https://github.com/Multex/musubi#phone">Phone pairing steps in the README</a></p>
+        </div>
+        <div>
+          <h2 class="h2-small">What works where</h2>
+          <div class="tbox">
+            <table>
+              <thead><tr><th scope="col">Feature</th><th scope="col">Linux</th><th scope="col">Windows (beta)</th></tr></thead>
+              <tbody>
+                <tr><td>Controllers + vibration (up to 4)</td><td>Yes</td><td>Yes, tested with 1 so far</td></tr>
+                <tr><td>PC sound on phone</td><td>Yes</td><td>Yes (default output, 48000 Hz)</td></tr>
+                <tr><td>Phone mic to PC</td><td>Yes</td><td class="no">Planned</td></tr>
+                <tr><td>USB cable</td><td>Experimental</td><td class="no">Planned</td></tr>
+                <tr><td>Start with my PC</td><td>Yes</td><td class="no">Planned</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="cap note">macOS won't work.</p>
+          <img class="shot" src="assets/desktop.png" width="760" height="480" loading="lazy" alt="Musubi on a Linux PC: the Overview page with a Motorola phone on Wi-Fi, 2 of 4 players connected, sound playing on the phone with an 80 ms delay, and the mic off.">
+          <p class="cap note">The Linux desktop app. Linux is the main version.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap name">
+        <span class="kanji" lang="ja">結び</span>
+        <div class="name-text">
+          <h2>Why "Musubi"?</h2>
+          <p class="muted"><i>Musubi</i> means "tying" or "connecting" in Japanese. In <a href="https://anilist.co/anime/21519/Kimi-no-Na-wa/">Your Name</a>, it's the cord that ties people together, even across distance. Your Bluetooth devices and your PC can't reach each other on their own, so the phone becomes the knot in the middle.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap foot">
+      <div class="foot-col">
+        <a class="artist" href="https://www.instagram.com/sr.miaomix/">
+          <img src="assets/sr-miaomix.png" width="160" height="160" loading="lazy" alt="">
+          <span class="artist-text">
+            <span class="cap">The Musubi icon is by</span>
+            <span class="artist-name">@sr.miaomix</span>
+            <span class="muted">Check out her work on Instagram</span>
+          </span>
+        </a>
+        <span class="cap">About AI</span>
+        <p class="muted">AI tools (Claude and Gemini) help write code, debug and explore ideas. Every change is directed by me, read line by line and tested on real phones and PCs before it lands. None of the art is AI-generated.</p>
+      </div>
+      <div class="foot-col">
+        <span class="cap">Links</span>
+        <div class="flinks">
+          <a href="https://github.com/Multex/musubi">Source on GitHub</a>
+          <a href="https://github.com/Multex/musubi/issues">Issues</a>
+          <a href="https://github.com/Multex/musubi/blob/main/LICENSE">MIT license</a>
+          <a href="https://ruginit.com">Made by ruginit</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
