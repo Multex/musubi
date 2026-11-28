@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/musubi-transparent.svg" alt="Musubi" width="135">
+  <a href="https://musubi.ruginit.com"><img src="docs/assets/musubi-transparent.svg" alt="Musubi website" width="135"></a>
 </p>
 
 <h1 align="center">Musubi</h1>
